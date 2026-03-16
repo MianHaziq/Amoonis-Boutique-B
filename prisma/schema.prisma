@@ -1,0 +1,217 @@
+// Amoonis Boutique - Ecommerce Backend Starter
+// https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================
+// USER & ADMIN
+// ============================================
+
+model User {
+  id               String    @id @default(uuid())
+  email            String    @unique
+  firstName        String
+  lastName         String
+  password         String?
+  googleId         String?   @unique
+  avatar           String?
+  role             UserRole  @default(CUSTOMER)
+  status           UserStatus @default(ACTIVE)
+  isEmailVerified  Boolean   @default(false)
+  resetToken       String?
+  resetTokenExpiry DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  cart   Cart?
+  orders Order[]
+}
+
+// ============================================
+// SETTINGS
+// ============================================
+
+model Settings {
+  id                String   @id @default("default")
+  siteName          String   @default("Amoonis Boutique")
+  logo              String?
+  contactEmail      String   @default("contact@example.com")
+  supportEmail      String   @default("support@example.com")
+  currency          String   @default("USD")
+  maintenanceMode   Boolean  @default(false)
+  hiddenPages       String[] @default([])
+  updatedAt         DateTime @updatedAt
+}
+
+// ============================================
+// CONTACT
+// ============================================
+
+model ContactMessage {
+  id        String   @id @default(uuid())
+  firstName String
+  lastName  String?
+  email     String
+  phone     String?
+  subject   String   @default("general")
+  message   String
+  status    String   @default("NEW")
+  adminNote String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ============================================
+// CATEGORY & PRODUCT
+// ============================================
+
+model Category {
+  id            String    @id @default(uuid())
+  title         String
+  description   String?   @db.Text
+  image         String?
+  totalProducts Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  products Product[]
+
+  @@index([title])
+}
+
+model Product {
+  id              String   @id @default(uuid())
+  title           String
+  subtitle        String?
+  description     String?  @db.Text
+  price           Decimal  @db.Decimal(10, 2)
+  discountedPrice Decimal? @db.Decimal(10, 2)
+  categoryId      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  category   Category?     @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  images     ProductImage[]
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@index([categoryId])
+  @@index([title])
+}
+
+model ProductImage {
+  id        String   @id @default(uuid())
+  productId String
+  url       String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@index([productId, sortOrder])
+}
+
+// ============================================
+// CART
+// ============================================
+
+model Cart {
+  id           String    @id @default(uuid())
+  userId       String    @unique
+  orderMessage String?   @db.Text
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items CartItem[]
+
+  @@index([userId])
+}
+
+model CartItem {
+  id        String   @id @default(uuid())
+  cartId    String
+  productId String
+  quantity  Int      @default(1)
+  message   String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cart    Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([cartId, productId])
+  @@index([cartId])
+  @@index([productId])
+}
+
+// ============================================
+// ORDER
+// ============================================
+
+model Order {
+  id           String      @id @default(uuid())
+  userId       String
+  orderMessage String?     @db.Text
+  totalAmount  Decimal     @db.Decimal(10, 2)
+  status       OrderStatus @default(PENDING)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  user  User       @relation(fields: [userId], references: [id], onDelete: Restrict)
+  items OrderItem[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id                String   @id @default(uuid())
+  orderId           String
+  productId         String
+  quantity          Int
+  perProductMessage String?  @db.Text
+  price             Decimal  @db.Decimal(10, 2)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum UserRole {
+  CUSTOMER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
