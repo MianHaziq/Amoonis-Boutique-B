@@ -7,16 +7,20 @@
  * - If NONE exist → `migrate resolve --rolled-back` (next `migrate deploy` will re-apply)
  * - If MIXED → stop; database needs manual repair
  *
+ * P3008 ("already recorded as applied") is treated as success — no-op, continue startup.
+ *
  * Usage (local or Railway one-off with DATABASE_URL set):
  *   node scripts/fix-p3009-ecommerce-migration.js
  *   npx prisma migrate deploy
  */
 require('dotenv').config();
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
+const path = require('path');
 const { Client } = require('pg');
 
 const MIGRATION_NAME = '20260316000000_ecommerce_entities';
 const TABLES = ['Category', 'Product', 'Cart', 'CartItem', 'Order', 'OrderItem'];
+const REPO_ROOT = path.join(__dirname, '..');
 
 async function tableExists(client, name) {
   const r = await client.query(
@@ -29,14 +33,17 @@ async function tableExists(client, name) {
   return r.rows[0].x === true;
 }
 
-async function getMigrationRow(client) {
+/** Any row for this migration with finished_at set = Prisma considers it applied. */
+async function migrationHasFinishedRow(client) {
   const r = await client.query(
-    `SELECT "finished_at", "logs", "rolled_back_at"
+    `SELECT
+       COUNT(*)::int AS cnt,
+       COALESCE(bool_or("finished_at" IS NOT NULL), false) AS has_finished
      FROM "_prisma_migrations"
      WHERE "migration_name" = $1`,
     [MIGRATION_NAME]
   );
-  return r.rows[0] || null;
+  return r.rows[0];
 }
 
 async function migrationsTableExists(client) {
@@ -47,6 +54,42 @@ async function migrationsTableExists(client) {
     ) AS x`
   );
   return r.rows[0].x === true;
+}
+
+/**
+ * Run prisma migrate resolve; treat P3008 as OK (race / already applied).
+ */
+function runMigrateResolve(appliedOrRolledBack) {
+  const flag = appliedOrRolledBack === 'applied' ? '--applied' : '--rolled-back';
+  const res = spawnSync(
+    'npx',
+    ['prisma', 'migrate', 'resolve', flag, MIGRATION_NAME],
+    {
+      cwd: REPO_ROOT,
+      env: process.env,
+      encoding: 'utf8',
+      maxBuffer: 10 * 1024 * 1024,
+    }
+  );
+  const out = `${res.stdout || ''}${res.stderr || ''}`;
+  if (res.status === 0) {
+    console.log(out.trimEnd());
+    return;
+  }
+  if (out.includes('P3008') || /already recorded as applied/i.test(out)) {
+    console.log('[fix-p3009] Migration already applied in DB (P3008). Continuing.');
+    return;
+  }
+  if (
+    out.includes('P3011') ||
+    /already marked as rolled back/i.test(out) ||
+    /already.*rolled back/i.test(out)
+  ) {
+    console.log('[fix-p3009] Migration already rolled back. Continuing.');
+    return;
+  }
+  console.error(out);
+  process.exit(res.status || 1);
 }
 
 async function main() {
@@ -60,7 +103,6 @@ async function main() {
   await client.connect();
 
   let exists;
-  let migrationRow;
   try {
     const hasTable = await migrationsTableExists(client);
     if (!hasTable) {
@@ -68,14 +110,14 @@ async function main() {
       process.exit(0);
     }
 
-    migrationRow = await getMigrationRow(client);
-    if (!migrationRow) {
-      console.log(`[fix-p3009] No row for ${MIGRATION_NAME} — migration not started or not yet recorded. Nothing to fix.`);
+    const { cnt, has_finished: hasFinished } = await migrationHasFinishedRow(client);
+    if (cnt === 0) {
+      console.log(`[fix-p3009] No row for ${MIGRATION_NAME} — nothing to fix.`);
       process.exit(0);
     }
 
-    if (migrationRow.finished_at != null) {
-      console.log('[fix-p3009] Migration is already recorded as finished (applied). Nothing to do.');
+    if (hasFinished === true) {
+      console.log('[fix-p3009] Migration already has finished_at in _prisma_migrations. Nothing to do.');
       process.exit(0);
     }
 
@@ -94,17 +136,15 @@ async function main() {
     process.exit(1);
   }
 
-  let cmd;
   if (count === TABLES.length) {
-    console.log('[fix-p3009] All ecommerce tables exist → marking migration as APPLIED.');
-    cmd = `npx prisma migrate resolve --applied ${MIGRATION_NAME}`;
+    console.log('[fix-p3009] All ecommerce tables exist → marking migration as APPLIED (or no-op if already).');
+    runMigrateResolve('applied');
   } else {
-    console.log('[fix-p3009] No ecommerce tables → marking migration as ROLLED BACK (safe to re-run deploy).');
-    cmd = `npx prisma migrate resolve --rolled-back ${MIGRATION_NAME}`;
+    console.log('[fix-p3009] No ecommerce tables → marking migration as ROLLED BACK (or no-op if already).');
+    runMigrateResolve('rolled-back');
   }
 
-  execSync(cmd, { stdio: 'inherit', env: process.env, cwd: require('path').join(__dirname, '..') });
-  console.log('[fix-p3009] Done. Run: npx prisma migrate deploy');
+  console.log('[fix-p3009] Done. Next: prisma migrate deploy');
 }
 
 main().catch((e) => {
