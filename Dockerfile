@@ -29,8 +29,8 @@ RUN chmod +x start.sh
 
 # Defaults; Railway overrides PORT at runtime — server.js must listen on process.env.PORT
 ENV NODE_ENV=production
-ENV PORT=3000
-EXPOSE 3000
+ENV PORT=5000
+EXPOSE 5000
 
 # Default command (overridden by railway.toml)
 CMD ["sh", "start.sh"]

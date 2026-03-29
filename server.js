@@ -43,7 +43,7 @@ const sectionRoutes = require('./src/routes/section.routes');
 const errorHandler = require('./src/middleware/errorHandler');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 
 // const allowedOrigins = process.env.ALLOWED_ORIGINS
 //   ? process.env.ALLOWED_ORIGINS.split(',')
@@ -121,6 +121,7 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`[SERVER] Local:   http://localhost:${PORT}`);
   console.log(`[SERVER] Swagger: http://localhost:${PORT}/api-docs`);
   console.log(`[SERVER] API v1:  http://localhost:${PORT}/api/v1`);
+  console.log(`[SERVER] For mobile/web clients: set base URL to http://localhost:${PORT}/api/v1 (or your LAN IP for a physical device).`);
 });
 
 server.on('error', (err) => {

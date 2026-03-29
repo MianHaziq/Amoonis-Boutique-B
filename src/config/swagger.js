@@ -1,6 +1,6 @@
 const swaggerJsdoc = require('swagger-jsdoc');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || 'localhost';
 const baseUrl = `http://${HOST}:${PORT}`;
 
