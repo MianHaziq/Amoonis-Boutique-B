@@ -1,5 +1,5 @@
 /**
- * Environment variable validation for amoonis-boutique backend.
+ * Environment variable validation for Amoon Bloom backend.
  * Required vars must be set for the app to start in production.
  */
 
@@ -29,6 +29,8 @@ const optional = [
   'BUNNY_STORAGE_ACCESS_KEY',
   'BUNNY_IMAGES_CDN_HOSTNAME',
   'CONTACT_EMAIL',
+  'FIREBASE_SERVICE_ACCOUNT_JSON',
+  'FIREBASE_SERVICE_ACCOUNT_BASE64',
 ];
 
 function validateEnv() {

@@ -1,6 +1,6 @@
 const prisma = require('../config/db');
 const cartService = require('../services/cart.service');
-const productService = require('../services/product.service');
+const pushNotificationService = require('../services/pushNotification.service');
 
 function decimalToNumber(v) {
   return v == null ? null : Number(v);
@@ -89,17 +89,23 @@ async function createOrder(userId) {
     price: decimalToNumber(i.price),
   }));
 
+  const payload = {
+    id: order.id,
+    userId: order.userId,
+    orderMessage: order.orderMessage,
+    totalAmount: decimalToNumber(order.totalAmount),
+    status: order.status,
+    createdAt: order.createdAt,
+    updatedAt: order.updatedAt,
+    items,
+  };
+
+  pushNotificationService.notifyOrderPlaced(userId, order.id).catch((err) => {
+    console.error('[push] notifyOrderPlaced:', err.message);
+  });
+
   return {
-    order: {
-      id: order.id,
-      userId: order.userId,
-      orderMessage: order.orderMessage,
-      totalAmount: decimalToNumber(order.totalAmount),
-      status: order.status,
-      createdAt: order.createdAt,
-      updatedAt: order.updatedAt,
-      items,
-    },
+    order: payload,
     error: null,
   };
 }
@@ -181,6 +187,16 @@ async function getAllOrdersAdmin(page = 1, limit = 10, status = null) {
 async function updateOrderStatus(orderId, status) {
   const valid = ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
   if (!valid.includes(status)) return null;
+
+  const previous = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { status: true, userId: true },
+  });
+  if (!previous) return null;
+  if (previous.status === status) {
+    return getOrderById(orderId, null);
+  }
+
   const order = await prisma.order.update({
     where: { id: orderId },
     data: { status },
@@ -190,6 +206,11 @@ async function updateOrderStatus(orderId, status) {
       },
     },
   });
+
+  pushNotificationService
+    .notifyOrderStatusChange(order.userId, order.id, status)
+    .catch((err) => console.error('[push] notifyOrderStatusChange:', err.message));
+
   const items = order.items.map((i) => ({
     id: i.id,
     productId: i.productId,
