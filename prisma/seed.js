@@ -24,10 +24,10 @@ async function main() {
 
   await prisma.settings.upsert({
     where: { id: 'default' },
-    update: {},
+    update: { siteName: 'Amoon Bloom' },
     create: {
       id: 'default',
-      siteName: 'Amoonis Boutique',
+      siteName: 'Amoon Bloom',
       contactEmail: 'contact@example.com',
       supportEmail: 'support@example.com',
       currency: 'USD',

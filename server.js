@@ -8,7 +8,7 @@ try {
   process.exit(1);
 }
 
-console.log('[SERVER] Starting amoonis-boutique API...');
+console.log('[SERVER] Starting Amoon Bloom API...');
 console.log('[SERVER] NODE_ENV:', process.env.NODE_ENV);
 console.log('[SERVER] PORT:', process.env.PORT);
 
@@ -90,7 +90,7 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerOption
 // Health
 app.get('/', (req, res) => {
   res.json({
-    message: 'Amoonis Boutique API',
+    message: 'Amoon Bloom API',
     status: 'healthy',
     version: '1.0.0',
     docs: '/api-docs',

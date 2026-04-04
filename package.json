@@ -1,7 +1,7 @@
 {
-  "name": "amoonis-boutique",
+  "name": "amoon-bloom-api",
   "version": "1.0.0",
-  "description": "Ecommerce backend starter - Express, Prisma, PostgreSQL",
+  "description": "Amoon Bloom mobile ecommerce API — Express, Prisma, PostgreSQL, FCM push",
   "main": "server.js",
   "scripts": {
     "start": "prisma migrate deploy && node server.js",
@@ -34,6 +34,7 @@
     "express": "^5.2.1",
     "express-rate-limit": "^7.5.1",
     "express-validator": "^7.2.0",
+    "firebase-admin": "^13.7.0",
     "google-auth-library": "^10.5.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.3",

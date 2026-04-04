@@ -4,10 +4,10 @@ const options = {
   definition: {
     openapi: '3.0.0',
     info: {
-      title: 'Amoonis Boutique API',
+      title: 'Amoon Bloom API',
       version: '1.0.0',
       description:
-        'Ecommerce API for Amoonis Boutique. Use **Authorize** in this page and paste your JWT after signing in. Base URL: **/api/v1** (or **/api**). Managers get **managerPermissions** in the sign-in response for dashboard routing.',
+        'Mobile ecommerce API for **Amoon Bloom**. Use **Authorize** with your JWT. Base URL: **/api/v1** (or **/api**). Customers can register **FCM tokens** and **notification preferences** under **Push notifications**. Managers get **managerPermissions** after sign-in.',
     },
     // Relative URL: Swagger “Try it out” uses the same host as the page (localhost, LAN IP, or production).
     servers: [
@@ -15,7 +15,15 @@ const options = {
     ],
     tags: [
       { name: 'Auth', description: 'Signup, login, Google OAuth, password reset, get/update user by ID' },
-      { name: 'User Profile', description: 'Current user profile by token: get profile, update preferred language, update address' },
+      {
+        name: 'User Profile',
+        description: 'Current user profile by token: profile, preferred language, address',
+      },
+      {
+        name: 'Push notifications',
+        description:
+          '**Amoon Bloom** mobile push (Firebase Cloud Messaging). Register **POST /user/push/token** after login; **GET/PATCH /user/notifications/preferences** for toggles (defaults all on). Server sends order lifecycle pushes when Firebase credentials are configured.',
+      },
       {
         name: 'Users',
         description: [
@@ -54,7 +62,11 @@ const options = {
           'Products (admin CRUD, public list/detail). On create or update, set **categoryId** to the UUID from **GET /categories** to place the product in that category.',
       },
       { name: 'Cart', description: 'User cart (add, update, remove, get)' },
-      { name: 'Orders', description: 'Checkout and order management' },
+      {
+        name: 'Orders',
+        description:
+          'Checkout and order management. Successful checkout triggers an **order placed** push to the customer (if FCM is configured and the user allowed **orderStatus** notifications). Admin status updates send matching pushes.',
+      },
       { name: 'Banners', description: 'Landing page banners (public list; admin add, reorder, delete)' },
       { name: 'Sections', description: 'Admin-created sections for user panel (e.g. Ramadan Deals) with products and categories' },
     ],
@@ -312,6 +324,61 @@ const options = {
               example: 'Dubai',
               description: 'User address city. Optional.',
             },
+          },
+        },
+        PushTokenRegister: {
+          type: 'object',
+          required: ['fcmToken'],
+          properties: {
+            fcmToken: {
+              type: 'string',
+              description: 'FCM registration token from the mobile SDK',
+              example: 'dK3x...long-token...',
+            },
+            platform: {
+              type: 'string',
+              enum: ['IOS', 'ANDROID', 'WEB'],
+              default: 'ANDROID',
+              description: 'Client platform (case-insensitive in API)',
+            },
+          },
+        },
+        PushTokenUnregister: {
+          type: 'object',
+          required: ['fcmToken'],
+          properties: {
+            fcmToken: { type: 'string', description: 'Same token previously registered' },
+          },
+        },
+        NotificationPreferences: {
+          type: 'object',
+          description: 'All default **true** when the row is first created.',
+          properties: {
+            orderStatus: {
+              type: 'boolean',
+              example: true,
+              description: 'Order placed, confirmed, processing, shipped, delivered, cancelled',
+            },
+            promotions: {
+              type: 'boolean',
+              example: true,
+              description: 'Marketing and offers (reserved for future campaigns)',
+            },
+            announcements: {
+              type: 'boolean',
+              example: true,
+              description: 'App and store announcements (reserved for future use)',
+            },
+            updatedAt: { type: 'string', format: 'date-time' },
+          },
+        },
+        NotificationPreferencesPatch: {
+          type: 'object',
+          description: 'Send at least one field; omitted fields stay unchanged.',
+          properties: {
+            orderStatus: { type: 'boolean' },
+            promotions: { type: 'boolean' },
+            announcements: { type: 'boolean' },
           },
         },
         SignupInput: {
