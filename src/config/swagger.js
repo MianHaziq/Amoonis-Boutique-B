@@ -73,6 +73,11 @@ const options = {
       },
       { name: 'Banners', description: 'Landing page banners (public list; admin add, reorder, delete)' },
       { name: 'Sections', description: 'Admin-created sections for user panel (e.g. Ramadan Deals) with products and categories' },
+      {
+        name: 'Admin analytics',
+        description:
+          'Dashboard metrics. **GET /admin/analytics/revenue** — time series + summary. **GET /admin/analytics/kpi** — totals & per-status. **GET /admin/analytics/revenue/by-category** — ranked categories. **GET /admin/analytics/sales/by-day** — each UTC day’s net order count & revenue (zeros filled). Presets include **all_time** (monthly on long horizons). **Admin** or manager with **ORDERS** or **SETTINGS**. **UTC**.',
+      },
     ],
     components: {
       securitySchemes: {
@@ -776,6 +781,177 @@ const options = {
             },
           },
         },
+        RevenueAnalyticsSummary: {
+          type: 'object',
+          description: 'Totals for the selected window. **revenue** excludes CANCELLED orders.',
+          properties: {
+            activeOrderCount: { type: 'integer', description: 'Orders with status other than CANCELLED' },
+            revenue: { type: 'number', description: 'Sum of totalAmount for non-cancelled orders' },
+            averageOrderValue: { type: 'number' },
+            cancelledOrderCount: { type: 'integer' },
+            cancelledRevenue: { type: 'number', description: 'Sum of totalAmount for cancelled orders' },
+            distinctCustomers: { type: 'integer', description: 'Unique userId among non-cancelled orders' },
+          },
+        },
+        RevenueSeriesPoint: {
+          type: 'object',
+          description: 'One time bucket for line or bar charts',
+          properties: {
+            periodStart: { type: 'string', format: 'date-time' },
+            orderCount: { type: 'integer' },
+            revenue: { type: 'number' },
+            cancelledOrderCount: { type: 'integer' },
+            cancelledRevenue: { type: 'number' },
+          },
+        },
+        OrderStatusBucket: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'] },
+            orderCount: { type: 'integer' },
+            revenue: { type: 'number', description: 'Sum of totalAmount for this status in the window' },
+          },
+        },
+        RevenueAnalyticsPayload: {
+          type: 'object',
+          properties: {
+            preset: { type: 'string', nullable: true },
+            presetLabel: { type: 'string' },
+            currency: { type: 'string', example: 'USD', description: 'From site Settings' },
+            range: {
+              type: 'object',
+              properties: {
+                allTime: { type: 'boolean', description: 'True when preset is all_time' },
+                from: { type: 'string', format: 'date-time', nullable: true },
+                toExclusive: { type: 'string', format: 'date-time', nullable: true },
+                timezoneNote: { type: 'string' },
+              },
+            },
+            bucket: { type: 'string', enum: ['hour', 'day', 'week', 'month', 'quarter', 'year'], description: 'date_trunc unit for series (all_time uses month)' },
+            summary: { $ref: '#/components/schemas/RevenueAnalyticsSummary' },
+            series: { type: 'array', items: { $ref: '#/components/schemas/RevenueSeriesPoint' } },
+            byStatus: { type: 'array', items: { $ref: '#/components/schemas/OrderStatusBucket' } },
+          },
+        },
+        KpiStatusSlice: {
+          type: 'object',
+          properties: {
+            orderCount: { type: 'integer' },
+            revenue: { type: 'number' },
+          },
+        },
+        KpiAnalyticsPayload: {
+          type: 'object',
+          description: 'Single-scan order aggregates plus units sold from line items (non-cancelled).',
+          properties: {
+            preset: { type: 'string', nullable: true },
+            presetLabel: { type: 'string' },
+            currency: { type: 'string' },
+            range: { type: 'object' },
+            totals: {
+              type: 'object',
+              properties: {
+                totalOrdersAllStatuses: { type: 'integer' },
+                grossRevenueAllStatuses: { type: 'number', description: 'Sum of order totals including cancelled' },
+                netSalesCount: { type: 'integer', description: 'Orders excluding CANCELLED' },
+                netRevenue: { type: 'number', description: 'Revenue excluding cancelled orders' },
+                averageOrderValue: { type: 'number', description: 'netRevenue / netSalesCount' },
+                unitsSold: { type: 'integer', description: 'Sum of line quantities on non-cancelled orders' },
+                distinctCustomers: { type: 'integer' },
+              },
+            },
+            cancelled: {
+              type: 'object',
+              properties: {
+                orderCount: { type: 'integer' },
+                revenue: { type: 'number' },
+              },
+            },
+            byStatus: {
+              type: 'object',
+              description: 'Fulfillment pipeline only; see **cancelled** for CANCELLED rows',
+              properties: {
+                PENDING: { $ref: '#/components/schemas/KpiStatusSlice' },
+                CONFIRMED: { $ref: '#/components/schemas/KpiStatusSlice' },
+                PROCESSING: { $ref: '#/components/schemas/KpiStatusSlice' },
+                SHIPPED: { $ref: '#/components/schemas/KpiStatusSlice' },
+                DELIVERED: { $ref: '#/components/schemas/KpiStatusSlice' },
+              },
+            },
+          },
+        },
+        CategorySalesRow: {
+          type: 'object',
+          properties: {
+            rank: { type: 'integer' },
+            categoryId: { type: 'string', format: 'uuid', nullable: true },
+            categoryTitle: { type: 'string' },
+            orderCount: { type: 'integer', description: 'Distinct non-cancelled orders touching this category' },
+            revenue: { type: 'number', description: 'Σ (quantity × line price)' },
+            unitsSold: { type: 'integer' },
+            lineItemCount: { type: 'integer' },
+            revenueSharePercent: { type: 'number' },
+          },
+        },
+        CategorySalesAnalyticsPayload: {
+          type: 'object',
+          properties: {
+            preset: { type: 'string', nullable: true },
+            presetLabel: { type: 'string' },
+            currency: { type: 'string' },
+            range: { type: 'object' },
+            note: { type: 'string' },
+            totalNetLineRevenue: { type: 'number' },
+            categories: { type: 'array', items: { $ref: '#/components/schemas/CategorySalesRow' } },
+          },
+        },
+        DailySalesDayPoint: {
+          type: 'object',
+          description: 'One UTC calendar day (or month when granularity is month)',
+          properties: {
+            date: { type: 'string', example: '2026-04-05', description: 'YYYY-MM-DD when granularity is day' },
+            month: { type: 'string', example: '2026-04', description: 'YYYY-MM when granularity is month' },
+            periodStart: { type: 'string', format: 'date-time', description: 'Bucket start (month mode)' },
+            netOrderCount: { type: 'integer', description: 'Non-cancelled orders that day' },
+            netRevenue: { type: 'number' },
+            cancelledOrderCount: { type: 'integer' },
+            cancelledRevenue: { type: 'number' },
+          },
+        },
+        DailySalesSummary: {
+          type: 'object',
+          properties: {
+            periodCount: { type: 'integer', description: 'Number of days (or months) in points' },
+            netOrderCount: { type: 'integer' },
+            netRevenue: { type: 'number' },
+            averageNetRevenuePerPeriod: { type: 'number' },
+            cancelledOrderCount: { type: 'integer' },
+            cancelledRevenue: { type: 'number' },
+            bestDay: {
+              nullable: true,
+              allOf: [{ $ref: '#/components/schemas/DailySalesDayPoint' }],
+              description: 'Highest netRevenue day when granularity is day (omitted or null if flat)',
+            },
+            bestMonth: {
+              nullable: true,
+              allOf: [{ $ref: '#/components/schemas/DailySalesDayPoint' }],
+              description: 'Highest netRevenue month when granularity is month',
+            },
+          },
+        },
+        DailySalesAnalyticsPayload: {
+          type: 'object',
+          properties: {
+            preset: { type: 'string', nullable: true },
+            presetLabel: { type: 'string' },
+            currency: { type: 'string' },
+            range: { type: 'object' },
+            granularity: { type: 'string', enum: ['day', 'month'] },
+            note: { type: 'string' },
+            summary: { $ref: '#/components/schemas/DailySalesSummary' },
+            points: { type: 'array', items: { $ref: '#/components/schemas/DailySalesDayPoint' } },
+          },
+        },
         ApiSuccess: {
           type: 'object',
           properties: {
@@ -832,6 +1008,7 @@ const options = {
     './src/routes/order.routes.js',
     './src/routes/banner.routes.js',
     './src/routes/section.routes.js',
+    './src/routes/analytics.routes.js',
   ],
 };
 
