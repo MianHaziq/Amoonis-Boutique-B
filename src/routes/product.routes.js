@@ -18,7 +18,11 @@ const { publicLimiter } = require('../middleware/rateLimit');
  * /products:
  *   post:
  *     summary: Create a product (admin)
- *     description: Create a new product. Category is optional; admin can assign or change it later via update. Requires admin JWT.
+ *     description: |
+ *       Create a new product.
+ *       **Category:** To put the product in a specific category, add **`categoryId`** (UUID). Open **Categories → GET /categories**, copy the `id` of the desired category, and include it in this body. You can also leave it out and set **`categoryId`** later with **PUT /products/{id}**.
+ *       **Images:** optional `images` array (up to 10 public HTTPS URLs in display order; first = primary thumbnail).
+ *       Upload files with **POST /upload/image** (e.g. `?path=products`), then paste the returned `url` values into `images`.
  *     tags: [Products]
  *     security:
  *       - bearerAuth: []
@@ -28,13 +32,42 @@ const { publicLimiter } = require('../middleware/rateLimit');
  *         application/json:
  *           schema:
  *             $ref: '#/components/schemas/ProductCreate'
- *           example:
- *             title: Summer Dress
- *             subtitle: Light cotton
- *             descriptions: [{ description: "Comfortable summer dress" }]
- *             price: 49.99
- *             discountedPrice: 39.99
- *             quantity: 10
+ *           examples:
+ *             withImages:
+ *               summary: With gallery (recommended)
+ *               value:
+ *                 title: Summer Dress
+ *                 subtitle: Light cotton
+ *                 categoryId: 550e8400-e29b-41d4-a716-446655440000
+ *                 descriptions:
+ *                   - description: Comfortable summer dress
+ *                 price: 49.99
+ *                 discountedPrice: 39.99
+ *                 quantity: 10
+ *                 images:
+ *                   - https://cdn.example.com/products/dress-front.jpg
+ *                   - https://cdn.example.com/products/dress-back.jpg
+ *             inCategory:
+ *               summary: In a specific category (no images)
+ *               description: Use an id from GET /categories
+ *               value:
+ *                 title: Linen Shirt
+ *                 subtitle: Casual fit
+ *                 categoryId: 550e8400-e29b-41d4-a716-446655440000
+ *                 descriptions:
+ *                   - description: Breathable linen
+ *                 price: 59.99
+ *                 quantity: 8
+ *             minimal:
+ *               summary: Text and pricing only
+ *               value:
+ *                 title: Summer Dress
+ *                 subtitle: Light cotton
+ *                 descriptions:
+ *                   - description: Comfortable summer dress
+ *                 price: 49.99
+ *                 discountedPrice: 39.99
+ *                 quantity: 10
  *     responses:
  *       201:
  *         description: Product created
@@ -134,7 +167,11 @@ router.post(
  * /products/{id}:
  *   put:
  *     summary: Update a product (admin)
- *     description: Update product fields or move to another category. Requires admin JWT.
+ *     description: |
+ *       Admin can update **any** product field supported at create time: title, subtitle, price, discountedPrice, **quantity** (stock), **categoryId**, descriptions, images, productOptions.
+ *       **categoryId:** Use the target category’s `id` from **GET /categories** to assign or move the product; omit this field if you are not changing category.
+ *       Send only fields you want to change. **images** / **descriptions** / **productOptions** replace the whole list when sent. New photos: **POST /upload/image** then pass URLs in **images**.
+ *       Requires admin JWT.
  *     tags: [Products]
  *     security:
  *       - bearerAuth: []
@@ -144,18 +181,48 @@ router.post(
  *         required: true
  *         schema: { type: string, format: uuid }
  *     requestBody:
+ *       required: true
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             properties:
- *               title: { type: string }
- *               subtitle: { type: string }
- *               description: { type: string }
- *               image: { type: string }
- *               price: { type: number }
- *               discountedPrice: { type: number }
- *               categoryId: { type: string, format: uuid }
+ *             $ref: '#/components/schemas/ProductUpdate'
+ *           examples:
+ *             fullUpdate:
+ *               summary: Update several fields (incl. stock)
+ *               value:
+ *                 title: Summer Dress — sale
+ *                 subtitle: Light organic cotton
+ *                 price: 44.99
+ *                 discountedPrice: 34.99
+ *                 quantity: 25
+ *                 categoryId: 550e8400-e29b-41d4-a716-446655440000
+ *                 descriptions:
+ *                   - title: Care
+ *                     description: Machine wash cold
+ *                   - description: Relaxed fit
+ *                 images:
+ *                   - https://cdn.example.com/products/dress-front-v2.jpg
+ *                   - https://cdn.example.com/products/dress-detail.jpg
+ *                 productOptions:
+ *                   - title: Size
+ *                     options: ["S", "M", "L", "XL"]
+ *                   - title: Color
+ *                     options: ["Ivory", "Sage"]
+ *             stockOnly:
+ *               summary: Restock / adjust quantity only
+ *               value:
+ *                 quantity: 100
+ *             priceAndStock:
+ *               summary: Price and inventory
+ *               value:
+ *                 price: 49.99
+ *                 discountedPrice: 39.99
+ *                 quantity: 12
+ *             moveToCategory:
+ *               summary: Assign or move to a category
+ *               description: Paste category id from GET /categories
+ *               value:
+ *                 categoryId: 550e8400-e29b-41d4-a716-446655440000
  *     responses:
  *       200:
  *         description: Product updated

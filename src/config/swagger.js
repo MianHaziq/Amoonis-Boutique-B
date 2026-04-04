@@ -48,7 +48,11 @@ const options = {
       },
       { name: 'Upload', description: 'Image upload (Bunny CDN)' },
       { name: 'Categories', description: 'Product categories (admin CRUD, public list)' },
-      { name: 'Products', description: 'Products (admin CRUD, public list/detail)' },
+      {
+        name: 'Products',
+        description:
+          'Products (admin CRUD, public list/detail). On create or update, set **categoryId** to the UUID from **GET /categories** to place the product in that category.',
+      },
       { name: 'Cart', description: 'User cart (add, update, remove, get)' },
       { name: 'Orders', description: 'Checkout and order management' },
       { name: 'Banners', description: 'Landing page banners (public list; admin add, reorder, delete)' },
@@ -445,13 +449,21 @@ const options = {
             price: { type: 'number', example: 49.99 },
             discountedPrice: { type: 'number', nullable: true, example: 39.99 },
             quantity: { type: 'integer', minimum: 0, example: 10, description: 'Stock quantity for admin tracking' },
-            categoryId: { type: 'string', format: 'uuid', nullable: true, description: 'Optional; assign or change later via PUT /products/:id' },
+            categoryId: {
+              type: 'string',
+              format: 'uuid',
+              nullable: true,
+              example: '550e8400-e29b-41d4-a716-446655440000',
+              description:
+                'Optional. UUID of the category this product belongs to. List categories with **GET /categories** (each item has `id`); paste that `id` here. Omit to create uncategorized; change later with **PUT /products/{id}** and `categoryId`. Invalid id → **404**.',
+            },
             images: {
               type: 'array',
               maxItems: 10,
-              items: { type: 'string', format: 'uri' },
-              description: 'Up to 10 image URLs in display order. First = top; reorder in app (e.g. drag 7th to 3rd) then send final order here.',
-              example: ['https://cdn.example.com/1.jpg', 'https://cdn.example.com/2.jpg'],
+              items: { type: 'string', format: 'uri', description: 'Public image URL (e.g. from POST /upload/image)' },
+              description:
+                'Optional. Up to 10 image URLs in display order (first = primary / thumbnail). Upload files via POST /upload/image?path=products, then use the returned urls here.',
+              example: ['https://cdn.example.com/products/1.jpg', 'https://cdn.example.com/products/2.jpg'],
             },
             productOptions: {
               type: 'array',
@@ -464,6 +476,101 @@ const options = {
                   options: { type: 'array', items: { type: 'string' }, example: ['red', 'blue', 'black'] },
                 },
               },
+            },
+          },
+        },
+        ProductUpdate: {
+          type: 'object',
+          description: [
+            'Admin partial update: include **only** fields you want to change; omitted fields stay as-is.',
+            'Updatable fields match create: **title**, **subtitle**, **price**, **discountedPrice**, **quantity** (stock), **categoryId**, **descriptions**, **images**, **productOptions**.',
+            '**Replace semantics:** sending **descriptions**, **images**, or **productOptions** replaces that entire list (use empty array `[]` to clear images or descriptions; options cleared similarly).',
+            'New image files: **POST /upload/image** (e.g. `?path=products`), then put returned URLs in **images**.',
+          ].join(' '),
+          example: {
+            title: 'Summer Dress — sale',
+            subtitle: 'Light organic cotton',
+            price: 44.99,
+            discountedPrice: 34.99,
+            quantity: 25,
+            categoryId: '550e8400-e29b-41d4-a716-446655440000',
+            descriptions: [
+              { title: 'Care', description: 'Machine wash cold' },
+              { description: 'Relaxed fit' },
+            ],
+            images: [
+              'https://cdn.example.com/products/dress-front-v2.jpg',
+              'https://cdn.example.com/products/dress-detail.jpg',
+            ],
+            productOptions: [
+              { title: 'Size', options: ['S', 'M', 'L', 'XL'] },
+              { title: 'Color', options: ['Ivory', 'Sage'] },
+            ],
+          },
+          properties: {
+            title: { type: 'string', example: 'Summer Dress — updated', description: 'Product name' },
+            subtitle: {
+              type: 'string',
+              nullable: true,
+              example: 'Light organic cotton',
+              description: 'Short tagline; send `null` or empty to clear if your client supports it',
+            },
+            descriptions: {
+              type: 'array',
+              description:
+                'When present, **replaces** all descriptions. Same items as POST /products (`description` required per row; `title` optional).',
+              items: {
+                type: 'object',
+                required: ['description'],
+                properties: {
+                  title: { type: 'string', nullable: true, example: 'Materials' },
+                  description: { type: 'string', example: '100% cotton' },
+                },
+              },
+              example: [{ title: 'Care', description: 'Machine wash cold' }, { description: 'Relaxed fit' }],
+            },
+            price: { type: 'number', format: 'float', example: 49.99, description: 'Regular price' },
+            discountedPrice: {
+              type: 'number',
+              format: 'float',
+              nullable: true,
+              example: 39.99,
+              description: 'Sale price; omit to leave unchanged, or set as needed',
+            },
+            quantity: {
+              type: 'integer',
+              minimum: 0,
+              example: 25,
+              description: 'Stock / inventory count (admin). Non-negative integer.',
+            },
+            categoryId: {
+              type: 'string',
+              format: 'uuid',
+              nullable: true,
+              example: '550e8400-e29b-41d4-a716-446655440000',
+              description:
+                'Set or move to another category using the category’s `id` from **GET /categories**. Send `null` to remove the product from any category.',
+            },
+            images: {
+              type: 'array',
+              maxItems: 10,
+              items: { type: 'string', format: 'uri', description: 'Public image URL (e.g. from POST /upload/image)' },
+              description:
+                'When present, **replaces** the full gallery (order = array order, first = thumbnail). Up to 10 URLs. `[]` removes all images.',
+              example: ['https://cdn.example.com/products/1.jpg', 'https://cdn.example.com/products/2.jpg'],
+            },
+            productOptions: {
+              type: 'array',
+              description: 'When present, **replaces** all variant-style options (same shape as create).',
+              items: {
+                type: 'object',
+                required: ['title'],
+                properties: {
+                  title: { type: 'string', example: 'Size' },
+                  options: { type: 'array', items: { type: 'string' }, example: ['S', 'M', 'L'] },
+                },
+              },
+              example: [{ title: 'Size', options: ['S', 'M', 'L'] }, { title: 'Color', options: ['Ivory', 'Sage'] }],
             },
           },
         },
