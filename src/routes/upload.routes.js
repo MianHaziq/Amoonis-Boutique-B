@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { uploadImage } = require('../controllers/upload.controller');
 const { uploadImage: uploadImageMulter } = require('../middleware/upload');
-const { verifyAdmin } = require('../middleware/auth');
+const { verifyAdminOrManager, requireAnyManagerPermission } = require('../middleware/managerAuth');
+const { UPLOAD_RELATED_PERMISSIONS } = require('../constants/managerPermissions');
 
 /**
  * @swagger
@@ -55,7 +56,8 @@ const { verifyAdmin } = require('../middleware/auth');
  */
 router.post(
   '/image',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireAnyManagerPermission([...UPLOAD_RELATED_PERMISSIONS]),
   uploadImageMulter.single('file'),
   uploadImage
 );
