@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { verifyAdmin } = require('../middleware/auth');
+const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const {
   getSettings,
   getPublicSettings,
@@ -45,7 +45,7 @@ router.get('/public', getPublicSettings);
  *       200:
  *         description: Full settings object
  */
-router.get('/', verifyAdmin, getSettings);
+router.get('/', verifyAdminOrManager, requireManagerPermission('SETTINGS'), getSettings);
 
 /**
  * @swagger
@@ -67,6 +67,6 @@ router.get('/', verifyAdmin, getSettings);
  *       200:
  *         description: Settings updated
  */
-router.put('/', verifyAdmin, updateSettings);
+router.put('/', verifyAdminOrManager, requireManagerPermission('SETTINGS'), updateSettings);
 
 module.exports = router;

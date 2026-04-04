@@ -16,8 +16,8 @@ async function getOrderById(req, res, next) {
   try {
     const { id } = req.params;
     const userId = req.userId;
-    const isAdmin = req.isAdmin === true;
-    const order = await orderService.getOrderById(id, isAdmin ? null : userId);
+    const canViewAnyOrder = req.isAdmin === true || req.canViewAllOrders === true;
+    const order = await orderService.getOrderById(id, canViewAnyOrder ? null : userId);
     if (!order) return error(res, 'Order not found', 404);
     return success(res, order, 'Order fetched successfully');
   } catch (err) {

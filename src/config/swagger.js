@@ -6,7 +6,8 @@ const options = {
     info: {
       title: 'Amoonis Boutique API',
       version: '1.0.0',
-      description: 'Ecommerce API: Auth, User Profile, Users, Categories, Products, Cart, Orders, Upload. All routes are under `/api/v1` or `/api`. Use **Authorize** with the JWT from signin for protected endpoints.',
+      description:
+        'Ecommerce API for Amoonis Boutique. Use **Authorize** in this page and paste your JWT after signing in. Base URL: **/api/v1** (or **/api**). Managers get **managerPermissions** in the sign-in response for dashboard routing.',
     },
     servers: [
       // Use relative URL so Swagger works both locally and on hosted environments
@@ -17,7 +18,36 @@ const options = {
     tags: [
       { name: 'Auth', description: 'Signup, login, Google OAuth, password reset, get/update user by ID' },
       { name: 'User Profile', description: 'Current user profile by token: get profile, update preferred language, update address' },
-      { name: 'Users', description: 'User CRUD and stats (admin)' },
+      {
+        name: 'Users',
+        description: [
+          '### User management (admin)',
+          '',
+          'Create and maintain **customer** and **manager** accounts. Every route here requires an **Administrator** JWT. Other roles receive **403 Forbidden**.',
+          '',
+          '### Account types',
+          '',
+          '- **Customer** — Default shopper account. Use when role is omitted or set to CUSTOMER.',
+          '- **Manager** — Staff with restricted API access. Needs a **job title** and a **non-empty permission list**. Managers use the same sign-in flow; the response includes **managerPermissions** for your front-end. The API always enforces permissions server-side.',
+          '',
+          '### Adding a manager (recommended flow)',
+          '',
+          '1. **GET /users/manager-permissions** — Load the catalog (labels + help text) for checkboxes or toggles.',
+          '2. Let the admin pick one or more areas (e.g. orders and products).',
+          '3. **POST /users** — Send role MANAGER, managerTitle, managerPermissions, and optionally an avatar image URL from the upload endpoint.',
+          '4. After the manager signs in, use **managerPermissions** to show or hide sections in your admin app.',
+          '',
+          '### Permission keys (JSON strings, uppercase)',
+          '',
+          'PRODUCTS · ORDERS · CATEGORIES · SECTIONS · BANNERS · CONTACT · SETTINGS',
+          '',
+          'You can assign several at once (for example orders **and** products).',
+          '',
+          '### Important',
+          '',
+          'Administrator accounts **cannot** be created through **POST /users**. Provision the first admin via your seed script or database.',
+        ].join('\n'),
+      },
       { name: 'Upload', description: 'Image upload (Bunny CDN)' },
       { name: 'Categories', description: 'Product categories (admin CRUD, public list)' },
       { name: 'Products', description: 'Products (admin CRUD, public list/detail)' },
@@ -35,68 +65,165 @@ const options = {
         },
       },
       schemas: {
-        User: {
+        ManagerPermissionKey: {
+          type: 'string',
+          enum: ['PRODUCTS', 'ORDERS', 'CATEGORIES', 'SECTIONS', 'BANNERS', 'CONTACT', 'SETTINGS'],
+          description:
+            'Area of the admin API this manager may access. Send these exact uppercase values in `managerPermissions` arrays. Admins bypass checks.',
+        },
+        ManagerPermissionCatalogItem: {
+          type: 'object',
+          description: 'One selectable permission for the “create/edit manager” screen.',
+          properties: {
+            key: { $ref: '#/components/schemas/ManagerPermissionKey' },
+            label: { type: 'string', example: 'Orders', description: 'Short label for UI' },
+            description: {
+              type: 'string',
+              example: 'List all orders, view any order, update order status',
+              description: 'What this permission allows (for tooltips or help text)',
+            },
+          },
+        },
+        ManagerPermissionCatalog: {
           type: 'object',
           properties: {
-            id: {
+            permissions: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/ManagerPermissionCatalogItem' },
+              description: 'All keys the backend accepts; use to build checkboxes before POST/PATCH manager.',
+            },
+          },
+        },
+        User: {
+          type: 'object',
+          description:
+            'Single user as returned by admin user APIs (`GET/POST/PUT /users`, `GET /users/{id}`). `role` and `status` are **title-cased** for display (e.g. `Manager`, `Active`). For managers, `managerPermissions` lists granted API areas; for others they are empty.',
+          properties: {
+            id: { type: 'string', format: 'uuid' },
+            name: { type: 'string', example: 'Sam Lee', description: 'firstName + lastName' },
+            firstName: { type: 'string' },
+            lastName: { type: 'string' },
+            email: { type: 'string', format: 'email' },
+            avatar: {
               type: 'string',
-              format: 'uuid',
-              description: 'User UUID',
+              description: 'Image URL, or two-letter initials if no image is set',
+              example: 'https://cdn.example.com/avatars/sam.jpg',
             },
-            email: {
+            role: {
               type: 'string',
-              format: 'email',
-              description: 'User email',
+              enum: ['Customer', 'Admin', 'Manager'],
+              description: 'Display form of DB role CUSTOMER / ADMIN / MANAGER',
             },
-            firstName: {
+            managerTitle: {
               type: 'string',
-              description: 'User first name',
+              nullable: true,
+              example: 'Operations lead',
+              description: 'Job title; only for managers, otherwise null',
             },
-            lastName: {
-              type: 'string',
-              description: 'User last name',
+            managerPermissions: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/ManagerPermissionKey' },
+              description: 'Granted keys; empty unless role is Manager',
             },
-            isEmailVerified: {
-              type: 'boolean',
-              description: 'Email verification status',
-            },
-            createdAt: {
-              type: 'string',
-              format: 'date-time',
-              description: 'Creation timestamp',
-            },
-            updatedAt: {
-              type: 'string',
-              format: 'date-time',
-              description: 'Last update timestamp',
-            },
+            status: { type: 'string', enum: ['Active', 'Inactive'], description: 'Display form of ACTIVE / INACTIVE' },
+            isEmailVerified: { type: 'boolean' },
+            joinedAt: { type: 'string', format: 'date-time', description: 'Same as createdAt' },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
           },
         },
         UserInput: {
           type: 'object',
           required: ['email', 'firstName', 'lastName', 'password'],
+          description:
+            'Create user (admin). For **MANAGER**, also send `managerTitle` and non-empty `managerPermissions`. **ADMIN** cannot be created here (`403`).',
           properties: {
-            email: {
+            email: { type: 'string', format: 'email' },
+            firstName: { type: 'string' },
+            lastName: { type: 'string' },
+            password: { type: 'string', format: 'password', description: 'Login password for the new account' },
+            role: {
               type: 'string',
-              format: 'email',
-              description: 'User email',
+              enum: ['CUSTOMER', 'MANAGER'],
+              default: 'CUSTOMER',
+              description: 'Use MANAGER for staff with limited API access',
             },
-            firstName: {
+            status: {
               type: 'string',
-              description: 'User first name',
+              enum: ['ACTIVE', 'INACTIVE'],
+              default: 'ACTIVE',
+              description: 'INACTIVE blocks login',
             },
-            lastName: {
+            avatar: {
               type: 'string',
-              description: 'User last name',
+              nullable: true,
+              description: 'Public image URL (upload via `POST /upload/image` first if needed)',
             },
-            password: {
+            managerTitle: {
               type: 'string',
-              description: 'User password',
+              description: '**Required** when `role` is `MANAGER` (e.g. “Inventory specialist”)',
+            },
+            managerPermissions: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/ManagerPermissionKey' },
+              minItems: 1,
+              description: '**Required** when `role` is `MANAGER`; at least one key. Load options from `GET /users/manager-permissions`.',
+            },
+          },
+        },
+        UserUpdateInput: {
+          type: 'object',
+          description:
+            'Partial update (admin). Send only fields to change. If the user is or becomes a **MANAGER**, `managerTitle` and at least one `managerPermissions` must remain valid (see server validation). Clearing role to CUSTOMER/ADMIN clears manager fields.',
+          properties: {
+            email: { type: 'string', format: 'email' },
+            firstName: { type: 'string' },
+            lastName: { type: 'string' },
+            password: { type: 'string', format: 'password', description: 'New password; omit to keep current' },
+            role: { type: 'string', enum: ['CUSTOMER', 'ADMIN', 'MANAGER'] },
+            status: { type: 'string', enum: ['ACTIVE', 'INACTIVE'] },
+            avatar: { type: 'string', nullable: true },
+            managerTitle: { type: 'string', description: 'Required for manager accounts' },
+            managerPermissions: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/ManagerPermissionKey' },
+              minItems: 1,
+              description: 'Replace entire permission set when sent',
+            },
+          },
+        },
+        UserStats: {
+          type: 'object',
+          description: 'Counts for admin dashboard (`GET /users/stats`).',
+          properties: {
+            total: { type: 'integer', example: 120, description: 'All users' },
+            customers: { type: 'integer', example: 100 },
+            admins: { type: 'integer', example: 1 },
+            managers: { type: 'integer', example: 5, description: 'Users with role MANAGER' },
+            active: { type: 'integer', example: 115, description: 'status ACTIVE' },
+            inactive: { type: 'integer', example: 5, description: 'status INACTIVE' },
+          },
+        },
+        ChangeUserRoleInput: {
+          type: 'object',
+          required: ['role'],
+          description:
+            'Change role (admin). When setting **MANAGER**, you must include `managerTitle` and `managerPermissions` (≥1). Other roles clear manager fields.',
+          properties: {
+            role: { type: 'string', enum: ['CUSTOMER', 'ADMIN', 'MANAGER'] },
+            managerTitle: { type: 'string', description: 'Required if role is MANAGER' },
+            managerPermissions: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/ManagerPermissionKey' },
+              minItems: 1,
+              description: 'Required if role is MANAGER',
             },
           },
         },
         AuthUser: {
           type: 'object',
+          description:
+            'User object inside auth responses (signup/signin). For **MANAGER**, includes managerTitle and managerPermissions (same keys as GET /users/manager-permissions). Other roles use null and [].',
           properties: {
             id: {
               type: 'string',
@@ -112,6 +239,14 @@ const options = {
             },
             lastName: {
               type: 'string',
+            },
+            role: { type: 'string', enum: ['CUSTOMER', 'ADMIN', 'MANAGER'], description: 'Raw DB enum (not title-cased)' },
+            status: { type: 'string', enum: ['ACTIVE', 'INACTIVE'] },
+            managerTitle: { type: 'string', nullable: true },
+            managerPermissions: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/ManagerPermissionKey' },
+              description: 'Populated when role is MANAGER',
             },
             isEmailVerified: {
               type: 'boolean',
@@ -135,7 +270,13 @@ const options = {
             firstName: { type: 'string', description: 'First name' },
             lastName: { type: 'string', description: 'Last name' },
             avatar: { type: 'string', nullable: true, description: 'Profile image URL' },
-            role: { type: 'string', enum: ['CUSTOMER', 'ADMIN'], description: 'User role' },
+            role: { type: 'string', enum: ['CUSTOMER', 'ADMIN', 'MANAGER'], description: 'User role' },
+            managerTitle: { type: 'string', nullable: true, description: 'Job title when role is MANAGER' },
+            managerPermissions: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Permission keys when role is MANAGER; empty for other roles',
+            },
             status: { type: 'string', enum: ['ACTIVE', 'INACTIVE'], description: 'Account status' },
             isEmailVerified: { type: 'boolean', description: 'Email verification status' },
             preferredLanguage: { type: 'string', nullable: true, example: 'en', description: 'User preferred language code (e.g. en, ar)' },
