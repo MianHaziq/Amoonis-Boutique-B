@@ -2,7 +2,7 @@ const express = require('express');
 const { body, param } = require('express-validator');
 const router = express.Router();
 const sectionController = require('../controllers/section.controller');
-const { verifyAdmin } = require('../middleware/auth');
+const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors } = require('../middleware/validate');
 
 /**
@@ -120,7 +120,7 @@ const createValidation = [
   body('categoryIds.*').optional().isUUID().withMessage('Each categoryId must be a valid UUID'),
   body('sortOrder').optional().isInt({ min: 0 }).withMessage('sortOrder must be a non-negative integer'),
 ];
-router.post('/', verifyAdmin, createValidation, handleValidationErrors, sectionController.createSection);
+router.post('/', verifyAdminOrManager, requireManagerPermission('SECTIONS'), createValidation, handleValidationErrors, sectionController.createSection);
 
 /**
  * @swagger
@@ -163,7 +163,7 @@ const updateValidation = [
   body('categoryIds').optional().isArray().withMessage('categoryIds must be an array'),
   body('categoryIds.*').optional().isUUID().withMessage('Each categoryId must be a valid UUID'),
 ];
-router.put('/:id', verifyAdmin, updateValidation, handleValidationErrors, sectionController.updateSection);
+router.put('/:id', verifyAdminOrManager, requireManagerPermission('SECTIONS'), updateValidation, handleValidationErrors, sectionController.updateSection);
 
 /**
  * @swagger
@@ -186,7 +186,8 @@ router.put('/:id', verifyAdmin, updateValidation, handleValidationErrors, sectio
  */
 router.delete(
   '/:id',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireManagerPermission('SECTIONS'),
   [param('id').isUUID().withMessage('Valid section ID required')],
   handleValidationErrors,
   sectionController.deleteSection

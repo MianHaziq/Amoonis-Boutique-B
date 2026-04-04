@@ -16,6 +16,22 @@ const generateToken = (userId, role) => {
   });
 };
 
+function authSessionUserFields(user) {
+  const base = {
+    id: user.id,
+    email: user.email,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    role: user.role,
+    status: user.status,
+    managerTitle: user.role === 'MANAGER' ? user.managerTitle || null : null,
+    managerPermissions: user.role === 'MANAGER' ? user.managerPermissions || [] : [],
+  };
+  if (user.avatar != null) base.avatar = user.avatar;
+  if (user.isEmailVerified != null) base.isEmailVerified = user.isEmailVerified;
+  return base;
+}
+
 // Helper: Send email
 const sendEmail = async (to, subject, html) => {
   const transporter = nodemailer.createTransport({
@@ -88,16 +104,13 @@ const signin = async (req, res, next) => {
       return error(res, 'Invalid email or password', 401);
     }
 
+    if (user.status === 'INACTIVE') {
+      return error(res, 'Your account has been deactivated. Please contact support.', 403);
+    }
+
     const token = generateToken(user.id, user.role);
     return success(res, {
-      user: {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-        status: user.status,
-      },
+      user: authSessionUserFields(user),
       token,
     }, 'Login successful', 200);
   } catch (err) {
@@ -210,16 +223,7 @@ const googleLogin = async (req, res, next) => {
 
     const token = generateToken(user.id, user.role);
     return success(res, {
-      user: {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        avatar: user.avatar,
-        role: user.role,
-        status: user.status,
-        isEmailVerified: user.isEmailVerified,
-      },
+      user: authSessionUserFields(user),
       token,
       isNewUser,
     }, isNewUser ? 'Account created successfully' : 'Google login successful', 200);
@@ -464,6 +468,8 @@ const getProfile = async (req, res, next) => {
         role: true,
         status: true,
         isEmailVerified: true,
+        managerTitle: true,
+        managerPermissions: true,
         preferredLanguage: true,
         addressCountry: true,
         addressCity: true,
@@ -564,6 +570,8 @@ const getMe = async (req, res, next) => {
         status: true,
         avatar: true,
         isEmailVerified: true,
+        managerTitle: true,
+        managerPermissions: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -577,6 +585,8 @@ const getMe = async (req, res, next) => {
 
     return success(res, {
       ...userData,
+      managerTitle: userData.role === 'MANAGER' ? userData.managerTitle : null,
+      managerPermissions: userData.role === 'MANAGER' ? userData.managerPermissions || [] : [],
       hasPassword: !!password,
       isGoogleUser: !!googleId,
       isAppleUser: !!appleId,

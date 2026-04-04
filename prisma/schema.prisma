@@ -23,6 +23,8 @@ model User {
   appleId            String?   @unique
   avatar             String?
   role               UserRole  @default(CUSTOMER)
+  managerTitle       String?
+  managerPermissions ManagerPermission[] @default([])
   status             UserStatus @default(ACTIVE)
   isEmailVerified    Boolean   @default(false)
   preferredLanguage String?
@@ -298,6 +300,17 @@ model OrderItem {
 enum UserRole {
   CUSTOMER
   ADMIN
+  MANAGER
+}
+
+enum ManagerPermission {
+  PRODUCTS
+  ORDERS
+  CATEGORIES
+  SECTIONS
+  BANNERS
+  CONTACT
+  SETTINGS
 }
 
 enum UserStatus {

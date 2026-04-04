@@ -2,7 +2,7 @@ const express = require('express');
 const { body, param } = require('express-validator');
 const router = express.Router();
 const bannerController = require('../controllers/banner.controller');
-const { verifyAdmin } = require('../middleware/auth');
+const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors } = require('../middleware/validate');
 
 /**
@@ -138,7 +138,7 @@ const addValidation = [
     return true;
   }),
 ];
-router.post('/', verifyAdmin, addValidation, handleValidationErrors, bannerController.addBanners);
+router.post('/', verifyAdminOrManager, requireManagerPermission('BANNERS'), addValidation, handleValidationErrors, bannerController.addBanners);
 
 /**
  * @swagger
@@ -194,7 +194,7 @@ const orderValidation = [
     .withMessage('order must be a non-empty array of banner IDs'),
   body('order.*').isUUID().withMessage('Each order item must be a valid UUID'),
 ];
-router.patch('/order', verifyAdmin, orderValidation, handleValidationErrors, bannerController.updateOrder);
+router.patch('/order', verifyAdminOrManager, requireManagerPermission('BANNERS'), orderValidation, handleValidationErrors, bannerController.updateOrder);
 
 /**
  * @swagger
@@ -235,7 +235,8 @@ router.patch('/order', verifyAdmin, orderValidation, handleValidationErrors, ban
  */
 router.delete(
   '/:id',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireManagerPermission('BANNERS'),
   [param('id').isUUID().withMessage('Valid banner ID required')],
   handleValidationErrors,
   bannerController.deleteBanner

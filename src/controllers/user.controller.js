@@ -1,6 +1,10 @@
 const prisma = require('../config/db');
 const bcrypt = require('bcryptjs');
 const { success, error } = require('../utils/response');
+const {
+  normalizeManagerPermissions,
+  MANAGER_PERMISSION_CATALOG,
+} = require('../constants/managerPermissions');
 
 /**
  * Capitalize first letter, lowercase rest (e.g., "ADMIN" -> "Admin")
@@ -30,6 +34,8 @@ const transformUser = (user) => ({
   email: user.email,
   avatar: user.avatar || getAvatarInitials(user.firstName, user.lastName),
   role: capitalize(user.role) || 'Customer',
+  managerTitle: user.role === 'MANAGER' ? user.managerTitle || null : null,
+  managerPermissions: user.role === 'MANAGER' ? user.managerPermissions || [] : [],
   status: capitalize(user.status) || 'Active',
   isEmailVerified: user.isEmailVerified,
   joinedAt: user.createdAt,
@@ -44,10 +50,43 @@ const transformUser = (user) => ({
  */
 const createUser = async (req, res, next) => {
   try {
-    const { email, firstName, lastName, password, role, status, avatar } = req.body;
+    const {
+      email,
+      firstName,
+      lastName,
+      password,
+      role,
+      status,
+      avatar,
+      managerTitle,
+      managerPermissions,
+    } = req.body;
 
     if (!email || !firstName || !lastName || !password) {
       return error(res, 'Email, first name, last name, and password are required', 400);
+    }
+
+    const resolvedRole = (role && String(role).toUpperCase()) || 'CUSTOMER';
+
+    if (resolvedRole === 'ADMIN') {
+      return error(res, 'Administrator accounts cannot be created through this API', 403);
+    }
+
+    if (!['CUSTOMER', 'MANAGER'].includes(resolvedRole)) {
+      return error(res, 'Invalid role. Allowed values: CUSTOMER, MANAGER', 400);
+    }
+
+    let managerData = {};
+    if (resolvedRole === 'MANAGER') {
+      const title = managerTitle != null ? String(managerTitle).trim() : '';
+      if (!title) {
+        return error(res, 'managerTitle is required when creating a manager', 400);
+      }
+      const norm = normalizeManagerPermissions(managerPermissions);
+      if (!norm.ok) {
+        return error(res, norm.message, 400);
+      }
+      managerData = { managerTitle: title, managerPermissions: norm.value };
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
@@ -58,9 +97,10 @@ const createUser = async (req, res, next) => {
         firstName,
         lastName,
         password: hashedPassword,
-        role: role?.toUpperCase() || 'CUSTOMER',
+        role: resolvedRole,
         status: status?.toUpperCase() || 'ACTIVE',
         avatar: avatar || null,
+        ...managerData,
       },
     });
 
@@ -169,9 +209,18 @@ const getUserById = async (req, res, next) => {
 const updateUser = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { email, firstName, lastName, password, role, status, avatar } = req.body;
+    const {
+      email,
+      firstName,
+      lastName,
+      password,
+      role,
+      status,
+      avatar,
+      managerTitle,
+      managerPermissions,
+    } = req.body;
 
-    // Check user exists
     const existingUser = await prisma.user.findUnique({
       where: { id },
     });
@@ -180,17 +229,52 @@ const updateUser = async (req, res, next) => {
       return error(res, 'User not found', 404);
     }
 
+    const nextRole = role ? String(role).toUpperCase() : existingUser.role;
+
+    if (role && !['CUSTOMER', 'ADMIN', 'MANAGER'].includes(nextRole)) {
+      return error(res, 'Invalid role', 400);
+    }
+
     const updateData = {};
 
     if (email) updateData.email = email;
     if (firstName) updateData.firstName = firstName;
     if (lastName) updateData.lastName = lastName;
-    if (role) updateData.role = role.toUpperCase();
     if (status) updateData.status = status.toUpperCase();
     if (avatar !== undefined) updateData.avatar = avatar;
 
     if (password) {
       updateData.password = await bcrypt.hash(password, 12);
+    }
+
+    if (nextRole === 'MANAGER') {
+      const title =
+        managerTitle !== undefined
+          ? String(managerTitle).trim()
+          : (existingUser.managerTitle || '');
+      let perms = existingUser.managerPermissions || [];
+      if (managerPermissions !== undefined) {
+        const norm = normalizeManagerPermissions(managerPermissions);
+        if (!norm.ok) {
+          return error(res, norm.message, 400);
+        }
+        perms = norm.value;
+      }
+      if (!title) {
+        return error(res, 'managerTitle is required for managers', 400);
+      }
+      if (!perms || perms.length === 0) {
+        return error(res, 'At least one permission is required for managers', 400);
+      }
+      updateData.managerTitle = title;
+      updateData.managerPermissions = perms;
+    } else {
+      updateData.managerTitle = null;
+      updateData.managerPermissions = [];
+    }
+
+    if (role) {
+      updateData.role = nextRole;
     }
 
     const user = await prisma.user.update({
@@ -274,15 +358,16 @@ const toggleUserStatus = async (req, res, next) => {
 const changeUserRole = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { role } = req.body;
+    const { role, managerTitle, managerPermissions } = req.body;
 
     if (!role) {
       return error(res, 'Role is required', 400);
     }
 
-    const validRoles = ['CUSTOMER', 'ADMIN'];
-    if (!validRoles.includes(role.toUpperCase())) {
-      return error(res, 'Invalid role. Must be CUSTOMER or ADMIN', 400);
+    const upper = String(role).toUpperCase();
+    const validRoles = ['CUSTOMER', 'ADMIN', 'MANAGER'];
+    if (!validRoles.includes(upper)) {
+      return error(res, `Invalid role. Must be one of: ${validRoles.join(', ')}`, 400);
     }
 
     const user = await prisma.user.findUnique({
@@ -293,12 +378,30 @@ const changeUserRole = async (req, res, next) => {
       return error(res, 'User not found', 404);
     }
 
+    let data = { role: upper };
+
+    if (upper === 'MANAGER') {
+      const title = managerTitle != null ? String(managerTitle).trim() : '';
+      if (!title) {
+        return error(res, 'managerTitle is required when assigning the manager role', 400);
+      }
+      const norm = normalizeManagerPermissions(managerPermissions);
+      if (!norm.ok) {
+        return error(res, norm.message, 400);
+      }
+      data.managerTitle = title;
+      data.managerPermissions = norm.value;
+    } else {
+      data.managerTitle = null;
+      data.managerPermissions = [];
+    }
+
     const updatedUser = await prisma.user.update({
       where: { id },
-      data: { role: role.toUpperCase() },
+      data,
     });
 
-    return success(res, transformUser(updatedUser), `User role changed to ${role}`, 200);
+    return success(res, transformUser(updatedUser), `User role changed to ${upper}`, 200);
   } catch (err) {
     next(err);
   }
@@ -311,11 +414,12 @@ const changeUserRole = async (req, res, next) => {
  */
 const getUserStats = async (req, res, next) => {
   try {
-    const [totalUsers, customers, admins, activeUsers, inactiveUsers] =
+    const [totalUsers, customers, admins, managers, activeUsers, inactiveUsers] =
       await Promise.all([
         prisma.user.count(),
         prisma.user.count({ where: { role: 'CUSTOMER' } }),
         prisma.user.count({ where: { role: 'ADMIN' } }),
+        prisma.user.count({ where: { role: 'MANAGER' } }),
         prisma.user.count({ where: { status: 'ACTIVE' } }),
         prisma.user.count({ where: { status: 'INACTIVE' } }),
       ]);
@@ -324,9 +428,28 @@ const getUserStats = async (req, res, next) => {
       total: totalUsers,
       customers,
       admins,
+      managers,
       active: activeUsers,
       inactive: inactiveUsers,
     }, 'Stats fetched successfully', 200);
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * @desc    List valid manager permission keys for admin UI
+ * @route   GET /api/users/manager-permissions
+ * @access  Admin
+ */
+const getManagerPermissionCatalog = async (req, res, next) => {
+  try {
+    return success(
+      res,
+      { permissions: [...MANAGER_PERMISSION_CATALOG] },
+      'Manager permission catalog fetched successfully',
+      200
+    );
   } catch (err) {
     next(err);
   }
@@ -341,4 +464,5 @@ module.exports = {
   toggleUserStatus,
   changeUserRole,
   getUserStats,
+  getManagerPermissionCatalog,
 };

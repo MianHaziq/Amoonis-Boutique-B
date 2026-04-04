@@ -2,7 +2,7 @@ const express = require('express');
 const { body, param } = require('express-validator');
 const router = express.Router();
 const categoryController = require('../controllers/category.controller');
-const { verifyAdmin } = require('../middleware/auth');
+const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors } = require('../middleware/validate');
 const { publicLimiter } = require('../middleware/rateLimit');
 
@@ -73,7 +73,8 @@ const idParam = [param('id').isUUID().withMessage('Valid category ID required')]
 
 router.post(
   '/',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireManagerPermission('CATEGORIES'),
   createValidation,
   handleValidationErrors,
   categoryController.createCategory
@@ -114,7 +115,8 @@ router.post(
  */
 router.put(
   '/:id',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireManagerPermission('CATEGORIES'),
   updateValidation,
   handleValidationErrors,
   categoryController.updateCategory
@@ -144,7 +146,8 @@ router.put(
  */
 router.delete(
   '/:id',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireManagerPermission('CATEGORIES'),
   idParam,
   handleValidationErrors,
   categoryController.deleteCategory

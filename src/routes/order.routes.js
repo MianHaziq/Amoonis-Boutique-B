@@ -2,7 +2,12 @@ const express = require('express');
 const { body, param, query } = require('express-validator');
 const router = express.Router();
 const orderController = require('../controllers/order.controller');
-const { verifyToken, verifyAdmin } = require('../middleware/auth');
+const { verifyToken } = require('../middleware/auth');
+const {
+  verifyAdminOrManager,
+  requireManagerPermission,
+  attachOrderStaffAccess,
+} = require('../middleware/managerAuth');
 const { handleValidationErrors } = require('../middleware/validate');
 const { authLimiter } = require('../middleware/rateLimit');
 
@@ -92,7 +97,8 @@ router.post(
  */
 router.get(
   '/',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireManagerPermission('ORDERS'),
   [
     query('page').optional().isInt({ min: 1 }),
     query('limit').optional().isInt({ min: 1, max: 100 }),
@@ -138,6 +144,7 @@ router.get(
 router.get(
   '/:id',
   verifyToken,
+  attachOrderStaffAccess,
   authLimiter,
   idParam,
   handleValidationErrors,
@@ -177,7 +184,8 @@ router.get(
  */
 router.patch(
   '/:id/status',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireManagerPermission('ORDERS'),
   idParam,
   statusBody,
   handleValidationErrors,

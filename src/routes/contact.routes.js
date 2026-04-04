@@ -10,7 +10,7 @@ const {
   addAdminNote,
   deleteMessage,
 } = require('../controllers/contact.controller');
-const { verifyAdmin } = require('../middleware/auth');
+const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors } = require('../middleware/validate');
 
 /**
@@ -86,7 +86,8 @@ router.post('/', contactValidation, handleValidationErrors, submitContact);
  *       200:
  *         description: Message stats by status
  */
-router.get('/admin/stats', verifyAdmin, getMessageStats);
+router.get('/admin/stats', verifyAdminOrManager,
+  requireManagerPermission('CONTACT'), getMessageStats);
 
 /**
  * @swagger
@@ -120,7 +121,8 @@ router.get('/admin/stats', verifyAdmin, getMessageStats);
  *       200:
  *         description: List of contact messages with pagination
  */
-router.get('/admin/messages', verifyAdmin, getAllMessages);
+router.get('/admin/messages', verifyAdminOrManager,
+  requireManagerPermission('CONTACT'), getAllMessages);
 
 /**
  * @swagger
@@ -142,7 +144,8 @@ router.get('/admin/messages', verifyAdmin, getAllMessages);
  *       404:
  *         description: Message not found
  */
-router.get('/admin/:id', verifyAdmin, getMessageById);
+router.get('/admin/:id', verifyAdminOrManager,
+  requireManagerPermission('CONTACT'), getMessageById);
 
 /**
  * @swagger
@@ -174,7 +177,8 @@ router.get('/admin/:id', verifyAdmin, getMessageById);
  *       200:
  *         description: Status updated
  */
-router.patch('/admin/:id/status', verifyAdmin, updateMessageStatus);
+router.patch('/admin/:id/status', verifyAdminOrManager,
+  requireManagerPermission('CONTACT'), updateMessageStatus);
 
 /**
  * @swagger
@@ -203,7 +207,8 @@ router.patch('/admin/:id/status', verifyAdmin, updateMessageStatus);
  *       200:
  *         description: Note updated
  */
-router.patch('/admin/:id/note', verifyAdmin, addAdminNote);
+router.patch('/admin/:id/note', verifyAdminOrManager,
+  requireManagerPermission('CONTACT'), addAdminNote);
 
 /**
  * @swagger
@@ -225,6 +230,7 @@ router.patch('/admin/:id/note', verifyAdmin, addAdminNote);
  *       404:
  *         description: Message not found
  */
-router.delete('/admin/:id', verifyAdmin, deleteMessage);
+router.delete('/admin/:id', verifyAdminOrManager,
+  requireManagerPermission('CONTACT'), deleteMessage);
 
 module.exports = router;

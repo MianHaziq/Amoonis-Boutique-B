@@ -2,7 +2,7 @@ const express = require('express');
 const { body, param, query } = require('express-validator');
 const router = express.Router();
 const productController = require('../controllers/product.controller');
-const { verifyAdmin } = require('../middleware/auth');
+const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors } = require('../middleware/validate');
 const { publicLimiter } = require('../middleware/rateLimit');
 
@@ -122,7 +122,8 @@ const pagination = [
 
 router.post(
   '/',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireManagerPermission('PRODUCTS'),
   createValidation,
   handleValidationErrors,
   productController.createProduct
@@ -163,7 +164,8 @@ router.post(
  */
 router.put(
   '/:id',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireManagerPermission('PRODUCTS'),
   updateValidation,
   handleValidationErrors,
   productController.updateProduct
@@ -190,7 +192,8 @@ router.put(
  */
 router.delete(
   '/:id',
-  verifyAdmin,
+  verifyAdminOrManager,
+  requireManagerPermission('PRODUCTS'),
   idParam,
   handleValidationErrors,
   productController.deleteProduct

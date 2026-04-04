@@ -69,6 +69,21 @@ const swaggerOptions = {
     tryItOutEnabled: true,
     persistAuthorization: true,
   },
+  // Readable tag descriptions (Markdown): headings, lists, softer inline code
+  customCss: `
+    .swagger-ui .markdown p { margin: 0.4em 0 0.65em; line-height: 1.6; max-width: 56rem; }
+    .swagger-ui .markdown h1, .swagger-ui .markdown h2, .swagger-ui .markdown h3 {
+      margin: 1em 0 0.45em; font-weight: 600; letter-spacing: 0.02em;
+      border-bottom: 1px solid rgba(128,128,128,0.28); padding-bottom: 0.35em;
+    }
+    .swagger-ui .markdown h3 { font-size: 1.06em; margin-top: 0.9em; }
+    .swagger-ui .markdown ul { margin: 0.35em 0 0.75em 1.1em; padding-left: 0.5em; }
+    .swagger-ui .markdown li { margin: 0.28em 0; line-height: 1.55; }
+    .swagger-ui .markdown code {
+      font-size: 0.86em; padding: 0.12em 0.4em; border-radius: 4px;
+      background: rgba(128,128,128,0.14) !important; border: 1px solid rgba(128,128,128,0.12);
+    }
+  `,
 };
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerOptions));
 
