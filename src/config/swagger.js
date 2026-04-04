@@ -61,11 +61,15 @@ const options = {
         description:
           'Products (admin CRUD, public list/detail). On create or update, set **categoryId** to the UUID from **GET /categories** to place the product in that category.',
       },
-      { name: 'Cart', description: 'User cart (add, update, remove, get)' },
+      {
+        name: 'Cart',
+        description:
+          'User cart (add, update, remove, get). **GET /cart/suggestions** returns category-aware picks when the cart has items; if the cart is empty, it returns a **random** sample of in-stock products (same size limits via query params).',
+      },
       {
         name: 'Orders',
         description:
-          'Checkout and order management. Successful checkout triggers an **order placed** push to the customer (if FCM is configured and the user allowed **orderStatus** notifications). Admin status updates send matching pushes.',
+          'Checkout and order management. **GET /orders/history** lists the signed-in customer’s orders; **GET /orders/admin/history** is the staff audit log (optional **includeItems**). **GET /orders/{id}/status** is a lightweight status poll after checkout. Successful checkout triggers an **order placed** push when FCM is configured and **orderStatus** notifications are on. Admin status updates send matching pushes.',
       },
       { name: 'Banners', description: 'Landing page banners (public list; admin add, reorder, delete)' },
       { name: 'Sections', description: 'Admin-created sections for user panel (e.g. Ramadan Deals) with products and categories' },
@@ -672,12 +676,18 @@ const options = {
         },
         Order: {
           type: 'object',
+          description:
+            '**PENDING → CONFIRMED** reduces **Product.quantity** per line (**409** if insufficient). **CANCELLED** restores stock whenever **inventoryDeducted** is true. Reverting to **PENDING** from confirmed/processing/shipped/delivered also restores. **inventoryDeducted** reflects whether deduction is active.',
           properties: {
             id: { type: 'string', format: 'uuid' },
             userId: { type: 'string', format: 'uuid' },
             orderMessage: { type: 'string', nullable: true },
             totalAmount: { type: 'number', example: 99.97 },
             status: { type: 'string', enum: ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'] },
+            inventoryDeducted: {
+              type: 'boolean',
+              description: 'True after a successful **CONFIRMED** transition deducted catalog stock for this order',
+            },
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
             items: {
@@ -704,6 +714,65 @@ const options = {
               type: 'string',
               enum: ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
               example: 'CONFIRMED',
+            },
+          },
+        },
+        OrderStatusSnapshot: {
+          type: 'object',
+          description: 'Lightweight order status from **GET /orders/{id}/status** (post-checkout polling).',
+          properties: {
+            id: { type: 'string', format: 'uuid' },
+            status: {
+              type: 'string',
+              enum: ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
+            },
+            totalAmount: { type: 'number' },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+            progress: {
+              type: 'object',
+              properties: {
+                currentStep: { type: 'string' },
+                isTerminal: { type: 'boolean', description: 'True when DELIVERED or CANCELLED' },
+                typicalFlow: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Common fulfillment sequence for UI steppers',
+                },
+                stepIndex: { type: 'integer', nullable: true },
+              },
+            },
+          },
+        },
+        CartSuggestions: {
+          type: 'object',
+          description:
+            'Payload inside **data** for **GET /cart/suggestions**. Non-empty cart: **sections** by category + **discover** from other categories. Empty cart: **sections** is empty and **discover** is a random in-stock sample.',
+          properties: {
+            headline: { type: 'string', example: 'Complete your look' },
+            hint: { type: 'string', description: 'UX copy; empty cart explains random picks vs category-based mode' },
+            sections: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  category: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string', format: 'uuid' },
+                      title: { type: 'string' },
+                    },
+                  },
+                  headline: { type: 'string' },
+                  subhead: { type: 'string' },
+                  products: { type: 'array', items: { $ref: '#/components/schemas/Product' } },
+                },
+              },
+            },
+            discover: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/Product' },
+              description: 'In-stock picks from categories not represented in the cart',
             },
           },
         },

@@ -1,5 +1,5 @@
 const express = require('express');
-const { body, param } = require('express-validator');
+const { body, param, query } = require('express-validator');
 const router = express.Router();
 const cartController = require('../controllers/cart.controller');
 const { verifyToken } = require('../middleware/auth');
@@ -10,7 +10,7 @@ const { authLimiter } = require('../middleware/rateLimit');
  * @swagger
  * tags:
  *   name: Cart
- *   description: User cart. All endpoints require user JWT. Add items, update quantity/message, get cart, remove item, clear cart.
+ *   description: User cart. All endpoints require user JWT. Add items, update quantity/message, get cart, suggestions, remove item, clear cart.
  */
 
 router.use(verifyToken);
@@ -167,6 +167,48 @@ router.patch('/item/message', updateItemMessageValidation, handleValidationError
 router.patch('/message', [
   body('orderMessage').optional().trim(),
 ], handleValidationErrors, cartController.updateOrderMessage);
+
+/**
+ * @swagger
+ * /cart/suggestions:
+ *   get:
+ *     summary: Cart-based product suggestions
+ *     description: |
+ *       **Cart with items:** recommends **in-stock** products by each category in the cart (excluding cart SKUs) plus a **discover** list from other categories.
+ *       **Empty cart:** returns a **random** sample of in-stock products in **discover** (pool size follows **limitPerCategory** / **discoverLimit**, capped at 48).
+ *     tags: [Cart]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: limitPerCategory
+ *         schema: { type: integer, minimum: 1, maximum: 24, default: 8 }
+ *         description: Max products per category section
+ *       - in: query
+ *         name: discoverLimit
+ *         schema: { type: integer, minimum: 1, maximum: 24, default: 10 }
+ *         description: Max products in the cross-category **discover** list
+ *     responses:
+ *       200:
+ *         description: Sections and discover list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - { $ref: '#/components/schemas/ApiSuccess' }
+ *                 - type: object
+ *                   properties:
+ *                     data: { $ref: '#/components/schemas/CartSuggestions' }
+ */
+router.get(
+  '/suggestions',
+  [
+    query('limitPerCategory').optional().isInt({ min: 1, max: 24 }),
+    query('discoverLimit').optional().isInt({ min: 1, max: 24 }),
+  ],
+  handleValidationErrors,
+  cartController.getCartSuggestions
+);
 
 /**
  * @swagger

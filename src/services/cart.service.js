@@ -1,3 +1,4 @@
+const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
 const productService = require('./product.service');
 
@@ -17,6 +18,46 @@ const cartProductInclude = {
   descriptions: { orderBy: { sortOrder: 'asc' } },
   productOptions: { orderBy: { sortOrder: 'asc' } },
 };
+
+const suggestionProductInclude = {
+  category: { select: { id: true, title: true } },
+  images: { orderBy: { sortOrder: 'asc' } },
+  descriptions: { orderBy: { sortOrder: 'asc' } },
+  productOptions: { orderBy: { sortOrder: 'asc' } },
+};
+
+/**
+ * Random in-stock products (PostgreSQL). Preserves RANDOM() order in the result list.
+ */
+async function fetchRandomInStockProducts(limit, excludeIds = []) {
+  const take = Math.min(48, Math.max(1, limit));
+  const rows =
+    excludeIds.length === 0
+      ? await prisma.$queryRaw`
+          SELECT id FROM "Product"
+          WHERE quantity > 0
+          ORDER BY RANDOM()
+          LIMIT ${take}
+        `
+      : await prisma.$queryRaw`
+          SELECT id FROM "Product"
+          WHERE quantity > 0
+            AND id NOT IN (${Prisma.join(excludeIds)})
+          ORDER BY RANDOM()
+          LIMIT ${take}
+        `;
+
+  const ids = rows.map((r) => r.id);
+  if (ids.length === 0) return [];
+
+  const products = await prisma.product.findMany({
+    where: { id: { in: ids } },
+    include: suggestionProductInclude,
+  });
+  const order = new Map(ids.map((id, i) => [id, i]));
+  products.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  return products.map((row) => productService.mapProduct(row));
+}
 
 async function getOrCreateCart(userId) {
   let cart = await prisma.cart.findUnique({
@@ -170,6 +211,122 @@ async function clearCart(userId) {
   return getCart(userId);
 }
 
+/**
+ * Recommendations from categories represented in the cart (excludes cart line product IDs).
+ * Adds a **discover** block from other in-stock categories when possible.
+ * Empty cart: **discover** is a random sample of in-stock products (same query params size the pool).
+ */
+async function getCartSuggestions(userId, options = {}) {
+  const limitPerCategory = Math.min(24, Math.max(1, parseInt(options.limitPerCategory, 10) || 8));
+  const discoverLimit = Math.min(24, Math.max(1, parseInt(options.discoverLimit, 10) || 10));
+
+  const cart = await prisma.cart.findUnique({
+    where: { userId },
+    include: {
+      items: {
+        include: {
+          product: {
+            include: {
+              ...cartProductInclude,
+              category: { select: { id: true, title: true } },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (!cart || !cart.items.length) {
+    const randomPool = Math.min(48, Math.max(discoverLimit, limitPerCategory, 12));
+    const discover = await fetchRandomInStockProducts(randomPool, []);
+    return {
+      sections: [],
+      discover,
+      headline: 'Discover',
+      hint:
+        discover.length > 0
+          ? 'Your cart is empty — here is a fresh mix of in-stock products. Add items to get category-based suggestions.'
+          : 'No in-stock products are available to suggest right now.',
+    };
+  }
+
+  const excludeIds = cart.items.map((i) => i.productId);
+  const categoryAgg = new Map();
+
+  for (const item of cart.items) {
+    const p = item.product;
+    if (!p || !p.categoryId || !p.category) continue;
+    if (!categoryAgg.has(p.categoryId)) {
+      categoryAgg.set(p.categoryId, {
+        id: p.categoryId,
+        title: p.category.title,
+        sampleProductTitle: p.title || null,
+      });
+    }
+  }
+
+  const categoryList = [...categoryAgg.values()];
+  const cartCategoryIds = [...categoryAgg.keys()];
+
+  const sectionWhere = (categoryId) => ({
+    categoryId,
+    id: { notIn: excludeIds },
+    quantity: { gt: 0 },
+  });
+
+  const discoverWhere =
+    cartCategoryIds.length > 0
+      ? {
+          id: { notIn: excludeIds },
+          quantity: { gt: 0 },
+          categoryId: { not: null, notIn: cartCategoryIds },
+        }
+      : {
+          id: { notIn: excludeIds },
+          quantity: { gt: 0 },
+        };
+
+  const [discoverRows, ...categoryRowSets] = await Promise.all([
+    prisma.product.findMany({
+      where: discoverWhere,
+      take: discoverLimit,
+      orderBy: [{ createdAt: 'desc' }],
+      include: suggestionProductInclude,
+    }),
+    ...categoryList.map((cat) =>
+      prisma.product.findMany({
+        where: sectionWhere(cat.id),
+        take: limitPerCategory,
+        orderBy: [{ updatedAt: 'desc' }],
+        include: suggestionProductInclude,
+      })
+    ),
+  ]);
+
+  const sections = [];
+  categoryList.forEach((cat, i) => {
+    const rows = categoryRowSets[i];
+    if (!rows.length) return;
+    const sample = cat.sampleProductTitle ? `"${cat.sampleProductTitle}"` : 'items';
+    sections.push({
+      category: { id: cat.id, title: cat.title },
+      headline: `More from ${cat.title}`,
+      subhead: `You have ${sample} in your cart — here are other picks from this category.`,
+      products: rows.map((row) => productService.mapProduct(row)),
+    });
+  });
+
+  return {
+    sections,
+    discover: discoverRows.map((row) => productService.mapProduct(row)),
+    headline: 'Complete your look',
+    hint:
+      sections.length === 0
+        ? 'Here are popular in-stock picks you may like.'
+        : 'Curated in-stock picks from categories you have not added yet.',
+  };
+}
+
 module.exports = {
   getOrCreateCart,
   addToCart,
@@ -179,5 +336,6 @@ module.exports = {
   updateCartMessage,
   getCart,
   clearCart,
+  getCartSuggestions,
   effectivePrice,
 };

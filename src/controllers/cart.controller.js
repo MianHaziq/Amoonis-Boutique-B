@@ -94,6 +94,21 @@ async function clearCart(req, res, next) {
   }
 }
 
+async function getCartSuggestions(req, res, next) {
+  try {
+    const userId = req.userId;
+    const limitPerCategory = req.query.limitPerCategory;
+    const discoverLimit = req.query.discoverLimit;
+    const data = await cartService.getCartSuggestions(userId, {
+      limitPerCategory,
+      discoverLimit,
+    });
+    return success(res, data, 'Suggestions fetched successfully');
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   addToCart,
   updateQuantity,
@@ -102,4 +117,5 @@ module.exports = {
   getCart,
   updateOrderMessage,
   clearCart,
+  getCartSuggestions,
 };
