@@ -32,6 +32,14 @@ async function deleteProduct(req, res, next) {
     if (!product) return error(res, 'Product not found', 404);
     return success(res, null, 'Product deleted successfully');
   } catch (err) {
+    if (err.code === 'PRODUCT_HAS_ACTIVE_ORDERS') {
+      const n = err.activeOrderCount;
+      return error(
+        res,
+        `Cannot delete product: it is part of ${n} active order${n === 1 ? '' : 's'} (pending, confirmed or processing). Complete or cancel those orders first.`,
+        409
+      );
+    }
     next(err);
   }
 }

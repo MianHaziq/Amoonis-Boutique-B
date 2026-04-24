@@ -32,11 +32,28 @@ function mapProductForDisplay(product) {
   };
 }
 
+function mapOrderItemProduct(item) {
+  if (item.product) return mapProductForDisplay(item.product);
+  if (item.productTitle) {
+    return {
+      id: null,
+      title: item.productTitle,
+      subtitle: null,
+      image: null,
+      images: [],
+      descriptions: [],
+      productOptions: [],
+      deleted: true,
+    };
+  }
+  return null;
+}
+
 function toOrderResponsePayload(order) {
   const items = (order.items || []).map((i) => ({
     id: i.id,
     productId: i.productId,
-    product: mapProductForDisplay(i.product),
+    product: mapOrderItemProduct(i),
     quantity: i.quantity,
     perProductMessage: i.perProductMessage,
     price: decimalToNumber(i.price),
@@ -60,6 +77,13 @@ async function createOrder(userId) {
     return { order: null, error: 'Cart is empty' };
   }
 
+  const productIds = cartData.items.map((it) => it.productId);
+  const productTitleRows = await prisma.product.findMany({
+    where: { id: { in: productIds } },
+    select: { id: true, title: true },
+  });
+  const productTitleById = new Map(productTitleRows.map((p) => [p.id, p.title]));
+
   const order = await prisma.$transaction(async (tx) => {
     const orderRecord = await tx.order.create({
       data: {
@@ -74,6 +98,7 @@ async function createOrder(userId) {
       data: cartData.items.map((item) => ({
         orderId: orderRecord.id,
         productId: item.productId,
+        productTitle: productTitleById.get(item.productId) ?? null,
         quantity: item.quantity,
         perProductMessage: item.message ?? null,
         price: item.lineTotal / item.quantity,
@@ -197,7 +222,7 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
       perProductMessage: i.perProductMessage,
       price: decimalToNumber(i.price),
       lineTotal: decimalToNumber(i.price) * i.quantity,
-      product: mapProductForDisplay(i.product),
+      product: mapOrderItemProduct(i),
       createdAt: i.createdAt,
       updatedAt: i.updatedAt,
     }));

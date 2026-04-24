@@ -78,6 +78,11 @@ const options = {
         description:
           'Dashboard metrics. **GET /admin/analytics/revenue** — time series + summary. **GET /admin/analytics/kpi** — totals & per-status. **GET /admin/analytics/revenue/by-category** — ranked categories. **GET /admin/analytics/sales/by-day** — each UTC day’s net order count & revenue (zeros filled). Presets include **all_time** (monthly on long horizons). **Admin** or manager with **ORDERS** or **SETTINGS**. **UTC**.',
       },
+      {
+        name: 'Promo codes',
+        description:
+          'Discount / promo codes. **Admin**: full CRUD at `/promo-codes` (requires ADMIN or MANAGER with `PROMO_CODES`). Scope via `appliesTo` (ALL_PRODUCTS / SPECIFIC_PRODUCTS / SPECIFIC_CATEGORIES). Type is PERCENTAGE (with optional `maxDiscountAmount` cap) or FIXED. Availability via `startsAt`/`expiresAt`; `minOrderAmount` / `maxOrderAmount` guard cart totals; `usageLimit` / `usageLimitPerUser` cap redemptions. **User**: `GET /promo-codes/available` for active offers, `POST /promo-codes/validate` to preview the discount on the user\'s cart before checkout.',
+      },
     ],
     components: {
       securitySchemes: {
@@ -90,7 +95,7 @@ const options = {
       schemas: {
         ManagerPermissionKey: {
           type: 'string',
-          enum: ['PRODUCTS', 'ORDERS', 'CATEGORIES', 'SECTIONS', 'BANNERS', 'CONTACT', 'SETTINGS'],
+          enum: ['PRODUCTS', 'ORDERS', 'CATEGORIES', 'SECTIONS', 'BANNERS', 'CONTACT', 'SETTINGS', 'PROMO_CODES'],
           description:
             'Area of the admin API this manager may access. Send these exact uppercase values in `managerPermissions` arrays. Admins bypass checks.',
         },
@@ -972,6 +977,233 @@ const options = {
             updatedAt: { type: 'string', format: 'date-time' },
           },
         },
+        PromoCodeDiscountType: {
+          type: 'string',
+          enum: ['PERCENTAGE', 'FIXED'],
+          description: 'PERCENTAGE — discountValue is 0–100. FIXED — discountValue is a flat amount in the store currency.',
+        },
+        PromoCodeAppliesTo: {
+          type: 'string',
+          enum: ['ALL_PRODUCTS', 'SPECIFIC_PRODUCTS', 'SPECIFIC_CATEGORIES'],
+          description: 'Scope of the promo code: whole cart, specific products, or specific categories.',
+        },
+        PromoCodeRef: {
+          type: 'object',
+          description: 'Compact reference to a linked product or category on a promo code.',
+          properties: {
+            id: { type: 'string', format: 'uuid' },
+            title: { type: 'string' },
+          },
+        },
+        PromoCode: {
+          type: 'object',
+          description: 'A promo / discount code. Admin view includes usage counters.',
+          properties: {
+            id: { type: 'string', format: 'uuid' },
+            code: { type: 'string', example: 'RAMADAN10', description: 'Uppercased unique code users type' },
+            name: { type: 'string', example: 'Ramadan 10% off' },
+            description: { type: 'string', nullable: true },
+            discountType: { $ref: '#/components/schemas/PromoCodeDiscountType' },
+            discountValue: { type: 'number', example: 10 },
+            maxDiscountAmount: {
+              type: 'number',
+              nullable: true,
+              example: 50,
+              description: 'Cap for PERCENTAGE discounts (optional).',
+            },
+            appliesTo: { $ref: '#/components/schemas/PromoCodeAppliesTo' },
+            minOrderAmount: { type: 'number', nullable: true, example: 100 },
+            maxOrderAmount: { type: 'number', nullable: true },
+            startsAt: { type: 'string', format: 'date-time', nullable: true },
+            expiresAt: { type: 'string', format: 'date-time', nullable: true },
+            usageLimit: { type: 'integer', nullable: true, description: 'Total uses across all customers' },
+            usageLimitPerUser: { type: 'integer', nullable: true, description: 'Per-customer cap' },
+            usageCount: { type: 'integer', example: 7, description: 'Total successful redemptions so far' },
+            isActive: { type: 'boolean' },
+            products: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/PromoCodeRef' },
+              description: 'Full list — present on detail / create / update responses (not on list).',
+            },
+            categories: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/PromoCodeRef' },
+              description: 'Full list — present on detail / create / update responses (not on list).',
+            },
+            productCount: {
+              type: 'integer',
+              description: 'Count of linked products. Present on LIST responses instead of the full `products` array.',
+            },
+            categoryCount: {
+              type: 'integer',
+              description: 'Count of linked categories. Present on LIST responses instead of the full `categories` array.',
+            },
+            totalUses: {
+              type: 'integer',
+              description: 'Denormalized usage count from `PromoCodeUsage` (matches `usageCount`).',
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+          },
+        },
+        PromoCodeCreate: {
+          type: 'object',
+          required: ['code', 'name', 'discountType', 'discountValue'],
+          description: [
+            'Create a promo / discount code.',
+            '',
+            '**Scope:** Default is `ALL_PRODUCTS`. For `SPECIFIC_PRODUCTS`, also send `productIds` (UUIDs from **GET /products**). For `SPECIFIC_CATEGORIES`, send `categoryIds` (UUIDs from **GET /categories**).',
+            '',
+            '**Rules:** Combine `minOrderAmount` / `maxOrderAmount` for price-range promos, `startsAt` / `expiresAt` for availability, `usageLimit` for total caps, and `usageLimitPerUser` for per-customer caps.',
+          ].join('\n'),
+          properties: {
+            code: {
+              type: 'string',
+              example: 'RAMADAN10',
+              minLength: 2,
+              maxLength: 40,
+              description: 'Unique code. Stored uppercased; the server matches case-insensitively on validate.',
+            },
+            name: { type: 'string', example: 'Ramadan 10% off', description: 'Admin-facing display name' },
+            description: { type: 'string', nullable: true, example: 'Store-wide Ramadan promotion' },
+            discountType: { $ref: '#/components/schemas/PromoCodeDiscountType' },
+            discountValue: {
+              type: 'number',
+              example: 10,
+              description: 'Percentage (0–100) for PERCENTAGE, or flat amount for FIXED',
+            },
+            maxDiscountAmount: {
+              type: 'number',
+              nullable: true,
+              example: 50,
+              description: 'Optional cap applied to PERCENTAGE discounts',
+            },
+            appliesTo: {
+              allOf: [{ $ref: '#/components/schemas/PromoCodeAppliesTo' }],
+              description: 'Defaults to ALL_PRODUCTS',
+            },
+            productIds: {
+              type: 'array',
+              items: { type: 'string', format: 'uuid' },
+              description: 'Required when appliesTo = SPECIFIC_PRODUCTS',
+            },
+            categoryIds: {
+              type: 'array',
+              items: { type: 'string', format: 'uuid' },
+              description: 'Required when appliesTo = SPECIFIC_CATEGORIES',
+            },
+            minOrderAmount: { type: 'number', nullable: true, example: 100 },
+            maxOrderAmount: { type: 'number', nullable: true },
+            startsAt: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              example: '2026-03-10T00:00:00Z',
+            },
+            expiresAt: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              example: '2026-04-10T00:00:00Z',
+            },
+            usageLimit: { type: 'integer', minimum: 1, nullable: true, example: 500 },
+            usageLimitPerUser: { type: 'integer', minimum: 1, nullable: true, example: 1 },
+            isActive: { type: 'boolean', default: true },
+          },
+        },
+        PromoCodeUpdate: {
+          type: 'object',
+          description: [
+            'Partial update. Send only fields to change.',
+            '',
+            'Sending `productIds` or `categoryIds` **replaces** that list entirely. Changing `appliesTo` to a different scope clears the links from the previous scope.',
+          ].join('\n'),
+          properties: {
+            code: { type: 'string', minLength: 2, maxLength: 40 },
+            name: { type: 'string' },
+            description: { type: 'string', nullable: true },
+            discountType: { $ref: '#/components/schemas/PromoCodeDiscountType' },
+            discountValue: { type: 'number' },
+            maxDiscountAmount: { type: 'number', nullable: true },
+            appliesTo: { $ref: '#/components/schemas/PromoCodeAppliesTo' },
+            productIds: {
+              type: 'array',
+              items: { type: 'string', format: 'uuid' },
+            },
+            categoryIds: {
+              type: 'array',
+              items: { type: 'string', format: 'uuid' },
+            },
+            minOrderAmount: { type: 'number', nullable: true },
+            maxOrderAmount: { type: 'number', nullable: true },
+            startsAt: { type: 'string', format: 'date-time', nullable: true },
+            expiresAt: { type: 'string', format: 'date-time', nullable: true },
+            usageLimit: { type: 'integer', minimum: 1, nullable: true },
+            usageLimitPerUser: { type: 'integer', minimum: 1, nullable: true },
+            isActive: { type: 'boolean' },
+          },
+        },
+        PromoCodeValidateInput: {
+          type: 'object',
+          required: ['code'],
+          properties: {
+            code: { type: 'string', example: 'RAMADAN10' },
+            items: {
+              type: 'array',
+              description:
+                'Optional preview list. If omitted, the server uses the user\'s saved cart.',
+              items: {
+                type: 'object',
+                required: ['productId', 'quantity'],
+                properties: {
+                  productId: { type: 'string', format: 'uuid' },
+                  quantity: { type: 'integer', minimum: 1 },
+                  price: {
+                    type: 'number',
+                    minimum: 0,
+                    description: 'Optional; defaults to product.discountedPrice ?? product.price',
+                  },
+                  categoryId: {
+                    type: 'string',
+                    format: 'uuid',
+                    nullable: true,
+                    description: 'Optional; auto-hydrated from the product if missing',
+                  },
+                },
+              },
+            },
+          },
+        },
+        PromoCodeValidateResult: {
+          type: 'object',
+          description: 'Returned from `POST /promo-codes/validate` when the code is usable.',
+          properties: {
+            promoCode: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', format: 'uuid' },
+                code: { type: 'string' },
+                name: { type: 'string' },
+                discountType: { $ref: '#/components/schemas/PromoCodeDiscountType' },
+                discountValue: { type: 'number' },
+                appliesTo: { $ref: '#/components/schemas/PromoCodeAppliesTo' },
+              },
+            },
+            cartSubtotal: { type: 'number', example: 600 },
+            eligibleSubtotal: {
+              type: 'number',
+              example: 600,
+              description: 'Subtotal of items the code applies to (= cartSubtotal for ALL_PRODUCTS)',
+            },
+            discountAmount: { type: 'number', example: 60 },
+            total: { type: 'number', example: 540, description: 'cartSubtotal − discountAmount' },
+            eligibleProductIds: {
+              type: 'array',
+              items: { type: 'string', format: 'uuid' },
+              description: 'Product IDs from the cart that the discount applied to',
+            },
+          },
+        },
         SectionWithItems: {
           type: 'object',
           description: 'Section with products and categories (same shape as product list and category list)',
@@ -1009,6 +1241,7 @@ const options = {
     './src/routes/banner.routes.js',
     './src/routes/section.routes.js',
     './src/routes/analytics.routes.js',
+    './src/routes/promoCode.routes.js',
   ],
 };
 

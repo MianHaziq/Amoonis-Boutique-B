@@ -9,6 +9,7 @@ const MANAGER_PERMISSION_VALUES = Object.freeze([
   'BANNERS',
   'CONTACT',
   'SETTINGS',
+  'PROMO_CODES',
 ]);
 
 const MANAGER_PERMISSION_CATALOG = Object.freeze([
@@ -19,6 +20,7 @@ const MANAGER_PERMISSION_CATALOG = Object.freeze([
   { key: 'BANNERS', label: 'Banners', description: 'Add, reorder, and delete landing banners' },
   { key: 'CONTACT', label: 'Contact', description: 'View and manage contact messages' },
   { key: 'SETTINGS', label: 'Settings', description: 'View and update site settings' },
+  { key: 'PROMO_CODES', label: 'Promo codes', description: 'Create, update, and delete promotional / discount codes' },
 ]);
 
 /** Permissions that imply a need to upload images (logos, product images, etc.) */
