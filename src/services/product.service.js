@@ -2,6 +2,7 @@ const prisma = require('../config/db');
 const categoryService = require('./category.service');
 
 const MAX_IMAGES = 10;
+const ACTIVE_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PROCESSING'];
 const decimalToNumber = (v) => (v == null ? null : Number(v));
 
 function orderedImages(product) {
@@ -214,7 +215,29 @@ async function updateProduct(id, data) {
 async function deleteProduct(id) {
   const product = await prisma.product.findUnique({ where: { id } });
   if (!product) return null;
-  await prisma.product.delete({ where: { id } });
+
+  const activeOrderCount = await prisma.orderItem.count({
+    where: {
+      productId: id,
+      order: { status: { in: ACTIVE_ORDER_STATUSES } },
+    },
+  });
+  if (activeOrderCount > 0) {
+    const err = new Error('Cannot delete product with active orders');
+    err.code = 'PRODUCT_HAS_ACTIVE_ORDERS';
+    err.activeOrderCount = activeOrderCount;
+    throw err;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    // Snapshot title onto historical order items so they stay readable after the product is gone.
+    await tx.orderItem.updateMany({
+      where: { productId: id, productTitle: null },
+      data: { productTitle: product.title },
+    });
+    await tx.product.delete({ where: { id } });
+  });
+
   if (product.categoryId) {
     await categoryService.decrementCategoryProductCount(product.categoryId);
   }
