@@ -41,6 +41,7 @@ const orderRoutes = require('./src/routes/order.routes');
 const bannerRoutes = require('./src/routes/banner.routes');
 const sectionRoutes = require('./src/routes/section.routes');
 const analyticsRoutes = require('./src/routes/analytics.routes');
+const promoCodeRoutes = require('./src/routes/promoCode.routes');
 const errorHandler = require('./src/middleware/errorHandler');
 
 const app = express();
@@ -113,6 +114,7 @@ v1Router.use('/orders', orderRoutes);
 v1Router.use('/banners', bannerRoutes);
 v1Router.use('/sections', sectionRoutes);
 v1Router.use('/admin/analytics', analyticsRoutes);
+v1Router.use('/promo-codes', promoCodeRoutes);
 
 app.use('/api/v1', v1Router);
 
@@ -130,6 +132,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/banners', bannerRoutes);
 app.use('/api/sections', sectionRoutes);
 app.use('/api/admin/analytics', analyticsRoutes);
+app.use('/api/promo-codes', promoCodeRoutes);
 
 app.use(errorHandler);
 

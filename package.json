@@ -13,6 +13,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "e2e": "node scripts/e2e-test.js",
+    "test:promo": "node scripts/test-promo-codes.js",
     "kill-port-5000": "powershell -ExecutionPolicy Bypass -File scripts/kill-port-5000.ps1",
     "migrate:fix-p3009": "node scripts/fix-p3009-ecommerce-migration.js"
   },

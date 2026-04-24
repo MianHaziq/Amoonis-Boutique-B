@@ -40,6 +40,8 @@ model User {
 
   pushDevices             UserPushDevice[]
   notificationPreferences UserNotificationPreferences?
+
+  promoCodeUsages PromoCodeUsage[]
 }
 
 // ============================================
@@ -156,6 +158,7 @@ model Category {
 
   products        Product[]
   sectionCategories SectionCategory[]
+  promoCodeCategories PromoCodeCategory[]
 
   @@index([title])
 }
@@ -178,6 +181,7 @@ model Product {
   cartItems      CartItem[]
   orderItems     OrderItem[]
   sectionProducts SectionProduct[]
+  promoCodeProducts PromoCodeProduct[]
 
   @@index([categoryId])
   @@index([title])
@@ -285,15 +289,17 @@ model Order {
 model OrderItem {
   id                String   @id @default(uuid())
   orderId           String
-  productId         String
+  productId         String?
+  /// Snapshot of product title at order/delete time. Keeps order history readable after a product is removed from the catalog.
+  productTitle      String?
   quantity          Int
   perProductMessage String?  @db.Text
   price             Decimal  @db.Decimal(10, 2)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
-  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
   @@index([orderId])
   @@index([productId])
@@ -328,6 +334,99 @@ model UserNotificationPreferences {
 }
 
 // ============================================
+// PROMO CODES
+// ============================================
+
+/// Admin-managed discount codes. `appliesTo` controls scope; for SPECIFIC_PRODUCTS or
+/// SPECIFIC_CATEGORIES the linked rows in PromoCodeProduct / PromoCodeCategory define the
+/// target set. Percentage discounts can be capped via `maxDiscountAmount`. Availability is
+/// bounded by `startsAt`/`expiresAt` and total / per-user usage counters.
+model PromoCode {
+  id                String          @id @default(uuid())
+  code              String          @unique
+  name              String
+  description       String?         @db.Text
+
+  discountType      DiscountType
+  discountValue     Decimal         @db.Decimal(10, 2)
+  maxDiscountAmount Decimal?        @db.Decimal(10, 2)
+
+  appliesTo         PromoAppliesTo  @default(ALL_PRODUCTS)
+
+  minOrderAmount    Decimal?        @db.Decimal(10, 2)
+  maxOrderAmount    Decimal?        @db.Decimal(10, 2)
+
+  startsAt          DateTime?
+  expiresAt         DateTime?
+
+  usageLimit        Int?
+  usageLimitPerUser Int?
+  usageCount        Int             @default(0)
+
+  isActive          Boolean         @default(true)
+
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  products   PromoCodeProduct[]
+  categories PromoCodeCategory[]
+  usages     PromoCodeUsage[]
+
+  @@index([code])
+  @@index([isActive])
+  @@index([startsAt])
+  @@index([expiresAt])
+  @@index([createdAt])
+}
+
+model PromoCodeProduct {
+  id          String   @id @default(uuid())
+  promoCodeId String
+  productId   String
+  createdAt   DateTime @default(now())
+
+  promoCode PromoCode @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([promoCodeId, productId])
+  @@index([promoCodeId])
+  @@index([productId])
+}
+
+model PromoCodeCategory {
+  id          String   @id @default(uuid())
+  promoCodeId String
+  categoryId  String
+  createdAt   DateTime @default(now())
+
+  promoCode PromoCode @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+  category  Category  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([promoCodeId, categoryId])
+  @@index([promoCodeId])
+  @@index([categoryId])
+}
+
+/// One row per time a user successfully validates & redeems a promo code. Used to enforce
+/// `usageLimit` (global) and `usageLimitPerUser`. `orderId` is null when the discount was
+/// only validated and not yet tied to a placed order.
+model PromoCodeUsage {
+  id             String   @id @default(uuid())
+  promoCodeId    String
+  userId         String
+  orderId        String?
+  discountAmount Decimal  @db.Decimal(10, 2)
+  createdAt      DateTime @default(now())
+
+  promoCode PromoCode @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([promoCodeId])
+  @@index([userId])
+  @@index([promoCodeId, userId])
+}
+
+// ============================================
 // ENUMS
 // ============================================
 
@@ -351,6 +450,18 @@ enum ManagerPermission {
   BANNERS
   CONTACT
   SETTINGS
+  PROMO_CODES
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+enum PromoAppliesTo {
+  ALL_PRODUCTS
+  SPECIFIC_PRODUCTS
+  SPECIFIC_CATEGORIES
 }
 
 enum UserStatus {
