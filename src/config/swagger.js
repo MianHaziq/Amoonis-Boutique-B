@@ -83,6 +83,7 @@ const options = {
         description:
           'Discount / promo codes. **Admin**: full CRUD at `/promo-codes` (requires ADMIN or MANAGER with `PROMO_CODES`). Scope via `appliesTo` (ALL_PRODUCTS / SPECIFIC_PRODUCTS / SPECIFIC_CATEGORIES). Type is PERCENTAGE (with optional `maxDiscountAmount` cap) or FIXED. Availability via `startsAt`/`expiresAt`; `minOrderAmount` / `maxOrderAmount` guard cart totals; `usageLimit` / `usageLimitPerUser` cap redemptions. **User**: `GET /promo-codes/available` for active offers, `POST /promo-codes/validate` to preview the discount on the user\'s cart before checkout.',
       },
+      { name: 'Addresses', description: 'Saved shipping addresses for the authenticated user. Up to 10 per account. One address is always the default.' },
     ],
     components: {
       securitySchemes: {
@@ -1263,6 +1264,7 @@ const options = {
     './src/routes/section.routes.js',
     './src/routes/analytics.routes.js',
     './src/routes/promoCode.routes.js',
+    './src/routes/address.routes.js',
   ],
 };
 
