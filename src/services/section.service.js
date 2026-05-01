@@ -12,7 +12,9 @@ function mapCategoryForSection(cat) {
   return {
     id: category.id,
     title: category.title,
+    title_ar: category.title_ar ?? null,
     description: category.description ?? null,
+    description_ar: category.description_ar ?? null,
     image: category.image ?? null,
     totalProducts: category.totalProducts ?? 0,
     createdAt: category.createdAt,
@@ -54,6 +56,7 @@ async function getSections() {
   return sections.map((s) => ({
     id: s.id,
     title: s.title,
+    title_ar: s.title_ar ?? null,
     image: s.image ?? null,
     sortOrder: s.sortOrder,
     createdAt: s.createdAt,
@@ -90,6 +93,7 @@ async function getSectionById(id) {
   return {
     id: section.id,
     title: section.title,
+    title_ar: section.title_ar ?? null,
     image: section.image ?? null,
     sortOrder: section.sortOrder,
     createdAt: section.createdAt,
@@ -111,6 +115,7 @@ async function createSection(data) {
   const section = await prisma.section.create({
     data: {
       title,
+      title_ar: data.title_ar != null ? String(data.title_ar).trim() || null : null,
       image: data.image != null ? String(data.image).trim() || null : null,
       sortOrder: data.sortOrder != null ? Number(data.sortOrder) : maxOrder,
     },
@@ -149,6 +154,9 @@ async function updateSection(id, data) {
     const title = String(data.title).trim();
     if (!title) throw new Error('Section title cannot be empty');
     updatePayload.title = title;
+  }
+  if (data.title_ar !== undefined) {
+    updatePayload.title_ar = data.title_ar ? String(data.title_ar).trim() || null : null;
   }
   if (data.image !== undefined) updatePayload.image = data.image ? String(data.image).trim() : null;
   if (data.sortOrder !== undefined) updatePayload.sortOrder = Number(data.sortOrder);

@@ -19,7 +19,9 @@ function orderedDescriptions(product) {
   return list.map((d) => ({
     id: d.id,
     title: d.title ?? null,
+    title_ar: d.title_ar ?? null,
     description: d.description,
+    description_ar: d.description_ar ?? null,
   }));
 }
 
@@ -30,7 +32,9 @@ function orderedProductOptions(product) {
   return list.map((o) => ({
     id: o.id,
     title: o.title,
+    title_ar: o.title_ar ?? null,
     options: Array.isArray(o.options) ? o.options : [],
+    options_ar: Array.isArray(o.options_ar) ? o.options_ar : [],
   }));
 }
 
@@ -60,7 +64,9 @@ function normalizeDescriptions(descriptions) {
       if (!text) return null;
       return {
         title: d.title != null ? String(d.title).trim() || null : null,
+        title_ar: d.title_ar != null ? String(d.title_ar).trim() || null : null,
         description: text,
+        description_ar: d.description_ar != null ? String(d.description_ar).trim() || null : null,
         sortOrder: i,
       };
     })
@@ -77,7 +83,11 @@ function normalizeProductOptions(productOptions) {
       const options = Array.isArray(item.options)
         ? item.options.filter((v) => v != null && String(v).trim() !== '').map((v) => String(v).trim())
         : [];
-      return { title, options, sortOrder: i };
+      const title_ar = item.title_ar != null ? String(item.title_ar).trim() || null : null;
+      const options_ar = Array.isArray(item.options_ar)
+        ? item.options_ar.filter((v) => v != null && String(v).trim() !== '').map((v) => String(v).trim())
+        : [];
+      return { title, title_ar, options, options_ar, sortOrder: i };
     })
     .filter(Boolean);
 }
@@ -95,7 +105,9 @@ async function createProduct(data) {
   const product = await prisma.product.create({
     data: {
       title: data.title,
+      title_ar: data.title_ar ?? null,
       subtitle: data.subtitle ?? null,
+      subtitle_ar: data.subtitle_ar ?? null,
       price: data.price,
       discountedPrice: data.discountedPrice ?? null,
       quantity,
@@ -144,7 +156,9 @@ async function updateProduct(id, data) {
 
   const updatePayload = {
     ...(data.title != null && { title: data.title }),
+    ...(data.title_ar !== undefined && { title_ar: data.title_ar ?? null }),
     ...(data.subtitle !== undefined && { subtitle: data.subtitle }),
+    ...(data.subtitle_ar !== undefined && { subtitle_ar: data.subtitle_ar ?? null }),
     ...(data.price != null && { price: data.price }),
     ...(data.discountedPrice !== undefined && { discountedPrice: data.discountedPrice }),
     ...(data.quantity !== undefined && { quantity: Math.max(0, parseInt(data.quantity, 10) || 0) }),
@@ -233,7 +247,7 @@ async function deleteProduct(id) {
     // Snapshot title onto historical order items so they stay readable after the product is gone.
     await tx.orderItem.updateMany({
       where: { productId: id, productTitle: null },
-      data: { productTitle: product.title },
+      data: { productTitle: product.title, productTitle_ar: product.title_ar ?? null },
     });
     await tx.product.delete({ where: { id } });
   });

@@ -18,14 +18,28 @@ function mapProductForDisplay(product) {
   const imgs = (product.images || []).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
   const urls = imgs.map((i) => i.url);
   const descs = (product.descriptions || []).sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-  const descriptions = descs.map((d) => ({ id: d.id, title: d.title ?? null, description: d.description }));
+  const descriptions = descs.map((d) => ({
+    id: d.id,
+    title: d.title ?? null,
+    title_ar: d.title_ar ?? null,
+    description: d.description,
+    description_ar: d.description_ar ?? null,
+  }));
   const productOptionsList = (product.productOptions || [])
     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
-    .map((o) => ({ id: o.id, title: o.title, options: Array.isArray(o.options) ? o.options : [] }));
+    .map((o) => ({
+      id: o.id,
+      title: o.title,
+      title_ar: o.title_ar ?? null,
+      options: Array.isArray(o.options) ? o.options : [],
+      options_ar: Array.isArray(o.options_ar) ? o.options_ar : [],
+    }));
   return {
     id: product.id,
     title: product.title,
+    title_ar: product.title_ar ?? null,
     subtitle: product.subtitle ?? null,
+    subtitle_ar: product.subtitle_ar ?? null,
     image: urls[0] ?? null,
     images: urls,
     descriptions,
@@ -39,7 +53,9 @@ function mapOrderItemProduct(item) {
     return {
       id: null,
       title: item.productTitle,
+      title_ar: item.productTitle_ar ?? null,
       subtitle: null,
+      subtitle_ar: null,
       image: null,
       images: [],
       descriptions: [],
@@ -154,7 +170,7 @@ async function createOrder(userId, checkoutInput = {}) {
   const productIds = cartData.items.map((it) => it.productId);
   const productRows = await prisma.product.findMany({
     where: { id: { in: productIds } },
-    select: { id: true, title: true, categoryId: true },
+    select: { id: true, title: true, title_ar: true, categoryId: true },
   });
   const productById = new Map(productRows.map((p) => [p.id, p]));
 
@@ -234,6 +250,7 @@ async function createOrder(userId, checkoutInput = {}) {
           orderId: orderRecord.id,
           productId: item.productId,
           productTitle: productById.get(item.productId)?.title ?? null,
+          productTitle_ar: productById.get(item.productId)?.title_ar ?? null,
           quantity: item.quantity,
           perProductMessage: item.message ?? null,
           price: item.lineTotal / item.quantity,
