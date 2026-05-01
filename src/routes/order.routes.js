@@ -29,33 +29,117 @@ const statusBody = [
  * @swagger
  * /orders/checkout:
  *   post:
- *     summary: Create order from cart (checkout)
- *     description: Creates an order from the current user's cart, then clears the cart. Requires user JWT. Fails if cart is empty.
+ *     summary: Place order (checkout)
+ *     description: |
+ *       Creates an order from the current user's cart, then clears the cart. Requires user JWT.
+ *
+ *       **Address**: provide either `addressId` (a saved address UUID) or a full `shippingAddress` object inline.
+ *       Name and email are sourced automatically from the user profile — no need to send them.
+ *
+ *       **Payment**: only `COD` (Cash on Delivery) is supported for now. Field is optional and defaults to `COD`.
+ *
+ *       **Promo code**: optional. Pass the code string to apply a discount. Returns `400` with a descriptive message if invalid.
  *     tags: [Orders]
  *     security:
  *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               addressId:
+ *                 type: string
+ *                 format: uuid
+ *                 description: ID of a saved address. Mutually exclusive with shippingAddress.
+ *               shippingAddress:
+ *                 type: object
+ *                 description: Inline address. Required if addressId is not provided.
+ *                 required: [fullName, phone, streetAddress, city, country]
+ *                 properties:
+ *                   fullName: { type: string, example: "Ahmed Al Mansouri" }
+ *                   phone: { type: string, example: "+971501234567" }
+ *                   streetAddress: { type: string, example: "Villa 14, Al Wasl Road" }
+ *                   apartment: { type: string, nullable: true, example: null }
+ *                   city: { type: string, example: "Dubai" }
+ *                   state: { type: string, nullable: true, example: "Dubai" }
+ *                   postalCode: { type: string, nullable: true, example: null }
+ *                   country: { type: string, example: "United Arab Emirates" }
+ *               paymentMethod:
+ *                 type: string
+ *                 enum: [COD]
+ *                 default: COD
+ *                 description: Payment method. Currently only Cash on Delivery.
+ *               promoCode:
+ *                 type: string
+ *                 nullable: true
+ *                 example: "SAVE10"
+ *                 description: Optional promo code to apply a discount.
+ *           examples:
+ *             saved_address:
+ *               summary: Using a saved address
+ *               value:
+ *                 addressId: "550e8400-e29b-41d4-a716-446655440000"
+ *                 paymentMethod: COD
+ *                 promoCode: "SAVE10"
+ *             inline_address:
+ *               summary: Inline address at checkout
+ *               value:
+ *                 shippingAddress:
+ *                   fullName: "Ahmed Al Mansouri"
+ *                   phone: "+971501234567"
+ *                   streetAddress: "Villa 14, Al Wasl Road"
+ *                   city: "Dubai"
+ *                   state: "Dubai"
+ *                   country: "United Arab Emirates"
+ *                 paymentMethod: COD
  *     responses:
  *       201:
- *         description: Order created successfully
+ *         description: Order placed successfully
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/ApiSuccess' }
  *             example:
  *               success: true
- *               message: Order created successfully
+ *               message: Order placed successfully
  *               data:
  *                 id: 550e8400-e29b-41d4-a716-446655440000
- *                 userId: "..."
- *                 totalAmount: 99.97
+ *                 totalAmount: 89.97
+ *                 discountAmount: 10.00
+ *                 appliedPromoCode: "SAVE10"
+ *                 paymentMethod: COD
  *                 status: PENDING
+ *                 shippingAddress:
+ *                   fullName: Ahmed Al Mansouri
+ *                   phone: "+971501234567"
+ *                   streetAddress: "Villa 14, Al Wasl Road"
+ *                   city: Dubai
+ *                   country: "United Arab Emirates"
  *                 items: []
  *       400:
- *         description: Cart is empty
+ *         description: Cart empty, address missing/invalid, or promo code error
  */
+const checkoutBody = [
+  body('addressId').optional().isUUID().withMessage('addressId must be a valid UUID'),
+  body('paymentMethod').optional().isIn(['COD']).withMessage('paymentMethod must be COD'),
+  body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
+  body('shippingAddress').optional().isObject().withMessage('shippingAddress must be an object'),
+  body('shippingAddress.fullName').optional().trim(),
+  body('shippingAddress.phone').optional().trim(),
+  body('shippingAddress.streetAddress').optional().trim(),
+  body('shippingAddress.apartment').optional().trim(),
+  body('shippingAddress.city').optional().trim(),
+  body('shippingAddress.state').optional().trim(),
+  body('shippingAddress.postalCode').optional().trim(),
+  body('shippingAddress.country').optional().trim(),
+];
+
 router.post(
   '/checkout',
   verifyToken,
   authLimiter,
+  checkoutBody,
   handleValidationErrors,
   orderController.createOrder
 );

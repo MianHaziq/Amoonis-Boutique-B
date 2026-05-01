@@ -471,6 +471,7 @@ const getProfile = async (req, res, next) => {
         managerTitle: true,
         managerPermissions: true,
         preferredLanguage: true,
+        phone: true,
         addressCountry: true,
         addressCity: true,
         createdAt: true,
@@ -543,6 +544,27 @@ const updateAddress = async (req, res, next) => {
       addressCountry: user.addressCountry,
       addressCity: user.addressCity,
     }, 'Address updated successfully', 200);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const updatePhone = async (req, res, next) => {
+  try {
+    const userId = req.userId;
+    const { phone } = req.body;
+
+    if (phone === undefined || phone === null) {
+      return error(res, 'phone is required', 400);
+    }
+
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: { phone: String(phone).trim() || null },
+      select: { id: true, phone: true, updatedAt: true },
+    });
+
+    return success(res, { phone: user.phone }, 'Phone number updated successfully', 200);
   } catch (err) {
     next(err);
   }
@@ -691,6 +713,7 @@ module.exports = {
   getProfile,
   updateProfile,
   updatePreferredLanguage,
+  updatePhone,
   updateAddress,
   deleteAccount,
 };

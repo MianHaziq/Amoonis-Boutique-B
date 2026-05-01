@@ -1,6 +1,7 @@
 const prisma = require('../config/db');
 const cartService = require('../services/cart.service');
 const pushNotificationService = require('../services/pushNotification.service');
+const promoCodeService = require('../services/promoCode.service');
 
 function decimalToNumber(v) {
   return v == null ? null : Number(v);
@@ -63,7 +64,22 @@ function toOrderResponsePayload(order) {
     userId: order.userId,
     orderMessage: order.orderMessage,
     totalAmount: decimalToNumber(order.totalAmount),
+    discountAmount: decimalToNumber(order.discountAmount),
+    appliedPromoCode: order.appliedPromoCode ?? null,
+    paymentMethod: order.paymentMethod ?? 'COD',
     status: order.status,
+    shippingAddress: order.shippingFullName
+      ? {
+          fullName: order.shippingFullName,
+          phone: order.shippingPhone,
+          streetAddress: order.shippingStreetAddress,
+          apartment: order.shippingApartment ?? null,
+          city: order.shippingCity,
+          state: order.shippingState ?? null,
+          postalCode: order.shippingPostalCode ?? null,
+          country: order.shippingCountry,
+        }
+      : null,
     inventoryDeducted: Boolean(order.inventoryDeducted),
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
@@ -71,69 +87,177 @@ function toOrderResponsePayload(order) {
   };
 }
 
-async function createOrder(userId) {
-  const cartData = await cartService.getCart(userId);
+const VALID_PAYMENT_METHODS = ['COD'];
+
+function validateShippingAddress(addr) {
+  if (!addr || typeof addr !== 'object') return 'shippingAddress is required';
+  if (!addr.fullName || !String(addr.fullName).trim()) return 'shippingAddress.fullName is required';
+  if (!addr.phone || !String(addr.phone).trim()) return 'shippingAddress.phone is required';
+  if (!addr.streetAddress || !String(addr.streetAddress).trim()) return 'shippingAddress.streetAddress is required';
+  if (!addr.city || !String(addr.city).trim()) return 'shippingAddress.city is required';
+  if (!addr.country || !String(addr.country).trim()) return 'shippingAddress.country is required';
+  return null;
+}
+
+async function createOrder(userId, checkoutInput = {}) {
+  const { addressId, shippingAddress, paymentMethod = 'COD', promoCode } = checkoutInput;
+
+  if (!VALID_PAYMENT_METHODS.includes(paymentMethod)) {
+    return { order: null, error: `Invalid paymentMethod. Supported: ${VALID_PAYMENT_METHODS.join(', ')}` };
+  }
+
+  // Resolve address and fetch cart in parallel when addressId is provided
+  let resolvedAddress = null;
+  let cartData;
+
+  if (addressId) {
+    const [saved, cart] = await Promise.all([
+      prisma.address.findFirst({ where: { id: addressId, userId } }),
+      cartService.getCart(userId),
+    ]);
+    if (!saved) return { order: null, error: 'Address not found' };
+    resolvedAddress = {
+      addressId: saved.id,
+      fullName: saved.fullName,
+      phone: saved.phone,
+      streetAddress: saved.streetAddress,
+      apartment: saved.apartment ?? null,
+      city: saved.city,
+      state: saved.state ?? null,
+      postalCode: saved.postalCode ?? null,
+      country: saved.country,
+    };
+    cartData = cart;
+  } else if (shippingAddress) {
+    const addrError = validateShippingAddress(shippingAddress);
+    if (addrError) return { order: null, error: addrError };
+    resolvedAddress = {
+      addressId: null,
+      fullName: String(shippingAddress.fullName).trim(),
+      phone: String(shippingAddress.phone).trim(),
+      streetAddress: String(shippingAddress.streetAddress).trim(),
+      apartment: shippingAddress.apartment ? String(shippingAddress.apartment).trim() : null,
+      city: String(shippingAddress.city).trim(),
+      state: shippingAddress.state ? String(shippingAddress.state).trim() : null,
+      postalCode: shippingAddress.postalCode ? String(shippingAddress.postalCode).trim() : null,
+      country: String(shippingAddress.country).trim(),
+    };
+    cartData = await cartService.getCart(userId);
+  } else {
+    return { order: null, error: 'A shipping address is required. Provide addressId or shippingAddress.' };
+  }
+
   if (!cartData.items || cartData.items.length === 0) {
     return { order: null, error: 'Cart is empty' };
   }
 
   const productIds = cartData.items.map((it) => it.productId);
-  const productTitleRows = await prisma.product.findMany({
+  const productRows = await prisma.product.findMany({
     where: { id: { in: productIds } },
-    select: { id: true, title: true },
+    select: { id: true, title: true, categoryId: true },
   });
-  const productTitleById = new Map(productTitleRows.map((p) => [p.id, p.title]));
+  const productById = new Map(productRows.map((p) => [p.id, p]));
 
-  const order = await prisma.$transaction(async (tx) => {
+  const promoItems = cartData.items.map((item) => ({
+    productId: item.productId,
+    quantity: item.quantity,
+    price: item.lineTotal / item.quantity,
+    categoryId: productById.get(item.productId)?.categoryId ?? null,
+  }));
+
+  // Validate and compute promo discount before the transaction (read-only)
+  let promoResult = null;
+  if (promoCode) {
+    try {
+      promoResult = await promoCodeService.validateAndCalculate(promoCode, userId, promoItems);
+    } catch (err) {
+      const promoErrors = new Set([
+        'PROMO_NOT_FOUND', 'PROMO_INACTIVE', 'PROMO_EXPIRED', 'PROMO_NOT_STARTED',
+        'PROMO_LIMIT_REACHED', 'PROMO_USER_LIMIT_REACHED', 'PROMO_MIN_ORDER_NOT_MET',
+        'PROMO_MAX_ORDER_EXCEEDED', 'PROMO_NO_ELIGIBLE_ITEMS', 'PROMO_INVALID_INPUT',
+      ]);
+      if (promoErrors.has(err.code)) return { order: null, error: err.message };
+      throw err;
+    }
+  }
+
+  const finalTotal = promoResult ? promoResult.total : cartData.totalAmount;
+  const discountAmount = promoResult ? promoResult.discountAmount : null;
+
+  let createdOrderId;
+  await prisma.$transaction(async (tx) => {
     const orderRecord = await tx.order.create({
       data: {
         userId,
         orderMessage: cartData.orderMessage ?? null,
-        totalAmount: cartData.totalAmount,
+        totalAmount: finalTotal,
+        discountAmount,
+        appliedPromoCode: promoResult?.promoCode.code ?? null,
+        appliedPromoCodeId: promoResult?.promoCode.id ?? null,
+        paymentMethod,
+        addressId: resolvedAddress.addressId,
+        shippingFullName: resolvedAddress.fullName,
+        shippingPhone: resolvedAddress.phone,
+        shippingStreetAddress: resolvedAddress.streetAddress,
+        shippingApartment: resolvedAddress.apartment,
+        shippingCity: resolvedAddress.city,
+        shippingState: resolvedAddress.state,
+        shippingPostalCode: resolvedAddress.postalCode,
+        shippingCountry: resolvedAddress.country,
         status: 'PENDING',
       },
     });
 
-    await tx.orderItem.createMany({
-      data: cartData.items.map((item) => ({
-        orderId: orderRecord.id,
-        productId: item.productId,
-        productTitle: productTitleById.get(item.productId) ?? null,
-        quantity: item.quantity,
-        perProductMessage: item.message ?? null,
-        price: item.lineTotal / item.quantity,
-      })),
-    });
+    createdOrderId = orderRecord.id;
 
-    const cart = await tx.cart.findUnique({ where: { userId } });
-    if (cart) {
-      await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
-      await tx.cart.update({
-        where: { id: cart.id },
-        data: { orderMessage: null },
-      });
-    }
+    const promoOps = promoResult
+      ? [
+          tx.promoCodeUsage.create({
+            data: {
+              promoCodeId: promoResult.promoCode.id,
+              userId,
+              orderId: orderRecord.id,
+              discountAmount: promoResult.discountAmount,
+            },
+          }),
+          tx.promoCode.update({
+            where: { id: promoResult.promoCode.id },
+            data: { usageCount: { increment: 1 } },
+          }),
+        ]
+      : [];
 
-    return tx.order.findUnique({
-      where: { id: orderRecord.id },
-      include: {
-        items: {
-          include: { product: { include: orderProductInclude } },
-        },
-      },
-    });
+    // Parallel: insert items, record promo usage, clear cart — all depend only on orderRecord.id
+    await Promise.all([
+      tx.orderItem.createMany({
+        data: cartData.items.map((item) => ({
+          orderId: orderRecord.id,
+          productId: item.productId,
+          productTitle: productById.get(item.productId)?.title ?? null,
+          quantity: item.quantity,
+          perProductMessage: item.message ?? null,
+          price: item.lineTotal / item.quantity,
+        })),
+      }),
+      ...promoOps,
+      tx.cartItem.deleteMany({ where: { cart: { userId } } }),
+      tx.cart.updateMany({ where: { userId }, data: { orderMessage: null } }),
+    ]);
+  }, { maxWait: 5000, timeout: 15000 });
+
+  // Heavy product-include read runs outside the transaction to minimize lock hold time
+  const order = await prisma.order.findUnique({
+    where: { id: createdOrderId },
+    include: { items: { include: { product: { include: orderProductInclude } } } },
   });
 
   const payload = toOrderResponsePayload(order);
 
-  pushNotificationService.notifyOrderPlaced(userId, order.id).catch((err) => {
+  pushNotificationService.notifyOrderPlaced(userId, createdOrderId).catch((err) => {
     console.error('[push] notifyOrderPlaced:', err.message);
   });
 
-  return {
-    order: payload,
-    error: null,
-  };
+  return { order: payload, error: null };
 }
 
 async function getOrderById(orderId, userId = null) {

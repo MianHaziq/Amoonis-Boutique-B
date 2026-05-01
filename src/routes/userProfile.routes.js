@@ -4,6 +4,7 @@ const router = express.Router();
 const {
   getProfile,
   updatePreferredLanguage,
+  updatePhone,
   updateAddress,
 } = require('../controllers/auth.controller');
 const {
@@ -115,6 +116,40 @@ const preferredLanguageValidation = [
   body('preferredLanguage').notEmpty().withMessage('preferredLanguage is required'),
 ];
 router.patch('/profile/preferred-language', preferredLanguageValidation, handleValidationErrors, verifyToken, updatePreferredLanguage);
+
+/**
+ * @swagger
+ * /user/profile/phone:
+ *   patch:
+ *     summary: Update phone number
+ *     description: Saves the authenticated user's phone number. Send an empty string to clear it.
+ *     tags: [User Profile]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [phone]
+ *             properties:
+ *               phone:
+ *                 type: string
+ *                 example: "+971501234567"
+ *     responses:
+ *       200:
+ *         description: Phone number updated successfully
+ *       400:
+ *         description: phone field is required
+ */
+router.patch(
+  '/profile/phone',
+  [body('phone').exists().withMessage('phone is required')],
+  handleValidationErrors,
+  verifyToken,
+  updatePhone
+);
 
 /**
  * @swagger

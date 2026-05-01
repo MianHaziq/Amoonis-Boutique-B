@@ -83,6 +83,7 @@ const options = {
         description:
           'Discount / promo codes. **Admin**: full CRUD at `/promo-codes` (requires ADMIN or MANAGER with `PROMO_CODES`). Scope via `appliesTo` (ALL_PRODUCTS / SPECIFIC_PRODUCTS / SPECIFIC_CATEGORIES). Type is PERCENTAGE (with optional `maxDiscountAmount` cap) or FIXED. Availability via `startsAt`/`expiresAt`; `minOrderAmount` / `maxOrderAmount` guard cart totals; `usageLimit` / `usageLimitPerUser` cap redemptions. **User**: `GET /promo-codes/available` for active offers, `POST /promo-codes/validate` to preview the discount on the user\'s cart before checkout.',
       },
+      { name: 'Addresses', description: 'Saved shipping addresses for the authenticated user. Up to 10 per account. One address is always the default.' },
     ],
     components: {
       securitySchemes: {
@@ -291,7 +292,7 @@ const options = {
         },
         UserProfile: {
           type: 'object',
-          description: 'Current user profile (token-based). Includes optional preferred language and address.',
+          description: 'Current user profile (token-based). Includes phone, preferred language and address.',
           properties: {
             id: { type: 'string', format: 'uuid', description: 'User UUID' },
             email: { type: 'string', format: 'email', description: 'User email' },
@@ -307,9 +308,10 @@ const options = {
             },
             status: { type: 'string', enum: ['ACTIVE', 'INACTIVE'], description: 'Account status' },
             isEmailVerified: { type: 'boolean', description: 'Email verification status' },
+            phone: { type: 'string', nullable: true, example: '+971501234567', description: 'User phone number' },
             preferredLanguage: { type: 'string', nullable: true, example: 'en', description: 'User preferred language code (e.g. en, ar)' },
-            addressCountry: { type: 'string', nullable: true, example: 'United Arab Emirates', description: 'User address country' },
-            addressCity: { type: 'string', nullable: true, example: 'Dubai', description: 'User address city' },
+            addressCountry: { type: 'string', nullable: true, example: 'United Arab Emirates', description: 'User address country (legacy field)' },
+            addressCity: { type: 'string', nullable: true, example: 'Dubai', description: 'User address city (legacy field)' },
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
           },
@@ -327,17 +329,37 @@ const options = {
         },
         AddressInput: {
           type: 'object',
+          description: 'Full shipping address. Used both for saved addresses and inline checkout.',
+          required: ['fullName', 'phone', 'streetAddress', 'city', 'country'],
           properties: {
-            addressCountry: {
-              type: 'string',
-              example: 'United Arab Emirates',
-              description: 'User address country. Optional.',
-            },
-            addressCity: {
-              type: 'string',
-              example: 'Dubai',
-              description: 'User address city. Optional.',
-            },
+            label: { type: 'string', nullable: true, example: 'Home', description: 'Friendly label (Home, Work, etc.)' },
+            fullName: { type: 'string', example: 'Ahmed Al Mansouri', description: 'Recipient full name' },
+            phone: { type: 'string', example: '+971501234567', description: 'Recipient phone number' },
+            streetAddress: { type: 'string', example: 'Villa 14, Al Wasl Road', description: 'Street / building address (line 1)' },
+            apartment: { type: 'string', nullable: true, example: 'Apt 401', description: 'Apartment, floor, villa number (optional line 2)' },
+            city: { type: 'string', example: 'Dubai', description: 'City' },
+            state: { type: 'string', nullable: true, example: 'Dubai', description: 'Emirate / state / province' },
+            postalCode: { type: 'string', nullable: true, example: null, description: 'Postal / ZIP code (optional in UAE)' },
+            country: { type: 'string', example: 'United Arab Emirates', description: 'Country' },
+            isDefault: { type: 'boolean', example: true, description: 'Set as the default address for this user' },
+          },
+        },
+        SavedAddress: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', format: 'uuid' },
+            label: { type: 'string', nullable: true, example: 'Home' },
+            fullName: { type: 'string', example: 'Ahmed Al Mansouri' },
+            phone: { type: 'string', example: '+971501234567' },
+            streetAddress: { type: 'string', example: 'Villa 14, Al Wasl Road' },
+            apartment: { type: 'string', nullable: true, example: null },
+            city: { type: 'string', example: 'Dubai' },
+            state: { type: 'string', nullable: true, example: 'Dubai' },
+            postalCode: { type: 'string', nullable: true, example: null },
+            country: { type: 'string', example: 'United Arab Emirates' },
+            isDefault: { type: 'boolean', example: true },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
           },
         },
         PushTokenRegister: {
@@ -1242,6 +1264,7 @@ const options = {
     './src/routes/section.routes.js',
     './src/routes/analytics.routes.js',
     './src/routes/promoCode.routes.js',
+    './src/routes/address.routes.js',
   ],
 };
 
