@@ -4,7 +4,9 @@ async function createCategory(data) {
   return prisma.category.create({
     data: {
       title: data.title,
+      title_ar: data.title_ar ?? null,
       description: data.description ?? null,
+      description_ar: data.description_ar ?? null,
       image: data.image ?? null,
       totalProducts: 0,
     },
@@ -16,7 +18,9 @@ async function updateCategory(id, data) {
     where: { id },
     data: {
       ...(data.title != null && { title: data.title }),
+      ...(data.title_ar !== undefined && { title_ar: data.title_ar ?? null }),
       ...(data.description !== undefined && { description: data.description }),
+      ...(data.description_ar !== undefined && { description_ar: data.description_ar ?? null }),
       ...(data.image !== undefined && { image: data.image }),
     },
   });

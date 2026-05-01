@@ -28,10 +28,21 @@ const { publicLimiter } = require('../middleware/rateLimit');
  *         application/json:
  *           schema:
  *             $ref: '#/components/schemas/CategoryCreate'
- *           example:
- *             title: Women
- *             description: Women collection
- *             image: null
+ *           examples:
+ *             withArabic:
+ *               summary: With Arabic fields
+ *               value:
+ *                 title: Women
+ *                 title_ar: نساء
+ *                 description: Women collection
+ *                 description_ar: مجموعة نسائية
+ *                 image: null
+ *             minimal:
+ *               summary: English only
+ *               value:
+ *                 title: Women
+ *                 description: Women collection
+ *                 image: null
  *     responses:
  *       201:
  *         description: Category created successfully
@@ -58,14 +69,18 @@ const { publicLimiter } = require('../middleware/rateLimit');
  */
 const createValidation = [
   body('title').trim().notEmpty().withMessage('Title is required'),
+  body('title_ar').optional().trim(),
   body('description').optional().trim(),
+  body('description_ar').optional().trim(),
   body('image').optional().trim(),
 ];
 
 const updateValidation = [
   param('id').isUUID().withMessage('Valid category ID required'),
   body('title').optional().trim().notEmpty(),
+  body('title_ar').optional().trim(),
   body('description').optional().trim(),
+  body('description_ar').optional().trim(),
   body('image').optional().trim(),
 ];
 

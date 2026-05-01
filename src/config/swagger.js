@@ -69,14 +69,14 @@ const options = {
       {
         name: 'Orders',
         description:
-          'Checkout and order management. **GET /orders/history** lists the signed-in customer’s orders; **GET /orders/admin/history** is the staff audit log (optional **includeItems**). **GET /orders/{id}/status** is a lightweight status poll after checkout. Successful checkout triggers an **order placed** push when FCM is configured and **orderStatus** notifications are on. Admin status updates send matching pushes.',
+          'Checkout and order management. **GET /orders/history** lists the signed-in customer\'s orders; **GET /orders/admin/history** is the staff audit log (optional **includeItems**). **GET /orders/{id}/status** is a lightweight status poll after checkout. Successful checkout triggers an **order placed** push when FCM is configured and **orderStatus** notifications are on. Admin status updates send matching pushes.',
       },
       { name: 'Banners', description: 'Landing page banners (public list; admin add, reorder, delete)' },
       { name: 'Sections', description: 'Admin-created sections for user panel (e.g. Ramadan Deals) with products and categories' },
       {
         name: 'Admin analytics',
         description:
-          'Dashboard metrics. **GET /admin/analytics/revenue** — time series + summary. **GET /admin/analytics/kpi** — totals & per-status. **GET /admin/analytics/revenue/by-category** — ranked categories. **GET /admin/analytics/sales/by-day** — each UTC day’s net order count & revenue (zeros filled). Presets include **all_time** (monthly on long horizons). **Admin** or manager with **ORDERS** or **SETTINGS**. **UTC**.',
+          'Dashboard metrics. **GET /admin/analytics/revenue** — time series + summary. **GET /admin/analytics/kpi** — totals & per-status. **GET /admin/analytics/revenue/by-category** — ranked categories. **GET /admin/analytics/sales/by-day** — each UTC day\'s net order count & revenue (zeros filled). Presets include **all_time** (monthly on long horizons). **Admin** or manager with **ORDERS** or **SETTINGS**. **UTC**.',
       },
       {
         name: 'Promo codes',
@@ -473,7 +473,9 @@ const options = {
           properties: {
             id: { type: 'string', format: 'uuid', example: '550e8400-e29b-41d4-a716-446655440000' },
             title: { type: 'string', example: 'Women' },
+            title_ar: { type: 'string', nullable: true, example: 'نساء', description: 'Arabic category name (optional)' },
             description: { type: 'string', example: 'Women collection' },
+            description_ar: { type: 'string', nullable: true, example: 'مجموعة نسائية', description: 'Arabic description (optional)' },
             image: { type: 'string', nullable: true },
             totalProducts: { type: 'integer', example: 5 },
             createdAt: { type: 'string', format: 'date-time' },
@@ -485,7 +487,9 @@ const options = {
           required: ['title'],
           properties: {
             title: { type: 'string', example: 'Women', description: 'Category name' },
+            title_ar: { type: 'string', nullable: true, example: 'نساء', description: 'Arabic category name (optional)' },
             description: { type: 'string', example: 'Women collection' },
+            description_ar: { type: 'string', nullable: true, example: 'مجموعة نسائية', description: 'Arabic description (optional)' },
             image: { type: 'string', nullable: true },
           },
         },
@@ -495,7 +499,9 @@ const options = {
           properties: {
             id: { type: 'string', format: 'uuid' },
             title: { type: 'string', example: 'Summer Dress' },
+            title_ar: { type: 'string', nullable: true, example: 'فستان صيفي', description: 'Arabic product name (optional)' },
             subtitle: { type: 'string', nullable: true },
+            subtitle_ar: { type: 'string', nullable: true, example: 'قطن خفيف', description: 'Arabic subtitle (optional)' },
             image: { type: 'string', nullable: true, description: 'First image URL (thumbnail)' },
             images: { type: 'array', items: { type: 'string' }, description: 'All image URLs in display order (first = top)' },
             descriptions: {
@@ -506,19 +512,23 @@ const options = {
                 properties: {
                   id: { type: 'string', format: 'uuid' },
                   title: { type: 'string', nullable: true, description: 'Optional section title (e.g. "Materials")' },
+                  title_ar: { type: 'string', nullable: true, description: 'Arabic section title (optional)' },
                   description: { type: 'string', description: 'Description text' },
+                  description_ar: { type: 'string', nullable: true, description: 'Arabic description text (optional)' },
                 },
               },
             },
             productOptions: {
               type: 'array',
-              description: 'Optional custom options per product (e.g. Box Color: red, blue, black; Flower Color: orange, red, blue). Each item has title and options array.',
+              description: 'Optional custom options per product (e.g. Box Color: red, blue, black; Flower Color: orange, red, blue). Each item has title and options array. Use options_ar for Arabic option labels (parallel array, 1:1 with options).',
               items: {
                 type: 'object',
                 properties: {
                   id: { type: 'string', format: 'uuid' },
                   title: { type: 'string', example: 'Box Color' },
+                  title_ar: { type: 'string', nullable: true, example: 'لون الصندوق', description: 'Arabic option group title (optional)' },
                   options: { type: 'array', items: { type: 'string' }, example: ['red', 'blue', 'black'] },
+                  options_ar: { type: 'array', items: { type: 'string' }, example: ['أحمر', 'أزرق', 'أسود'], description: 'Arabic labels for each option, same order as options (optional)' },
                 },
               },
             },
@@ -536,7 +546,9 @@ const options = {
           required: ['title', 'price'],
           properties: {
             title: { type: 'string', example: 'Summer Dress' },
+            title_ar: { type: 'string', nullable: true, example: 'فستان صيفي', description: 'Arabic product name (optional)' },
             subtitle: { type: 'string', example: 'Light cotton' },
+            subtitle_ar: { type: 'string', nullable: true, example: 'قطن خفيف', description: 'Arabic subtitle (optional)' },
             descriptions: {
               type: 'array',
               description: 'Multiple descriptions. Each item: title (optional), description (required). Single description needs no title.',
@@ -545,7 +557,9 @@ const options = {
                 required: ['description'],
                 properties: {
                   title: { type: 'string', nullable: true, example: 'Materials' },
+                  title_ar: { type: 'string', nullable: true, example: 'المواد', description: 'Arabic section title (optional)' },
                   description: { type: 'string', example: '100% cotton' },
+                  description_ar: { type: 'string', nullable: true, example: '١٠٠٪ قطن', description: 'Arabic description (optional)' },
                 },
               },
             },
@@ -570,13 +584,15 @@ const options = {
             },
             productOptions: {
               type: 'array',
-              description: 'Optional. Multiple title + options (e.g. Box Color: red, blue, black; Flower Color: orange, red, blue). Number of options per title is flexible.',
+              description: 'Optional. Multiple title + options. Use options_ar for Arabic option labels (parallel array, same order as options).',
               items: {
                 type: 'object',
                 required: ['title'],
                 properties: {
                   title: { type: 'string', example: 'Box Color' },
+                  title_ar: { type: 'string', nullable: true, example: 'لون الصندوق', description: 'Arabic option group title (optional)' },
                   options: { type: 'array', items: { type: 'string' }, example: ['red', 'blue', 'black'] },
+                  options_ar: { type: 'array', items: { type: 'string' }, example: ['أحمر', 'أزرق', 'أسود'], description: 'Arabic labels for options (optional, 1:1 with options)' },
                 },
               },
             },
@@ -612,12 +628,14 @@ const options = {
           },
           properties: {
             title: { type: 'string', example: 'Summer Dress — updated', description: 'Product name' },
+            title_ar: { type: 'string', nullable: true, example: 'فستان صيفي', description: 'Arabic product name (optional)' },
             subtitle: {
               type: 'string',
               nullable: true,
               example: 'Light organic cotton',
               description: 'Short tagline; send `null` or empty to clear if your client supports it',
             },
+            subtitle_ar: { type: 'string', nullable: true, example: 'قطن عضوي خفيف', description: 'Arabic subtitle (optional)' },
             descriptions: {
               type: 'array',
               description:
@@ -627,7 +645,9 @@ const options = {
                 required: ['description'],
                 properties: {
                   title: { type: 'string', nullable: true, example: 'Materials' },
+                  title_ar: { type: 'string', nullable: true, example: 'المواد', description: 'Arabic section title (optional)' },
                   description: { type: 'string', example: '100% cotton' },
+                  description_ar: { type: 'string', nullable: true, example: '١٠٠٪ قطن', description: 'Arabic description (optional)' },
                 },
               },
               example: [{ title: 'Care', description: 'Machine wash cold' }, { description: 'Relaxed fit' }],
@@ -652,7 +672,7 @@ const options = {
               nullable: true,
               example: '550e8400-e29b-41d4-a716-446655440000',
               description:
-                'Set or move to another category using the category’s `id` from **GET /categories**. Send `null` to remove the product from any category.',
+                'Set or move to another category using the category\'s `id` from **GET /categories**. Send `null` to remove the product from any category.',
             },
             images: {
               type: 'array',
@@ -664,13 +684,15 @@ const options = {
             },
             productOptions: {
               type: 'array',
-              description: 'When present, **replaces** all variant-style options (same shape as create).',
+              description: 'When present, **replaces** all variant-style options (same shape as create). Use options_ar for Arabic labels.',
               items: {
                 type: 'object',
                 required: ['title'],
                 properties: {
                   title: { type: 'string', example: 'Size' },
+                  title_ar: { type: 'string', nullable: true, example: 'المقاس', description: 'Arabic option group title (optional)' },
                   options: { type: 'array', items: { type: 'string' }, example: ['S', 'M', 'L'] },
+                  options_ar: { type: 'array', items: { type: 'string' }, example: ['صغير', 'وسط', 'كبير'], description: 'Arabic labels for options (optional, 1:1 with options)' },
                 },
               },
               example: [{ title: 'Size', options: ['S', 'M', 'L'] }, { title: 'Color', options: ['Ivory', 'Sage'] }],
@@ -1024,7 +1046,9 @@ const options = {
             id: { type: 'string', format: 'uuid' },
             code: { type: 'string', example: 'RAMADAN10', description: 'Uppercased unique code users type' },
             name: { type: 'string', example: 'Ramadan 10% off' },
+            name_ar: { type: 'string', nullable: true, example: 'خصم رمضان ١٠٪', description: 'Arabic promo code name (optional)' },
             description: { type: 'string', nullable: true },
+            description_ar: { type: 'string', nullable: true, example: 'عرض رمضان على المتجر بأكمله', description: 'Arabic description (optional)' },
             discountType: { $ref: '#/components/schemas/PromoCodeDiscountType' },
             discountValue: { type: 'number', example: 10 },
             maxDiscountAmount: {
@@ -1087,7 +1111,9 @@ const options = {
               description: 'Unique code. Stored uppercased; the server matches case-insensitively on validate.',
             },
             name: { type: 'string', example: 'Ramadan 10% off', description: 'Admin-facing display name' },
+            name_ar: { type: 'string', nullable: true, example: 'خصم رمضان ١٠٪', description: 'Arabic promo code name (optional)' },
             description: { type: 'string', nullable: true, example: 'Store-wide Ramadan promotion' },
+            description_ar: { type: 'string', nullable: true, example: 'عرض رمضان على المتجر بأكمله', description: 'Arabic description (optional)' },
             discountType: { $ref: '#/components/schemas/PromoCodeDiscountType' },
             discountValue: {
               type: 'number',
@@ -1143,7 +1169,9 @@ const options = {
           properties: {
             code: { type: 'string', minLength: 2, maxLength: 40 },
             name: { type: 'string' },
+            name_ar: { type: 'string', nullable: true, example: 'خصم رمضان ١٠٪', description: 'Arabic promo code name (optional)' },
             description: { type: 'string', nullable: true },
+            description_ar: { type: 'string', nullable: true, example: 'عرض رمضان على المتجر بأكمله', description: 'Arabic description (optional)' },
             discountType: { $ref: '#/components/schemas/PromoCodeDiscountType' },
             discountValue: { type: 'number' },
             maxDiscountAmount: { type: 'number', nullable: true },
@@ -1206,6 +1234,7 @@ const options = {
                 id: { type: 'string', format: 'uuid' },
                 code: { type: 'string' },
                 name: { type: 'string' },
+                name_ar: { type: 'string', nullable: true, description: 'Arabic promo code name (optional)' },
                 discountType: { $ref: '#/components/schemas/PromoCodeDiscountType' },
                 discountValue: { type: 'number' },
                 appliesTo: { $ref: '#/components/schemas/PromoCodeAppliesTo' },
@@ -1232,6 +1261,7 @@ const options = {
           properties: {
             id: { type: 'string', format: 'uuid' },
             title: { type: 'string', example: 'Ramadan Deals' },
+            title_ar: { type: 'string', nullable: true, example: 'عروض رمضان', description: 'Arabic section title (optional)' },
             image: { type: 'string', nullable: true },
             sortOrder: { type: 'integer' },
             createdAt: { type: 'string', format: 'date-time' },

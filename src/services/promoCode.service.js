@@ -82,8 +82,14 @@ function buildPromoCodeData(data, { isUpdate = false } = {}) {
 
   if (data.code !== undefined) out.code = normalizeCode(data.code);
   if (data.name !== undefined) out.name = String(data.name).trim();
+  if (data.name_ar !== undefined) {
+    out.name_ar = data.name_ar === null ? null : String(data.name_ar).trim() || null;
+  }
   if (data.description !== undefined) {
     out.description = data.description === null ? null : String(data.description).trim() || null;
+  }
+  if (data.description_ar !== undefined) {
+    out.description_ar = data.description_ar === null ? null : String(data.description_ar).trim() || null;
   }
 
   if (data.discountType !== undefined) {

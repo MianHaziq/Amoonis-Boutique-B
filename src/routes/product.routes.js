@@ -33,8 +33,32 @@ const { publicLimiter } = require('../middleware/rateLimit');
  *           schema:
  *             $ref: '#/components/schemas/ProductCreate'
  *           examples:
+ *             withArabic:
+ *               summary: With Arabic fields (recommended)
+ *               value:
+ *                 title: Summer Dress
+ *                 title_ar: فستان صيفي
+ *                 subtitle: Light cotton
+ *                 subtitle_ar: قطن خفيف
+ *                 categoryId: 550e8400-e29b-41d4-a716-446655440000
+ *                 descriptions:
+ *                   - description: Comfortable summer dress
+ *                     description_ar: فستان صيفي مريح
+ *                     title: Materials
+ *                     title_ar: المواد
+ *                 price: 49.99
+ *                 discountedPrice: 39.99
+ *                 quantity: 10
+ *                 images:
+ *                   - https://cdn.example.com/products/dress-front.jpg
+ *                   - https://cdn.example.com/products/dress-back.jpg
+ *                 productOptions:
+ *                   - title: Size
+ *                     title_ar: المقاس
+ *                     options: [S, M, L, XL]
+ *                     options_ar: [صغير, وسط, كبير, كبير جداً]
  *             withImages:
- *               summary: With gallery (recommended)
+ *               summary: With gallery (no Arabic)
  *               value:
  *                 title: Summer Dress
  *                 subtitle: Light cotton
@@ -47,17 +71,6 @@ const { publicLimiter } = require('../middleware/rateLimit');
  *                 images:
  *                   - https://cdn.example.com/products/dress-front.jpg
  *                   - https://cdn.example.com/products/dress-back.jpg
- *             inCategory:
- *               summary: In a specific category (no images)
- *               description: Use an id from GET /categories
- *               value:
- *                 title: Linen Shirt
- *                 subtitle: Casual fit
- *                 categoryId: 550e8400-e29b-41d4-a716-446655440000
- *                 descriptions:
- *                   - description: Breathable linen
- *                 price: 59.99
- *                 quantity: 8
  *             minimal:
  *               summary: Text and pricing only
  *               value:
@@ -79,14 +92,18 @@ const { publicLimiter } = require('../middleware/rateLimit');
  */
 const createValidation = [
   body('title').trim().notEmpty().withMessage('Title is required'),
+  body('title_ar').optional().trim(),
   body('subtitle').optional().trim(),
+  body('subtitle_ar').optional().trim(),
   body('price').isFloat({ min: 0 }).withMessage('Price must be a positive number'),
   body('discountedPrice').optional().isFloat({ min: 0 }),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
   body('categoryId').optional().isUUID().withMessage('categoryId must be a valid UUID when provided'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),
+  body('descriptions.*.title_ar').optional().trim(),
   body('descriptions.*.description').optional().trim(),
+  body('descriptions.*.description_ar').optional().trim(),
   body('images')
     .optional()
     .isArray()
@@ -107,21 +124,28 @@ const createValidation = [
   }).withMessage('Each description item must have a non-empty description field'),
   body('productOptions').optional().isArray().withMessage('productOptions must be an array'),
   body('productOptions.*.title').optional().trim().notEmpty().withMessage('Each productOption must have a non-empty title'),
+  body('productOptions.*.title_ar').optional().trim(),
   body('productOptions.*.options').optional().isArray().withMessage('productOptions.*.options must be an array of strings'),
   body('productOptions.*.options.*').optional().isString().trim(),
+  body('productOptions.*.options_ar').optional().isArray().withMessage('productOptions.*.options_ar must be an array of strings'),
+  body('productOptions.*.options_ar.*').optional().isString().trim(),
 ];
 
 const updateValidation = [
   param('id').isUUID().withMessage('Valid product ID required'),
   body('title').optional().trim().notEmpty(),
+  body('title_ar').optional().trim(),
   body('subtitle').optional().trim(),
+  body('subtitle_ar').optional().trim(),
   body('price').optional().isFloat({ min: 0 }),
   body('discountedPrice').optional().isFloat({ min: 0 }),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
   body('categoryId').optional().isUUID(),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),
+  body('descriptions.*.title_ar').optional().trim(),
   body('descriptions.*.description').optional().trim(),
+  body('descriptions.*.description_ar').optional().trim(),
   body('images')
     .optional()
     .isArray()
@@ -142,8 +166,11 @@ const updateValidation = [
   }).withMessage('Each description item must have a non-empty description field'),
   body('productOptions').optional().isArray().withMessage('productOptions must be an array'),
   body('productOptions.*.title').optional().trim().notEmpty().withMessage('Each productOption must have a non-empty title'),
+  body('productOptions.*.title_ar').optional().trim(),
   body('productOptions.*.options').optional().isArray().withMessage('productOptions.*.options must be an array of strings'),
   body('productOptions.*.options.*').optional().isString().trim(),
+  body('productOptions.*.options_ar').optional().isArray().withMessage('productOptions.*.options_ar must be an array of strings'),
+  body('productOptions.*.options_ar.*').optional().isString().trim(),
 ];
 
 const idParam = [param('id').isUUID().withMessage('Valid product ID required')];
@@ -187,8 +214,28 @@ router.post(
  *           schema:
  *             $ref: '#/components/schemas/ProductUpdate'
  *           examples:
+ *             withArabic:
+ *               summary: Update with Arabic fields
+ *               value:
+ *                 title: Summer Dress — sale
+ *                 title_ar: فستان صيفي - تخفيضات
+ *                 subtitle: Light organic cotton
+ *                 subtitle_ar: قطن عضوي خفيف
+ *                 price: 44.99
+ *                 discountedPrice: 34.99
+ *                 quantity: 25
+ *                 descriptions:
+ *                   - title: Care
+ *                     title_ar: العناية
+ *                     description: Machine wash cold
+ *                     description_ar: غسيل بالآلة على بارد
+ *                 productOptions:
+ *                   - title: Size
+ *                     title_ar: المقاس
+ *                     options: [S, M, L, XL]
+ *                     options_ar: [صغير, وسط, كبير, كبير جداً]
  *             fullUpdate:
- *               summary: Update several fields (incl. stock)
+ *               summary: Update several fields (no Arabic)
  *               value:
  *                 title: Summer Dress — sale
  *                 subtitle: Light organic cotton

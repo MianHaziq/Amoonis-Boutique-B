@@ -46,7 +46,9 @@ const createValidation = [
   body('code').isString().trim().notEmpty().withMessage('code is required')
     .isLength({ min: 2, max: 40 }).withMessage('code must be 2–40 characters'),
   body('name').isString().trim().notEmpty().withMessage('name is required'),
+  body('name_ar').optional({ nullable: true }).isString().trim(),
   body('description').optional({ nullable: true }).isString(),
+  body('description_ar').optional({ nullable: true }).isString().trim(),
   body('discountType').isString().isIn(['PERCENTAGE', 'FIXED'])
     .withMessage('discountType must be PERCENTAGE or FIXED'),
   body('discountValue').isFloat({ gt: 0 }).withMessage('discountValue must be > 0'),
@@ -70,7 +72,9 @@ const updateValidation = [
   body('code').optional().isString().trim().notEmpty()
     .isLength({ min: 2, max: 40 }).withMessage('code must be 2–40 characters'),
   body('name').optional().isString().trim().notEmpty(),
+  body('name_ar').optional({ nullable: true }).isString().trim(),
   body('description').optional({ nullable: true }).isString(),
+  body('description_ar').optional({ nullable: true }).isString().trim(),
   body('discountType').optional().isIn(['PERCENTAGE', 'FIXED']),
   body('discountValue').optional().isFloat({ gt: 0 }),
   body('maxDiscountAmount').optional({ nullable: true }).isFloat({ gt: 0 }),
@@ -232,6 +236,24 @@ router.post(
  *         application/json:
  *           schema: { $ref: '#/components/schemas/PromoCodeCreate' }
  *           examples:
+ *             withArabic:
+ *               summary: With Arabic name and description
+ *               value:
+ *                 code: RAMADAN10
+ *                 name: Ramadan 10% off
+ *                 name_ar: خصم رمضان ١٠٪
+ *                 description: Store-wide Ramadan promotion
+ *                 description_ar: عرض رمضان على المتجر بأكمله
+ *                 discountType: PERCENTAGE
+ *                 discountValue: 10
+ *                 maxDiscountAmount: 50
+ *                 appliesTo: ALL_PRODUCTS
+ *                 minOrderAmount: 100
+ *                 startsAt: 2026-03-10T00:00:00Z
+ *                 expiresAt: 2026-04-10T00:00:00Z
+ *                 usageLimit: 500
+ *                 usageLimitPerUser: 1
+ *                 isActive: true
  *             percentageAllProducts:
  *               summary: 10% off everything, Ramadan window
  *               value:

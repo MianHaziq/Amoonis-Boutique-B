@@ -96,11 +96,22 @@ router.get(
  *               sortOrder:
  *                 type: integer
  *                 description: Section order on panel (optional)
- *           example:
- *             title: "Ramadan Deals"
- *             image: "https://example.com/ramadan.jpg"
- *             productIds: ["uuid-1", "uuid-2"]
- *             categoryIds: ["uuid-cat-1"]
+ *           examples:
+ *             withArabic:
+ *               summary: With Arabic title
+ *               value:
+ *                 title: "Ramadan Deals"
+ *                 title_ar: "عروض رمضان"
+ *                 image: "https://example.com/ramadan.jpg"
+ *                 productIds: ["uuid-1", "uuid-2"]
+ *                 categoryIds: ["uuid-cat-1"]
+ *             minimal:
+ *               summary: English only
+ *               value:
+ *                 title: "Ramadan Deals"
+ *                 image: "https://example.com/ramadan.jpg"
+ *                 productIds: ["uuid-1", "uuid-2"]
+ *                 categoryIds: ["uuid-cat-1"]
  *     responses:
  *       201:
  *         description: Section created
@@ -113,6 +124,7 @@ router.get(
  */
 const createValidation = [
   body('title').trim().notEmpty().withMessage('Section title is required'),
+  body('title_ar').optional().trim(),
   body('image').optional().trim(),
   body('productIds').optional().isArray().withMessage('productIds must be an array'),
   body('productIds.*').optional().isUUID().withMessage('Each productId must be a valid UUID'),
@@ -156,6 +168,7 @@ router.post('/', verifyAdminOrManager, requireManagerPermission('SECTIONS'), cre
 const updateValidation = [
   param('id').isUUID().withMessage('Valid section ID required'),
   body('title').optional().trim().notEmpty().withMessage('Section title cannot be empty'),
+  body('title_ar').optional().trim(),
   body('image').optional().trim(),
   body('sortOrder').optional().isInt({ min: 0 }).withMessage('sortOrder must be a non-negative integer'),
   body('productIds').optional().isArray().withMessage('productIds must be an array'),

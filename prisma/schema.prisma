@@ -53,6 +53,7 @@ model User {
 model Section {
   id        String   @id @default(uuid())
   title     String
+  title_ar  String?
   image     String?
   sortOrder Int      @default(0)
   createdAt DateTime @default(now())
@@ -150,11 +151,13 @@ model ContactMessage {
 // ============================================
 
 model Category {
-  id            String    @id @default(uuid())
-  title         String
-  description   String?   @db.Text
-  image         String?
-  totalProducts Int       @default(0)
+  id             String    @id @default(uuid())
+  title          String
+  title_ar       String?
+  description    String?   @db.Text
+  description_ar String?   @db.Text
+  image          String?
+  totalProducts  Int       @default(0)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -168,7 +171,9 @@ model Category {
 model Product {
   id              String   @id @default(uuid())
   title           String
+  title_ar        String?
   subtitle        String?
+  subtitle_ar     String?
   price           Decimal  @db.Decimal(10, 2)
   discountedPrice Decimal? @db.Decimal(10, 2)
   quantity        Int      @default(0)
@@ -190,11 +195,13 @@ model Product {
 }
 
 model ProductOption {
-  id        String   @id @default(uuid())
-  productId String
-  title     String
-  options   String[]
-  sortOrder Int      @default(0)
+  id         String   @id @default(uuid())
+  productId  String
+  title      String
+  title_ar   String?
+  options    String[]
+  options_ar String[] @default([])
+  sortOrder  Int      @default(0)
   createdAt DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -204,11 +211,13 @@ model ProductOption {
 }
 
 model ProductDescription {
-  id          String   @id @default(uuid())
-  productId   String
-  title       String?  @db.Text
-  description String   @db.Text
-  sortOrder   Int      @default(0)
+  id             String   @id @default(uuid())
+  productId      String
+  title          String?  @db.Text
+  title_ar       String?  @db.Text
+  description    String   @db.Text
+  description_ar String?  @db.Text
+  sortOrder      Int      @default(0)
   createdAt   DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -339,6 +348,7 @@ model OrderItem {
   productId         String?
   /// Snapshot of product title at order/delete time. Keeps order history readable after a product is removed from the catalog.
   productTitle      String?
+  productTitle_ar   String?
   quantity          Int
   perProductMessage String?  @db.Text
   price             Decimal  @db.Decimal(10, 2)
@@ -392,7 +402,9 @@ model PromoCode {
   id                String          @id @default(uuid())
   code              String          @unique
   name              String
+  name_ar           String?
   description       String?         @db.Text
+  description_ar    String?         @db.Text
 
   discountType      DiscountType
   discountValue     Decimal         @db.Decimal(10, 2)
