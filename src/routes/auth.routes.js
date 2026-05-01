@@ -15,6 +15,7 @@ const {
 } = require('../controllers/auth.controller');
 const { handleValidationErrors } = require('../middleware/validate');
 const { verifyToken } = require('../middleware/auth');
+const { authStrictLimiter, passwordResetLimiter } = require('../middleware/rateLimit');
 
 /**
  * @swagger
@@ -66,7 +67,7 @@ const signupValidation = [
   body('email').trim().isEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
 ];
-router.post('/signup', signupValidation, handleValidationErrors, signup);
+router.post('/signup', authStrictLimiter, signupValidation, handleValidationErrors, signup);
 
 /**
  * @swagger
@@ -107,7 +108,7 @@ const signinValidation = [
   body('email').trim().isEmail().withMessage('Valid email is required'),
   body('password').notEmpty().withMessage('Password is required'),
 ];
-router.post('/signin', signinValidation, handleValidationErrors, signin);
+router.post('/signin', authStrictLimiter, signinValidation, handleValidationErrors, signin);
 
 /**
  * @swagger
@@ -150,7 +151,7 @@ router.post('/signin', signinValidation, handleValidationErrors, signin);
  *       400:
  *         description: Invalid token
  */
-router.post('/google', googleLogin);
+router.post('/google', authStrictLimiter, googleLogin);
 
 /**
  * @swagger
@@ -221,7 +222,7 @@ router.post('/google', googleLogin);
  *       503:
  *         description: Apple Sign In not configured (APPLE_CLIENT_ID missing)
  */
-router.post('/apple', appleLogin);
+router.post('/apple', authStrictLimiter, appleLogin);
 
 /**
  * @swagger
@@ -246,7 +247,7 @@ router.post('/apple', appleLogin);
  *         description: Reset email sent (if email exists)
  */
 const forgotPasswordValidation = [body('email').trim().isEmail().withMessage('Valid email is required')];
-router.post('/forgot-password', forgotPasswordValidation, handleValidationErrors, forgotPassword);
+router.post('/forgot-password', passwordResetLimiter, forgotPasswordValidation, handleValidationErrors, forgotPassword);
 
 /**
  * @swagger
@@ -280,7 +281,7 @@ const resetPasswordValidation = [
   body('token').notEmpty().withMessage('Token is required'),
   body('newPassword').isLength({ min: 6 }).withMessage('New password must be at least 6 characters'),
 ];
-router.post('/reset-password', resetPasswordValidation, handleValidationErrors, resetPassword);
+router.post('/reset-password', passwordResetLimiter, resetPasswordValidation, handleValidationErrors, resetPassword);
 
 /**
  * @swagger
