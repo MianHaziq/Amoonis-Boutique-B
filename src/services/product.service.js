@@ -1,5 +1,4 @@
 const prisma = require('../config/db');
-const categoryService = require('./category.service');
 
 const MAX_IMAGES = 10;
 const ACTIVE_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PROCESSING'];
@@ -102,49 +101,56 @@ async function createProduct(data) {
   const quantity = data.quantity != null ? Math.max(0, parseInt(data.quantity, 10) || 0) : 0;
   const productOptionRows = normalizeProductOptions(data.productOptions);
 
-  const product = await prisma.product.create({
-    data: {
-      title: data.title,
-      title_ar: data.title_ar ?? null,
-      subtitle: data.subtitle ?? null,
-      subtitle_ar: data.subtitle_ar ?? null,
-      price: data.price,
-      discountedPrice: data.discountedPrice ?? null,
-      quantity,
-      ...(categoryId ? { categoryId } : {}),
-      ...(imageUrls.length > 0
-        ? {
-            images: {
-              create: imageUrls.map((url, i) => ({ url: url.trim(), sortOrder: i })),
-            },
-          }
-        : {}),
-      ...(descriptionRows.length > 0
-        ? {
-            descriptions: {
-              create: descriptionRows,
-            },
-          }
-        : {}),
-      ...(productOptionRows.length > 0
-        ? {
-            productOptions: {
-              create: productOptionRows,
-            },
-          }
-        : {}),
-    },
-    include: {
-      category: { select: { id: true, title: true } },
-      images: { orderBy: { sortOrder: 'asc' } },
-      descriptions: { orderBy: { sortOrder: 'asc' } },
-      productOptions: { orderBy: { sortOrder: 'asc' } },
-    },
+  // Wrap product create + category counter bump in a single transaction so a counter-update
+  // failure rolls the product create back instead of leaving the cached count drifted.
+  return prisma.$transaction(async (tx) => {
+    const product = await tx.product.create({
+      data: {
+        title: data.title,
+        title_ar: data.title_ar ?? null,
+        subtitle: data.subtitle ?? null,
+        subtitle_ar: data.subtitle_ar ?? null,
+        price: data.price,
+        discountedPrice: data.discountedPrice ?? null,
+        quantity,
+        ...(categoryId ? { categoryId } : {}),
+        ...(imageUrls.length > 0
+          ? {
+              images: {
+                create: imageUrls.map((url, i) => ({ url: url.trim(), sortOrder: i })),
+              },
+            }
+          : {}),
+        ...(descriptionRows.length > 0
+          ? {
+              descriptions: {
+                create: descriptionRows,
+              },
+            }
+          : {}),
+        ...(productOptionRows.length > 0
+          ? {
+              productOptions: {
+                create: productOptionRows,
+              },
+            }
+          : {}),
+      },
+      include: {
+        category: { select: { id: true, title: true } },
+        images: { orderBy: { sortOrder: 'asc' } },
+        descriptions: { orderBy: { sortOrder: 'asc' } },
+        productOptions: { orderBy: { sortOrder: 'asc' } },
+      },
+    });
+    if (categoryId) {
+      await tx.category.update({
+        where: { id: categoryId },
+        data: { totalProducts: { increment: 1 } },
+      });
+    }
+    return product;
   });
-  if (categoryId) {
-    await categoryService.incrementCategoryProductCount(categoryId);
-  }
-  return product;
 }
 
 async function updateProduct(id, data) {
@@ -165,55 +171,65 @@ async function updateProduct(id, data) {
     ...(data.categoryId !== undefined && { categoryId: data.categoryId || null }),
   };
 
-  if (data.categoryId !== undefined && data.categoryId !== existing.categoryId) {
-    if (existing.categoryId) {
-      await categoryService.decrementCategoryProductCount(existing.categoryId);
+  // All product mutations + counter rebalances run inside one transaction so a partial
+  // failure (e.g. counter update on a deleted target category) rolls everything back.
+  await prisma.$transaction(async (tx) => {
+    if (data.categoryId !== undefined && data.categoryId !== existing.categoryId) {
+      if (existing.categoryId) {
+        await tx.category.update({
+          where: { id: existing.categoryId },
+          data: { totalProducts: { decrement: 1 } },
+        });
+      }
+      if (data.categoryId) {
+        await tx.category.update({
+          where: { id: data.categoryId },
+          data: { totalProducts: { increment: 1 } },
+        });
+      }
     }
-    if (data.categoryId) {
-      await categoryService.incrementCategoryProductCount(data.categoryId);
-    }
-  }
 
-  await prisma.product.update({
-    where: { id },
-    data: updatePayload,
+    await tx.product.update({
+      where: { id },
+      data: updatePayload,
+    });
+
+    if (data.images !== undefined) {
+      const imageUrls = Array.isArray(data.images)
+        ? data.images.filter((u) => typeof u === 'string' && u.trim()).slice(0, MAX_IMAGES)
+        : [];
+      await tx.productImage.deleteMany({ where: { productId: id } });
+      if (imageUrls.length > 0) {
+        await tx.productImage.createMany({
+          data: imageUrls.map((url, i) => ({
+            productId: id,
+            url: url.trim(),
+            sortOrder: i,
+          })),
+        });
+      }
+    }
+
+    if (data.descriptions !== undefined) {
+      await tx.productDescription.deleteMany({ where: { productId: id } });
+      const descriptionRows = normalizeDescriptions(data.descriptions);
+      if (descriptionRows.length > 0) {
+        await tx.productDescription.createMany({
+          data: descriptionRows.map((row) => ({ productId: id, ...row })),
+        });
+      }
+    }
+
+    if (data.productOptions !== undefined) {
+      await tx.productOption.deleteMany({ where: { productId: id } });
+      const productOptionRows = normalizeProductOptions(data.productOptions);
+      if (productOptionRows.length > 0) {
+        await tx.productOption.createMany({
+          data: productOptionRows.map((row) => ({ productId: id, ...row })),
+        });
+      }
+    }
   });
-
-  if (data.images !== undefined) {
-    const imageUrls = Array.isArray(data.images)
-      ? data.images.filter((u) => typeof u === 'string' && u.trim()).slice(0, MAX_IMAGES)
-      : [];
-    await prisma.productImage.deleteMany({ where: { productId: id } });
-    if (imageUrls.length > 0) {
-      await prisma.productImage.createMany({
-        data: imageUrls.map((url, i) => ({
-          productId: id,
-          url: url.trim(),
-          sortOrder: i,
-        })),
-      });
-    }
-  }
-
-  if (data.descriptions !== undefined) {
-    await prisma.productDescription.deleteMany({ where: { productId: id } });
-    const descriptionRows = normalizeDescriptions(data.descriptions);
-    if (descriptionRows.length > 0) {
-      await prisma.productDescription.createMany({
-        data: descriptionRows.map((row) => ({ productId: id, ...row })),
-      });
-    }
-  }
-
-  if (data.productOptions !== undefined) {
-    await prisma.productOption.deleteMany({ where: { productId: id } });
-    const productOptionRows = normalizeProductOptions(data.productOptions);
-    if (productOptionRows.length > 0) {
-      await prisma.productOption.createMany({
-        data: productOptionRows.map((row) => ({ productId: id, ...row })),
-      });
-    }
-  }
 
   return prisma.product.findUnique({
     where: { id },
@@ -250,11 +266,14 @@ async function deleteProduct(id) {
       data: { productTitle: product.title, productTitle_ar: product.title_ar ?? null },
     });
     await tx.product.delete({ where: { id } });
+    if (product.categoryId) {
+      await tx.category.update({
+        where: { id: product.categoryId },
+        data: { totalProducts: { decrement: 1 } },
+      });
+    }
   });
 
-  if (product.categoryId) {
-    await categoryService.decrementCategoryProductCount(product.categoryId);
-  }
   return product;
 }
 
