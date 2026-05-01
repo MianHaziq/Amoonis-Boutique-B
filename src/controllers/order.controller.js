@@ -4,7 +4,7 @@ const { success, error } = require('../utils/response');
 async function createOrder(req, res, next) {
   try {
     const userId = req.userId;
-    const { order, error: errMsg } = await orderService.createOrder(userId);
+    const { order, error: errMsg } = await orderService.createOrder(userId, req.body);
     if (errMsg) return error(res, errMsg, 400);
     return success(res, order, 'Order placed successfully', 201);
   } catch (err) {
