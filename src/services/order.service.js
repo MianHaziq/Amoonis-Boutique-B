@@ -102,15 +102,19 @@ function validateShippingAddress(addr) {
 async function createOrder(userId, checkoutInput = {}) {
   const { addressId, shippingAddress, paymentMethod = 'COD', promoCode } = checkoutInput;
 
-  // Validate payment method
   if (!VALID_PAYMENT_METHODS.includes(paymentMethod)) {
     return { order: null, error: `Invalid paymentMethod. Supported: ${VALID_PAYMENT_METHODS.join(', ')}` };
   }
 
-  // Resolve shipping address: saved address takes priority over inline
+  // Resolve address and fetch cart in parallel when addressId is provided
   let resolvedAddress = null;
+  let cartData;
+
   if (addressId) {
-    const saved = await prisma.address.findFirst({ where: { id: addressId, userId } });
+    const [saved, cart] = await Promise.all([
+      prisma.address.findFirst({ where: { id: addressId, userId } }),
+      cartService.getCart(userId),
+    ]);
     if (!saved) return { order: null, error: 'Address not found' };
     resolvedAddress = {
       addressId: saved.id,
@@ -123,6 +127,7 @@ async function createOrder(userId, checkoutInput = {}) {
       postalCode: saved.postalCode ?? null,
       country: saved.country,
     };
+    cartData = cart;
   } else if (shippingAddress) {
     const addrError = validateShippingAddress(shippingAddress);
     if (addrError) return { order: null, error: addrError };
@@ -137,11 +142,11 @@ async function createOrder(userId, checkoutInput = {}) {
       postalCode: shippingAddress.postalCode ? String(shippingAddress.postalCode).trim() : null,
       country: String(shippingAddress.country).trim(),
     };
+    cartData = await cartService.getCart(userId);
   } else {
     return { order: null, error: 'A shipping address is required. Provide addressId or shippingAddress.' };
   }
 
-  const cartData = await cartService.getCart(userId);
   if (!cartData.items || cartData.items.length === 0) {
     return { order: null, error: 'Cart is empty' };
   }
@@ -153,7 +158,6 @@ async function createOrder(userId, checkoutInput = {}) {
   });
   const productById = new Map(productRows.map((p) => [p.id, p]));
 
-  // Build items array for promo validation (needs price + categoryId)
   const promoItems = cartData.items.map((item) => ({
     productId: item.productId,
     quantity: item.quantity,
@@ -161,16 +165,18 @@ async function createOrder(userId, checkoutInput = {}) {
     categoryId: productById.get(item.productId)?.categoryId ?? null,
   }));
 
-  // Validate and compute promo discount (before transaction — read-only)
+  // Validate and compute promo discount before the transaction (read-only)
   let promoResult = null;
   if (promoCode) {
     try {
       promoResult = await promoCodeService.validateAndCalculate(promoCode, userId, promoItems);
     } catch (err) {
-      const promoErrors = ['PROMO_NOT_FOUND', 'PROMO_INACTIVE', 'PROMO_EXPIRED', 'PROMO_NOT_STARTED',
+      const promoErrors = new Set([
+        'PROMO_NOT_FOUND', 'PROMO_INACTIVE', 'PROMO_EXPIRED', 'PROMO_NOT_STARTED',
         'PROMO_LIMIT_REACHED', 'PROMO_USER_LIMIT_REACHED', 'PROMO_MIN_ORDER_NOT_MET',
-        'PROMO_MAX_ORDER_EXCEEDED', 'PROMO_NO_ELIGIBLE_ITEMS', 'PROMO_INVALID_INPUT'];
-      if (promoErrors.includes(err.code)) return { order: null, error: err.message };
+        'PROMO_MAX_ORDER_EXCEEDED', 'PROMO_NO_ELIGIBLE_ITEMS', 'PROMO_INVALID_INPUT',
+      ]);
+      if (promoErrors.has(err.code)) return { order: null, error: err.message };
       throw err;
     }
   }
@@ -178,15 +184,16 @@ async function createOrder(userId, checkoutInput = {}) {
   const finalTotal = promoResult ? promoResult.total : cartData.totalAmount;
   const discountAmount = promoResult ? promoResult.discountAmount : null;
 
-  const order = await prisma.$transaction(async (tx) => {
+  let createdOrderId;
+  await prisma.$transaction(async (tx) => {
     const orderRecord = await tx.order.create({
       data: {
         userId,
         orderMessage: cartData.orderMessage ?? null,
         totalAmount: finalTotal,
-        discountAmount: discountAmount,
-        appliedPromoCode: promoResult ? promoResult.promoCode.code : null,
-        appliedPromoCodeId: promoResult ? promoResult.promoCode.id : null,
+        discountAmount,
+        appliedPromoCode: promoResult?.promoCode.code ?? null,
+        appliedPromoCodeId: promoResult?.promoCode.id ?? null,
         paymentMethod,
         addressId: resolvedAddress.addressId,
         shippingFullName: resolvedAddress.fullName,
@@ -201,48 +208,52 @@ async function createOrder(userId, checkoutInput = {}) {
       },
     });
 
-    await tx.orderItem.createMany({
-      data: cartData.items.map((item) => ({
-        orderId: orderRecord.id,
-        productId: item.productId,
-        productTitle: productById.get(item.productId)?.title ?? null,
-        quantity: item.quantity,
-        perProductMessage: item.message ?? null,
-        price: item.lineTotal / item.quantity,
-      })),
-    });
+    createdOrderId = orderRecord.id;
 
-    // Record promo usage inside the same transaction
-    if (promoResult) {
-      await tx.promoCodeUsage.create({
-        data: {
-          promoCodeId: promoResult.promoCode.id,
-          userId,
+    const promoOps = promoResult
+      ? [
+          tx.promoCodeUsage.create({
+            data: {
+              promoCodeId: promoResult.promoCode.id,
+              userId,
+              orderId: orderRecord.id,
+              discountAmount: promoResult.discountAmount,
+            },
+          }),
+          tx.promoCode.update({
+            where: { id: promoResult.promoCode.id },
+            data: { usageCount: { increment: 1 } },
+          }),
+        ]
+      : [];
+
+    // Parallel: insert items, record promo usage, clear cart — all depend only on orderRecord.id
+    await Promise.all([
+      tx.orderItem.createMany({
+        data: cartData.items.map((item) => ({
           orderId: orderRecord.id,
-          discountAmount: promoResult.discountAmount,
-        },
-      });
-      await tx.promoCode.update({
-        where: { id: promoResult.promoCode.id },
-        data: { usageCount: { increment: 1 } },
-      });
-    }
+          productId: item.productId,
+          productTitle: productById.get(item.productId)?.title ?? null,
+          quantity: item.quantity,
+          perProductMessage: item.message ?? null,
+          price: item.lineTotal / item.quantity,
+        })),
+      }),
+      ...promoOps,
+      tx.cartItem.deleteMany({ where: { cart: { userId } } }),
+      tx.cart.updateMany({ where: { userId }, data: { orderMessage: null } }),
+    ]);
+  }, { maxWait: 5000, timeout: 15000 });
 
-    const cart = await tx.cart.findUnique({ where: { userId } });
-    if (cart) {
-      await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
-      await tx.cart.update({ where: { id: cart.id }, data: { orderMessage: null } });
-    }
-
-    return tx.order.findUnique({
-      where: { id: orderRecord.id },
-      include: { items: { include: { product: { include: orderProductInclude } } } },
-    });
+  // Heavy product-include read runs outside the transaction to minimize lock hold time
+  const order = await prisma.order.findUnique({
+    where: { id: createdOrderId },
+    include: { items: { include: { product: { include: orderProductInclude } } } },
   });
 
   const payload = toOrderResponsePayload(order);
 
-  pushNotificationService.notifyOrderPlaced(userId, order.id).catch((err) => {
+  pushNotificationService.notifyOrderPlaced(userId, createdOrderId).catch((err) => {
     console.error('[push] notifyOrderPlaced:', err.message);
   });
 
