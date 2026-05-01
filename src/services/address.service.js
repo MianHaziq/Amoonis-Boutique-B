@@ -1,5 +1,7 @@
 const prisma = require('../config/db');
 
+const MAX_ADDRESSES_PER_USER = 10;
+
 function mapAddress(a) {
   return {
     id: a.id,
@@ -32,15 +34,20 @@ async function getAddressById(userId, addressId) {
 }
 
 async function createAddress(userId, data) {
-  const { label, fullName, phone, streetAddress, apartment, city, state, postalCode, country, isDefault } = data;
+  const { label, fullName, phone, streetAddress, apartment, city, state, postalCode, country } = data;
+  let makeDefault = Boolean(data.isDefault);
 
   return prisma.$transaction(async (tx) => {
-    if (isDefault) {
+    const existingCount = await tx.address.count({ where: { userId } });
+    if (existingCount >= MAX_ADDRESSES_PER_USER) {
+      const err = new Error(`You can save up to ${MAX_ADDRESSES_PER_USER} addresses`);
+      err.code = 'ADDRESS_LIMIT_REACHED';
+      throw err;
+    }
+
+    if (existingCount === 0) makeDefault = true;
+    if (makeDefault) {
       await tx.address.updateMany({ where: { userId }, data: { isDefault: false } });
-    } else {
-      // First address for this user is default automatically
-      const count = await tx.address.count({ where: { userId } });
-      if (count === 0) data.isDefault = true;
     }
 
     const row = await tx.address.create({
@@ -55,7 +62,7 @@ async function createAddress(userId, data) {
         state: state ? String(state).trim() : null,
         postalCode: postalCode ? String(postalCode).trim() : null,
         country: String(country).trim(),
-        isDefault: data.isDefault ?? false,
+        isDefault: makeDefault,
       },
     });
 
@@ -64,9 +71,6 @@ async function createAddress(userId, data) {
 }
 
 async function updateAddress(userId, addressId, data) {
-  const existing = await prisma.address.findFirst({ where: { id: addressId, userId } });
-  if (!existing) return null;
-
   const { label, fullName, phone, streetAddress, apartment, city, state, postalCode, country, isDefault } = data;
 
   const patch = {};
@@ -81,43 +85,73 @@ async function updateAddress(userId, addressId, data) {
   if (country !== undefined) patch.country = String(country).trim();
   if (isDefault !== undefined) patch.isDefault = Boolean(isDefault);
 
-  return prisma.$transaction(async (tx) => {
-    if (patch.isDefault === true) {
-      await tx.address.updateMany({ where: { userId }, data: { isDefault: false } });
-    }
-    const row = await tx.address.update({ where: { id: addressId }, data: patch });
-    return mapAddress(row);
-  });
+  if (Object.keys(patch).length === 0) return null;
+
+  try {
+    return await prisma.$transaction(async (tx) => {
+      if (patch.isDefault === true) {
+        await tx.address.updateMany({ where: { userId }, data: { isDefault: false } });
+      }
+      // updateMany filters by both id AND userId — clean ownership, no TOCTOU
+      const result = await tx.address.updateMany({
+        where: { id: addressId, userId },
+        data: patch,
+      });
+      if (result.count === 0) return null;
+      const row = await tx.address.findUnique({ where: { id: addressId } });
+      return row ? mapAddress(row) : null;
+    });
+  } catch (err) {
+    if (err.code === 'P2025') return null;
+    throw err;
+  }
 }
 
 async function deleteAddress(userId, addressId) {
-  const existing = await prisma.address.findFirst({ where: { id: addressId, userId } });
-  if (!existing) return false;
-
-  await prisma.$transaction(async (tx) => {
-    await tx.address.delete({ where: { id: addressId } });
-    // If this was the default, promote the most recent remaining address
-    if (existing.isDefault) {
-      const next = await tx.address.findFirst({
-        where: { userId },
-        orderBy: { createdAt: 'desc' },
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const existing = await tx.address.findFirst({
+        where: { id: addressId, userId },
+        select: { id: true, isDefault: true },
       });
-      if (next) await tx.address.update({ where: { id: next.id }, data: { isDefault: true } });
-    }
-  });
+      if (!existing) return false;
 
-  return true;
+      await tx.address.delete({ where: { id: addressId } });
+
+      if (existing.isDefault) {
+        const next = await tx.address.findFirst({
+          where: { userId },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true },
+        });
+        if (next) await tx.address.update({ where: { id: next.id }, data: { isDefault: true } });
+      }
+
+      return true;
+    });
+  } catch (err) {
+    if (err.code === 'P2025') return false;
+    throw err;
+  }
 }
 
 async function setDefault(userId, addressId) {
-  const existing = await prisma.address.findFirst({ where: { id: addressId, userId } });
-  if (!existing) return null;
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const existing = await tx.address.findFirst({
+        where: { id: addressId, userId },
+        select: { id: true },
+      });
+      if (!existing) return null;
 
-  return prisma.$transaction(async (tx) => {
-    await tx.address.updateMany({ where: { userId }, data: { isDefault: false } });
-    const row = await tx.address.update({ where: { id: addressId }, data: { isDefault: true } });
-    return mapAddress(row);
-  });
+      await tx.address.updateMany({ where: { userId }, data: { isDefault: false } });
+      const row = await tx.address.update({ where: { id: addressId }, data: { isDefault: true } });
+      return mapAddress(row);
+    });
+  } catch (err) {
+    if (err.code === 'P2025') return null;
+    throw err;
+  }
 }
 
-module.exports = { listAddresses, getAddressById, createAddress, updateAddress, deleteAddress, setDefault };
+module.exports = { listAddresses, getAddressById, createAddress, updateAddress, deleteAddress, setDefault, MAX_ADDRESSES_PER_USER };

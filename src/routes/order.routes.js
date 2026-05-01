@@ -123,7 +123,7 @@ const statusBody = [
 const checkoutBody = [
   body('addressId').optional().isUUID().withMessage('addressId must be a valid UUID'),
   body('paymentMethod').optional().isIn(['COD']).withMessage('paymentMethod must be COD'),
-  body('promoCode').optional().trim(),
+  body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
   body('shippingAddress').optional().isObject().withMessage('shippingAddress must be an object'),
   body('shippingAddress.fullName').optional().trim(),
   body('shippingAddress.phone').optional().trim(),
