@@ -1,11 +1,16 @@
 const prisma = require('../config/db');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const { OAuth2Client } = require('google-auth-library');
 const nodemailer = require('nodemailer');
 const { verifyAppleToken } = require('../services/appleAuth.service');
 const { success, error } = require('../utils/response');
+
+function hashResetToken(rawToken) {
+  return crypto.createHash('sha256').update(String(rawToken)).digest('hex');
+}
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -202,18 +207,44 @@ const googleLogin = async (req, res, next) => {
           },
         });
       } else {
-        // 3. Brand new user
-        user = await prisma.user.create({
-          data: {
-            googleId,
-            email,
-            firstName,
-            lastName,
-            avatar: picture || null,
-            isEmailVerified: true,
-          },
-        });
-        isNewUser = true;
+        // 3. Brand new user — use upsert on googleId to survive the race where two parallel
+        // first-time logins both miss the findUnique above. The unique googleId constraint
+        // serializes the second request and we end up with one row, no 500.
+        try {
+          user = await prisma.user.upsert({
+            where: { googleId },
+            update: {
+              firstName: firstName || undefined,
+              lastName: lastName || undefined,
+              avatar: picture || undefined,
+            },
+            create: {
+              googleId,
+              email,
+              firstName,
+              lastName,
+              avatar: picture || null,
+              isEmailVerified: true,
+            },
+          });
+          // If the row was just created (no prior link), treat as new user for the response.
+          isNewUser = !user.updatedAt || user.createdAt.getTime() === user.updatedAt.getTime();
+        } catch (raceErr) {
+          // Email-conflict race: another request linked Google to an existing email between
+          // findUnique and upsert. Re-fetch by email and treat as link.
+          if (raceErr.code === 'P2002') {
+            user = await prisma.user.findUnique({ where: { email } });
+            if (user && !user.googleId) {
+              user = await prisma.user.update({
+                where: { id: user.id },
+                data: { googleId, isEmailVerified: true, avatar: picture || user.avatar },
+              });
+            }
+            if (!user) throw raceErr;
+          } else {
+            throw raceErr;
+          }
+        }
       }
     }
 
@@ -280,7 +311,7 @@ const appleLogin = async (req, res, next) => {
         });
       }
     } else {
-      user = await prisma.user.findUnique({ where: { email } });
+      user = email ? await prisma.user.findUnique({ where: { email } }) : null;
       if (user) {
         user = await prisma.user.update({
           where: { id: user.id },
@@ -297,16 +328,39 @@ const appleLogin = async (req, res, next) => {
             400
           );
         }
-        user = await prisma.user.create({
-          data: {
-            appleId,
-            email,
-            firstName: firstName || 'Apple',
-            lastName: lastName || 'User',
-            isEmailVerified: !!emailFromToken,
-          },
-        });
-        isNewUser = true;
+        // Upsert on appleId to absorb the race where two parallel first-time Apple logins
+        // both miss the findUnique. Postgres unique constraint serializes them.
+        try {
+          user = await prisma.user.upsert({
+            where: { appleId },
+            update: {
+              firstName: firstName || undefined,
+              lastName: lastName || undefined,
+            },
+            create: {
+              appleId,
+              email,
+              firstName: firstName || 'Apple',
+              lastName: lastName || 'User',
+              isEmailVerified: !!emailFromToken,
+            },
+          });
+          isNewUser = !user.updatedAt || user.createdAt.getTime() === user.updatedAt.getTime();
+        } catch (raceErr) {
+          // Email already exists with a different unique key — link Apple to that account.
+          if (raceErr.code === 'P2002') {
+            user = await prisma.user.findUnique({ where: { email } });
+            if (user && !user.appleId) {
+              user = await prisma.user.update({
+                where: { id: user.id },
+                data: { appleId, isEmailVerified: user.isEmailVerified || !!emailFromToken },
+              });
+            }
+            if (!user) throw raceErr;
+          } else {
+            throw raceErr;
+          }
+        }
       }
     }
 
@@ -389,11 +443,13 @@ const forgotPassword = async (req, res, next) => {
     }
 
     const resetToken = uuidv4();
+    const resetTokenHash = hashResetToken(resetToken);
     const resetTokenExpiry = new Date(Date.now() + 3600000); // 1 hour
 
+    // Persist only the SHA-256 hash; the raw token leaves the server only via email.
     await prisma.user.update({
       where: { email },
-      data: { resetToken, resetTokenExpiry },
+      data: { resetToken: resetTokenHash, resetTokenExpiry },
     });
 
     const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
@@ -425,9 +481,11 @@ const resetPassword = async (req, res, next) => {
       return error(res, 'Token and new password are required', 400);
     }
 
+    // Compare against the stored SHA-256 hash; raw token never sits in the DB.
+    const tokenHash = hashResetToken(token);
     const user = await prisma.user.findFirst({
       where: {
-        resetToken: token,
+        resetToken: tokenHash,
         resetTokenExpiry: { gt: new Date() },
       },
     });

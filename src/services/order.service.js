@@ -170,14 +170,56 @@ async function createOrder(userId, checkoutInput = {}) {
   const productIds = cartData.items.map((it) => it.productId);
   const productRows = await prisma.product.findMany({
     where: { id: { in: productIds } },
-    select: { id: true, title: true, title_ar: true, categoryId: true },
+    select: {
+      id: true,
+      title: true,
+      title_ar: true,
+      categoryId: true,
+      price: true,
+      discountedPrice: true,
+      quantity: true,
+    },
   });
   const productById = new Map(productRows.map((p) => [p.id, p]));
+
+  // Early stock visibility check — surfaces OUT_OF_STOCK before order creation so the
+  // mobile app can show a friendly message instead of completing checkout for unavailable
+  // items. Final atomic enforcement still happens at PENDING→CONFIRMED.
+  const outOfStock = [];
+  for (const it of cartData.items) {
+    const p = productById.get(it.productId);
+    if (!p) {
+      return { order: null, error: 'A product in your cart is no longer available' };
+    }
+    if (p.quantity < it.quantity) {
+      outOfStock.push({
+        productId: p.id,
+        title: p.title,
+        requested: it.quantity,
+        available: p.quantity,
+      });
+    }
+  }
+  if (outOfStock.length > 0) {
+    const first = outOfStock[0];
+    return {
+      order: null,
+      error: `${first.title}: only ${first.available} in stock (you requested ${first.requested})`,
+    };
+  }
+
+  // Compute server-trusted line prices from the live Product row instead of the cart's
+  // snapshot. Closes the price-edit drift window between cart load and order commit.
+  function livePrice(productRow) {
+    const p = productRow?.discountedPrice ?? productRow?.price;
+    return p == null ? 0 : Number(p);
+  }
+  const livePriceById = new Map(productRows.map((p) => [p.id, livePrice(p)]));
 
   const promoItems = cartData.items.map((item) => ({
     productId: item.productId,
     quantity: item.quantity,
-    price: item.lineTotal / item.quantity,
+    price: livePriceById.get(item.productId) ?? 0,
     categoryId: productById.get(item.productId)?.categoryId ?? null,
   }));
 
@@ -197,17 +239,48 @@ async function createOrder(userId, checkoutInput = {}) {
     }
   }
 
-  const finalTotal = promoResult ? promoResult.total : cartData.totalAmount;
-  const discountAmount = promoResult ? promoResult.discountAmount : null;
+  const provisionalDiscount = promoResult ? promoResult.discountAmount : null;
 
   let createdOrderId;
+  try {
   await prisma.$transaction(async (tx) => {
+    // Re-read prices inside the tx so the values written to OrderItem.price and
+    // Order.totalAmount reflect the current catalog, not a cart snapshot. Stock isn't
+    // deducted here (that happens at confirm), but a price edit between cart load and
+    // tx commit must not cause customer/admin to disagree on what was paid.
+    const livePriceRows = await tx.product.findMany({
+      where: { id: { in: productIds } },
+      select: { id: true, price: true, discountedPrice: true },
+    });
+    const txPriceById = new Map(
+      livePriceRows.map((p) => [p.id, p.discountedPrice != null ? Number(p.discountedPrice) : Number(p.price)])
+    );
+
+    // Recompute line totals and order subtotal from live prices.
+    let txSubtotal = 0;
+    const itemPriceById = new Map();
+    for (const item of cartData.items) {
+      const livePriceVal = txPriceById.get(item.productId) ?? livePriceById.get(item.productId) ?? 0;
+      itemPriceById.set(item.productId, livePriceVal);
+      txSubtotal += livePriceVal * item.quantity;
+    }
+    txSubtotal = Math.round(txSubtotal * 100) / 100;
+
+    // Promo discount stays as previewed unless the discount exceeds the (possibly lower)
+    // recomputed subtotal, in which case we cap it. Avoids negative totals on price drops.
+    let finalDiscount = provisionalDiscount;
+    if (finalDiscount != null) {
+      finalDiscount = Math.min(Number(finalDiscount), txSubtotal);
+      finalDiscount = Math.round(finalDiscount * 100) / 100;
+    }
+    const finalTotal = Math.round(Math.max(0, txSubtotal - (finalDiscount ?? 0)) * 100) / 100;
+
     const orderRecord = await tx.order.create({
       data: {
         userId,
         orderMessage: cartData.orderMessage ?? null,
         totalAmount: finalTotal,
-        discountAmount,
+        discountAmount: finalDiscount,
         appliedPromoCode: promoResult?.promoCode.code ?? null,
         appliedPromoCodeId: promoResult?.promoCode.id ?? null,
         paymentMethod,
@@ -226,24 +299,85 @@ async function createOrder(userId, checkoutInput = {}) {
 
     createdOrderId = orderRecord.id;
 
-    const promoOps = promoResult
-      ? [
-          tx.promoCodeUsage.create({
-            data: {
-              promoCodeId: promoResult.promoCode.id,
-              userId,
-              orderId: orderRecord.id,
-              discountAmount: promoResult.discountAmount,
-            },
-          }),
-          tx.promoCode.update({
-            where: { id: promoResult.promoCode.id },
-            data: { usageCount: { increment: 1 } },
-          }),
-        ]
-      : [];
+    // Atomic promo usage: an `UPDATE ... WHERE usageLimit IS NULL OR usageCount < usageLimit`
+    // returning the affected-row count gives us race-safe global cap enforcement. Per-user
+    // cap is checked by counting existing usages for this user inside the same tx.
+    if (promoResult) {
+      const promoId = promoResult.promoCode.id;
 
-    // Parallel: insert items, record promo usage, clear cart — all depend only on orderRecord.id
+      // Re-read the promo inside the tx to catch toggles / window changes after pre-validation.
+      const livePromo = await tx.promoCode.findUnique({
+        where: { id: promoId },
+        select: {
+          isActive: true,
+          startsAt: true,
+          expiresAt: true,
+          usageLimit: true,
+          usageLimitPerUser: true,
+        },
+      });
+      if (!livePromo) {
+        const err = new Error('Promo code not found');
+        err.code = 'PROMO_NOT_FOUND';
+        throw err;
+      }
+      if (!livePromo.isActive) {
+        const err = new Error('This promo code is not active');
+        err.code = 'PROMO_INACTIVE';
+        throw err;
+      }
+      const now = new Date();
+      if (livePromo.startsAt && livePromo.startsAt > now) {
+        const err = new Error('This promo code is not yet available');
+        err.code = 'PROMO_NOT_STARTED';
+        throw err;
+      }
+      if (livePromo.expiresAt && livePromo.expiresAt <= now) {
+        const err = new Error('This promo code has expired');
+        err.code = 'PROMO_EXPIRED';
+        throw err;
+      }
+
+      // Per-user cap — count existing usages then assert. Race window narrowed but not
+      // fully closed without a unique index; for stricter guarantees consider a unique
+      // composite (promoCodeId, userId, orderId) and rely on the create call to fail.
+      if (livePromo.usageLimitPerUser != null) {
+        const mine = await tx.promoCodeUsage.count({ where: { promoCodeId: promoId, userId } });
+        if (mine >= livePromo.usageLimitPerUser) {
+          const err = new Error('You have already used this promo code the maximum number of times');
+          err.code = 'PROMO_USER_LIMIT_REACHED';
+          throw err;
+        }
+      }
+
+      // Atomic global-cap increment: only succeeds if usageLimit allows it.
+      // Cast the column to text on the WHERE side to match how Prisma binds the param
+      // — matches the pattern used elsewhere in this service for raw queries.
+      const affected = await tx.$executeRaw`
+        UPDATE "PromoCode"
+        SET "usageCount" = "usageCount" + 1, "updatedAt" = NOW()
+        WHERE id::text = ${promoId}
+          AND ("usageLimit" IS NULL OR "usageCount" < "usageLimit")
+      `;
+      if (affected === 0) {
+        const err = new Error('This promo code has reached its usage limit');
+        err.code = 'PROMO_LIMIT_REACHED';
+        throw err;
+      }
+
+      await tx.promoCodeUsage.create({
+        data: {
+          promoCodeId: promoId,
+          userId,
+          orderId: orderRecord.id,
+          discountAmount: promoResult.discountAmount,
+        },
+      });
+    }
+
+    // Parallel: insert items, clear cart — all depend only on orderRecord.id.
+    // OrderItem.price uses the live tx price so the stored line snapshot matches the
+    // server-trusted total above.
     await Promise.all([
       tx.orderItem.createMany({
         data: cartData.items.map((item) => ({
@@ -253,14 +387,25 @@ async function createOrder(userId, checkoutInput = {}) {
           productTitle_ar: productById.get(item.productId)?.title_ar ?? null,
           quantity: item.quantity,
           perProductMessage: item.message ?? null,
-          price: item.lineTotal / item.quantity,
+          price: itemPriceById.get(item.productId) ?? 0,
         })),
       }),
-      ...promoOps,
       tx.cartItem.deleteMany({ where: { cart: { userId } } }),
       tx.cart.updateMany({ where: { userId }, data: { orderMessage: null } }),
     ]);
   }, { maxWait: 5000, timeout: 15000 });
+  } catch (err) {
+    // Convert known business-rule errors thrown from inside the tx into the same
+    // `{ order: null, error: msg }` shape the controller already maps to a 400.
+    const userFacingPromoCodes = new Set([
+      'PROMO_NOT_FOUND', 'PROMO_INACTIVE', 'PROMO_EXPIRED', 'PROMO_NOT_STARTED',
+      'PROMO_LIMIT_REACHED', 'PROMO_USER_LIMIT_REACHED',
+    ]);
+    if (userFacingPromoCodes.has(err.code)) {
+      return { order: null, error: err.message };
+    }
+    throw err;
+  }
 
   // Heavy product-include read runs outside the transaction to minimize lock hold time
   const order = await prisma.order.findUnique({
@@ -477,7 +622,13 @@ function aggregateOrderLineQtyByProduct(items) {
 }
 
 /**
- * Subtract Product.quantity for each distinct product on the order (single validation query + one SQL UPDATE).
+ * Subtract Product.quantity for each distinct product on the order using one atomic
+ * conditional UPDATE per product. The `WHERE quantity >= n` clause + affected-row check
+ * makes this safe under concurrent confirms — two transactions trying to deduct the
+ * last unit cannot both succeed; the loser's UPDATE returns 0 rows and we throw.
+ *
+ * Falls back to per-product validation BEFORE the writes so we can produce the same
+ * INSUFFICIENT_STOCK / PRODUCT_MISSING shapes the controllers already handle.
  */
 async function deductInventoryForOrder(tx, orderId) {
   const items = await tx.orderItem.findMany({
@@ -489,6 +640,9 @@ async function deductInventoryForOrder(tx, orderId) {
   const qtyByProduct = aggregateOrderLineQtyByProduct(items);
   const productIds = [...qtyByProduct.keys()];
 
+  // Pre-flight check so the error response includes per-product `available` (used by
+  // existing handlers / clients). Concurrent confirms can still slip past this snapshot
+  // — the atomic UPDATE below is the actual safety net.
   const products = await tx.product.findMany({
     where: { id: { in: productIds } },
     select: { id: true, quantity: true, title: true },
@@ -520,17 +674,35 @@ async function deductInventoryForOrder(tx, orderId) {
     throw err;
   }
 
-  await tx.$executeRaw`
-    UPDATE "Product" AS p
-    SET quantity = p.quantity - sub.sum_qty
-    FROM (
-      SELECT "productId", SUM(quantity)::int AS sum_qty
-      FROM "OrderItem"
-      WHERE "orderId"::text = ${orderId}
-      GROUP BY "productId"
-    ) AS sub
-    WHERE p.id = sub."productId"
-  `;
+  // Atomic deduction: one row-conditional UPDATE per product. If the affected row count
+  // is 0, somebody else won the race for the last units between our read and write,
+  // so abort with INSUFFICIENT_STOCK and let the transaction roll back.
+  // Cast column to text on WHERE side to match Prisma's parameter binding (consistent
+  // with other raw queries in this service).
+  for (const [productId, requested] of qtyByProduct) {
+    const updated = await tx.$executeRaw`
+      UPDATE "Product"
+      SET quantity = quantity - ${requested}
+      WHERE id::text = ${productId} AND quantity >= ${requested}
+    `;
+    if (updated === 0) {
+      const product = productMap.get(productId);
+      // Re-read current quantity for an accurate error payload (best-effort).
+      const fresh = await tx.product.findUnique({
+        where: { id: productId },
+        select: { quantity: true },
+      });
+      const err = new Error('Insufficient stock to confirm this order');
+      err.code = 'INSUFFICIENT_STOCK';
+      err.details = [{
+        productId,
+        title: product?.title ?? null,
+        requested,
+        available: fresh?.quantity ?? 0,
+      }];
+      throw err;
+    }
+  }
 }
 
 /**
