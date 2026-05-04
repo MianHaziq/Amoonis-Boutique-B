@@ -12,7 +12,11 @@ function hashResetToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken)).digest('hex');
 }
 
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const googleClient = new OAuth2Client();
+const GOOGLE_AUDIENCE = (process.env.GOOGLE_CLIENT_ID || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 // Helper: Generate JWT token
 const generateToken = (userId, role) => {
@@ -138,9 +142,12 @@ const googleLogin = async (req, res, next) => {
     if (idToken) {
       // Flow 1: ID token verification (from Google One Tap / GoogleLogin component)
       try {
+        if (GOOGLE_AUDIENCE.length === 0) {
+          return error(res, 'Google Sign In is not configured', 503);
+        }
         const ticket = await googleClient.verifyIdToken({
           idToken,
-          audience: process.env.GOOGLE_CLIENT_ID,
+          audience: GOOGLE_AUDIENCE,
         });
         const payload = ticket.getPayload();
         googleId = payload.sub;
