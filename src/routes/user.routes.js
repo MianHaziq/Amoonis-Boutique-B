@@ -39,8 +39,7 @@ const { verifyAdmin } = require('../middleware/auth');
  *               summary: New customer
  *               value:
  *                 email: newcustomer@example.com
- *                 firstName: Jane
- *                 lastName: Doe
+ *                 fullName: Jane Doe
  *                 password: 'SecurePass1!'
  *                 role: CUSTOMER
  *                 status: ACTIVE
@@ -48,8 +47,7 @@ const { verifyAdmin } = require('../middleware/auth');
  *               summary: New manager (orders + products)
  *               value:
  *                 email: ops@example.com
- *                 firstName: Sam
- *                 lastName: Lee
+ *                 fullName: Sam Lee
  *                 password: 'SecurePass1!'
  *                 role: MANAGER
  *                 managerTitle: Operations lead
@@ -105,7 +103,7 @@ const { verifyAdmin } = require('../middleware/auth');
  *       - in: query
  *         name: search
  *         schema: { type: string }
- *         description: Case-insensitive match on email, firstName, lastName
+ *         description: Case-insensitive match on email or name (fullName, plus legacy firstName/lastName)
  *       - in: query
  *         name: role
  *         schema: { type: string, enum: [CUSTOMER, ADMIN, MANAGER] }
@@ -114,7 +112,7 @@ const { verifyAdmin } = require('../middleware/auth');
  *         schema: { type: string, enum: [ACTIVE, INACTIVE] }
  *       - in: query
  *         name: sortBy
- *         schema: { type: string, enum: [firstName, lastName, email, createdAt, role, status] }
+ *         schema: { type: string, enum: [fullName, firstName, lastName, email, createdAt, role, status] }
  *       - in: query
  *         name: order
  *         schema: { type: string, enum: [asc, desc], default: desc }
