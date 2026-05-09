@@ -84,18 +84,23 @@ function toOrderResponsePayload(order) {
     appliedPromoCode: order.appliedPromoCode ?? null,
     paymentMethod: order.paymentMethod ?? 'COD',
     status: order.status,
-    shippingAddress: order.shippingFullName
-      ? {
-          fullName: order.shippingFullName,
-          phone: order.shippingPhone,
-          streetAddress: order.shippingStreetAddress,
-          apartment: order.shippingApartment ?? null,
-          city: order.shippingCity,
-          state: order.shippingState ?? null,
-          postalCode: order.shippingPostalCode ?? null,
-          country: order.shippingCountry,
-        }
-      : null,
+    shippingAddress:
+      order.shippingFullName
+      || order.shippingPhone
+      || order.shippingStreetAddress
+      || order.shippingCity
+      || order.shippingCountry
+        ? {
+            fullName: order.shippingFullName ?? null,
+            phone: order.shippingPhone ?? null,
+            streetAddress: order.shippingStreetAddress ?? null,
+            apartment: order.shippingApartment ?? null,
+            city: order.shippingCity ?? null,
+            state: order.shippingState ?? null,
+            postalCode: order.shippingPostalCode ?? null,
+            country: order.shippingCountry ?? null,
+          }
+        : null,
     inventoryDeducted: Boolean(order.inventoryDeducted),
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
@@ -105,14 +110,19 @@ function toOrderResponsePayload(order) {
 
 const VALID_PAYMENT_METHODS = ['COD'];
 
+// At checkout we no longer require name/phone in the address payload — they're
+// pulled from the user profile (collected at signup / Google / Apple). The
+// address payload only needs the location bits, and even those are now soft.
 function validateShippingAddress(addr) {
   if (!addr || typeof addr !== 'object') return 'shippingAddress is required';
-  if (!addr.fullName || !String(addr.fullName).trim()) return 'shippingAddress.fullName is required';
-  if (!addr.phone || !String(addr.phone).trim()) return 'shippingAddress.phone is required';
   if (!addr.streetAddress || !String(addr.streetAddress).trim()) return 'shippingAddress.streetAddress is required';
-  if (!addr.city || !String(addr.city).trim()) return 'shippingAddress.city is required';
-  if (!addr.country || !String(addr.country).trim()) return 'shippingAddress.country is required';
   return null;
+}
+
+function trimOrNullStr(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s ? s : null;
 }
 
 async function createOrder(userId, checkoutInput = {}) {
@@ -121,6 +131,21 @@ async function createOrder(userId, checkoutInput = {}) {
   if (!VALID_PAYMENT_METHODS.includes(paymentMethod)) {
     return { order: null, error: `Invalid paymentMethod. Supported: ${VALID_PAYMENT_METHODS.join(', ')}` };
   }
+
+  // Recipient identity (fullName + phone) is sourced from the user profile so the
+  // checkout payload doesn't need to re-collect what we already have from signup.
+  // Falls back to legacy firstName/lastName for users created before the fullName
+  // migration, and finally to whatever the address row carries (old saved addresses
+  // still have name/phone populated and we don't want to wipe that on their orders).
+  const userRow = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { fullName: true, firstName: true, lastName: true, phone: true },
+  });
+  const profileFullName =
+    (userRow?.fullName && userRow.fullName.trim())
+    || [userRow?.firstName, userRow?.lastName].filter(Boolean).join(' ').trim()
+    || null;
+  const profilePhone = userRow?.phone || null;
 
   // Resolve address and fetch cart in parallel when addressId is provided
   let resolvedAddress = null;
@@ -134,14 +159,14 @@ async function createOrder(userId, checkoutInput = {}) {
     if (!saved) return { order: null, error: 'Address not found' };
     resolvedAddress = {
       addressId: saved.id,
-      fullName: saved.fullName,
-      phone: saved.phone,
-      streetAddress: saved.streetAddress,
+      fullName: profileFullName ?? saved.fullName ?? null,
+      phone: profilePhone ?? saved.phone ?? null,
+      streetAddress: saved.streetAddress ?? null,
       apartment: saved.apartment ?? null,
-      city: saved.city,
+      city: saved.city ?? null,
       state: saved.state ?? null,
       postalCode: saved.postalCode ?? null,
-      country: saved.country,
+      country: saved.country ?? null,
     };
     cartData = cart;
   } else if (shippingAddress) {
@@ -149,14 +174,14 @@ async function createOrder(userId, checkoutInput = {}) {
     if (addrError) return { order: null, error: addrError };
     resolvedAddress = {
       addressId: null,
-      fullName: String(shippingAddress.fullName).trim(),
-      phone: String(shippingAddress.phone).trim(),
-      streetAddress: String(shippingAddress.streetAddress).trim(),
-      apartment: shippingAddress.apartment ? String(shippingAddress.apartment).trim() : null,
-      city: String(shippingAddress.city).trim(),
-      state: shippingAddress.state ? String(shippingAddress.state).trim() : null,
-      postalCode: shippingAddress.postalCode ? String(shippingAddress.postalCode).trim() : null,
-      country: String(shippingAddress.country).trim(),
+      fullName: profileFullName ?? trimOrNullStr(shippingAddress.fullName),
+      phone: profilePhone ?? trimOrNullStr(shippingAddress.phone),
+      streetAddress: trimOrNullStr(shippingAddress.streetAddress),
+      apartment: trimOrNullStr(shippingAddress.apartment),
+      city: trimOrNullStr(shippingAddress.city),
+      state: trimOrNullStr(shippingAddress.state),
+      postalCode: trimOrNullStr(shippingAddress.postalCode),
+      country: trimOrNullStr(shippingAddress.country),
     };
     cartData = await cartService.getCart(userId);
   } else {
@@ -451,7 +476,7 @@ async function getAllOrdersAdmin(page = 1, limit = 10, status = null) {
       take,
       orderBy: { createdAt: 'desc' },
       include: {
-        user: { select: { id: true, email: true, firstName: true, lastName: true } },
+        user: { select: { id: true, email: true, fullName: true, firstName: true, lastName: true } },
         _count: { select: { items: true } },
       },
     }),
@@ -490,11 +515,16 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
     updatedAt: order.updatedAt,
   };
   if (includeUser && order.user) {
+    const fullName =
+      order.user.fullName
+      || [order.user.firstName, order.user.lastName].filter(Boolean).join(' ').trim()
+      || null;
     base.user = {
       id: order.user.id,
       email: order.user.email,
-      firstName: order.user.firstName,
-      lastName: order.user.lastName,
+      fullName,
+      firstName: order.user.firstName ?? null,
+      lastName: order.user.lastName ?? null,
     };
   }
   if (order._count) {
@@ -574,7 +604,7 @@ async function getAdminOrderHistory(page = 1, limit = 10, filters = {}) {
   const includeItems = filters.includeItems === true || filters.includeItems === 'true';
 
   const include = {
-    user: { select: { id: true, email: true, firstName: true, lastName: true } },
+    user: { select: { id: true, email: true, fullName: true, firstName: true, lastName: true } },
     _count: { select: { items: true } },
     ...(includeItems
       ? {

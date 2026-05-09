@@ -16,8 +16,9 @@ datasource db {
 model User {
   id                 String    @id @default(uuid())
   email              String    @unique
-  firstName          String
-  lastName           String
+  fullName           String?
+  firstName          String?
+  lastName           String?
   password           String?
   googleId           String?   @unique
   appleId            String?   @unique
@@ -247,14 +248,14 @@ model Address {
   id            String   @id @default(uuid())
   userId        String
   label         String?
-  fullName      String
-  phone         String
-  streetAddress String
+  fullName      String?
+  phone         String?
+  streetAddress String?
   apartment     String?
-  city          String
+  city          String?
   state         String?
   postalCode    String?
-  country       String
+  country       String?
   isDefault     Boolean  @default(false)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt

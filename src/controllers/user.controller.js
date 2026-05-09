@@ -14,34 +14,54 @@ const capitalize = (str) => {
   return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
 };
 
-/**
- * Helper to generate avatar initials from name
- */
-const getAvatarInitials = (firstName, lastName) => {
-  const first = firstName?.charAt(0)?.toUpperCase() || '';
-  const last = lastName?.charAt(0)?.toUpperCase() || '';
+// Resolve a user's display name: prefer the canonical fullName column, then
+// fall back to legacy firstName/lastName for users created before the migration.
+const resolveDisplayName = (user) =>
+  (user.fullName && user.fullName.trim())
+  || [user.firstName, user.lastName].filter(Boolean).join(' ').trim()
+  || '';
+
+const splitDisplayName = (displayName) => {
+  const trimmed = (displayName || '').trim();
+  if (!trimmed) return { firstName: null, lastName: null };
+  const parts = trimmed.split(/\s+/);
+  return {
+    firstName: parts[0],
+    lastName: parts.length > 1 ? parts.slice(1).join(' ') : null,
+  };
+};
+
+const getAvatarInitials = (displayName) => {
+  const parts = (displayName || '').trim().split(/\s+/).filter(Boolean);
+  const first = parts[0]?.charAt(0)?.toUpperCase() || '';
+  const last = parts.length > 1 ? parts[parts.length - 1].charAt(0).toUpperCase() : '';
   return `${first}${last}`;
 };
 
 /**
  * Helper to transform user data for frontend
  */
-const transformUser = (user) => ({
-  id: user.id,
-  name: `${user.firstName} ${user.lastName}`,
-  firstName: user.firstName,
-  lastName: user.lastName,
-  email: user.email,
-  avatar: user.avatar || getAvatarInitials(user.firstName, user.lastName),
-  role: capitalize(user.role) || 'Customer',
-  managerTitle: user.role === 'MANAGER' ? user.managerTitle || null : null,
-  managerPermissions: user.role === 'MANAGER' ? user.managerPermissions || [] : [],
-  status: capitalize(user.status) || 'Active',
-  isEmailVerified: user.isEmailVerified,
-  joinedAt: user.createdAt,
-  createdAt: user.createdAt,
-  updatedAt: user.updatedAt,
-});
+const transformUser = (user) => {
+  const displayName = resolveDisplayName(user);
+  const split = splitDisplayName(displayName);
+  return {
+    id: user.id,
+    name: displayName,
+    fullName: displayName || null,
+    firstName: split.firstName,
+    lastName: split.lastName,
+    email: user.email,
+    avatar: user.avatar || getAvatarInitials(displayName),
+    role: capitalize(user.role) || 'Customer',
+    managerTitle: user.role === 'MANAGER' ? user.managerTitle || null : null,
+    managerPermissions: user.role === 'MANAGER' ? user.managerPermissions || [] : [],
+    status: capitalize(user.status) || 'Active',
+    isEmailVerified: user.isEmailVerified,
+    joinedAt: user.createdAt,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+  };
+};
 
 /**
  * @desc    Create a new user
@@ -52,8 +72,7 @@ const createUser = async (req, res, next) => {
   try {
     const {
       email,
-      firstName,
-      lastName,
+      fullName,
       password,
       role,
       status,
@@ -62,8 +81,10 @@ const createUser = async (req, res, next) => {
       managerPermissions,
     } = req.body;
 
-    if (!email || !firstName || !lastName || !password) {
-      return error(res, 'Email, first name, last name, and password are required', 400);
+    const trimmedFullName = (fullName || '').trim();
+
+    if (!email || !trimmedFullName || !password) {
+      return error(res, 'Email, full name, and password are required', 400);
     }
 
     const resolvedRole = (role && String(role).toUpperCase()) || 'CUSTOMER';
@@ -94,8 +115,7 @@ const createUser = async (req, res, next) => {
     const user = await prisma.user.create({
       data: {
         email,
-        firstName,
-        lastName,
+        fullName: trimmedFullName,
         password: hashedPassword,
         role: resolvedRole,
         status: status?.toUpperCase() || 'ACTIVE',
@@ -136,6 +156,8 @@ const getAllUsers = async (req, res, next) => {
     if (search) {
       where.OR = [
         { email: { contains: search, mode: 'insensitive' } },
+        { fullName: { contains: search, mode: 'insensitive' } },
+        // Legacy fallbacks for users created before the fullName migration.
         { firstName: { contains: search, mode: 'insensitive' } },
         { lastName: { contains: search, mode: 'insensitive' } },
       ];
@@ -150,7 +172,7 @@ const getAllUsers = async (req, res, next) => {
     }
 
     // Build orderBy
-    const validSortFields = ['firstName', 'lastName', 'email', 'createdAt', 'role', 'status'];
+    const validSortFields = ['fullName', 'firstName', 'lastName', 'email', 'createdAt', 'role', 'status'];
     const sortField = validSortFields.includes(sortBy) ? sortBy : 'createdAt';
     const sortOrder = order === 'asc' ? 'asc' : 'desc';
 
@@ -211,8 +233,7 @@ const updateUser = async (req, res, next) => {
     const { id } = req.params;
     const {
       email,
-      firstName,
-      lastName,
+      fullName,
       password,
       role,
       status,
@@ -238,8 +259,13 @@ const updateUser = async (req, res, next) => {
     const updateData = {};
 
     if (email) updateData.email = email;
-    if (firstName) updateData.firstName = firstName;
-    if (lastName) updateData.lastName = lastName;
+    if (fullName !== undefined) {
+      const trimmed = String(fullName).trim();
+      if (!trimmed) {
+        return error(res, 'fullName cannot be empty', 400);
+      }
+      updateData.fullName = trimmed;
+    }
     if (status) updateData.status = status.toUpperCase();
     if (avatar !== undefined) updateData.avatar = avatar;
 
