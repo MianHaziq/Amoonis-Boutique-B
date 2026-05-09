@@ -33,12 +33,13 @@ const statusBody = [
  *     description: |
  *       Creates an order from the current user's cart, then clears the cart. Requires user JWT.
  *
- *       **Address**: provide either `addressId` (a saved address UUID) or a full `shippingAddress` object inline.
- *       Name and email are sourced automatically from the user profile — no need to send them.
+ *       **Address** — provide either `addressId` (a saved address UUID) **or** an inline `shippingAddress` object. Inline form requires only `streetAddress`; `city` / `country` etc. are optional.
  *
- *       **Payment**: only `COD` (Cash on Delivery) is supported for now. Field is optional and defaults to `COD`.
+ *       **Recipient name & phone** — **do not send them**. The server reads `fullName` and `phone` from the user profile (collected at signup / Google / Apple) and stamps them onto the order's `shippingAddress` snapshot automatically.
  *
- *       **Promo code**: optional. Pass the code string to apply a discount. Returns `400` with a descriptive message if invalid.
+ *       **Payment** — only `COD` (Cash on Delivery) is supported. Field is optional and defaults to `COD`.
+ *
+ *       **Promo code** — optional. Pass the code string to apply a discount. Returns `400` with a descriptive message if invalid.
  *     tags: [Orders]
  *     security:
  *       - bearerAuth: []
@@ -55,17 +56,18 @@ const statusBody = [
  *                 description: ID of a saved address. Mutually exclusive with shippingAddress.
  *               shippingAddress:
  *                 type: object
- *                 description: Inline address. Required if addressId is not provided.
- *                 required: [fullName, phone, streetAddress, city, country]
+ *                 description: |
+ *                   Inline address used when `addressId` is not provided. **`streetAddress` is the only required field.** Recipient `fullName` / `phone` are server-filled from the user profile and should be omitted.
+ *                 required: [streetAddress]
  *                 properties:
- *                   fullName: { type: string, example: "Ahmed Al Mansouri" }
- *                   phone: { type: string, example: "+971501234567" }
  *                   streetAddress: { type: string, example: "Villa 14, Al Wasl Road" }
  *                   apartment: { type: string, nullable: true, example: null }
- *                   city: { type: string, example: "Dubai" }
+ *                   city: { type: string, nullable: true, example: "Dubai" }
  *                   state: { type: string, nullable: true, example: "Dubai" }
  *                   postalCode: { type: string, nullable: true, example: null }
- *                   country: { type: string, example: "United Arab Emirates" }
+ *                   country: { type: string, nullable: true, example: "United Arab Emirates" }
+ *                   fullName: { type: string, nullable: true, description: "Optional / ignored — sourced from user profile" }
+ *                   phone: { type: string, nullable: true, description: "Optional / ignored — sourced from user profile" }
  *               paymentMethod:
  *                 type: string
  *                 enum: [COD]
@@ -83,15 +85,19 @@ const statusBody = [
  *                 addressId: "550e8400-e29b-41d4-a716-446655440000"
  *                 paymentMethod: COD
  *                 promoCode: "SAVE10"
- *             inline_address:
- *               summary: Inline address at checkout
+ *             inline_address_minimal:
+ *               summary: Inline address (minimal — only streetAddress)
  *               value:
  *                 shippingAddress:
- *                   fullName: "Ahmed Al Mansouri"
- *                   phone: "+971501234567"
  *                   streetAddress: "Villa 14, Al Wasl Road"
+ *                 paymentMethod: COD
+ *             inline_address_full:
+ *               summary: Inline address with city / country
+ *               value:
+ *                 shippingAddress:
+ *                   streetAddress: "Villa 14, Al Wasl Road"
+ *                   apartment: "Apt 401"
  *                   city: "Dubai"
- *                   state: "Dubai"
  *                   country: "United Arab Emirates"
  *                 paymentMethod: COD
  *     responses:
@@ -111,10 +117,10 @@ const statusBody = [
  *                 paymentMethod: COD
  *                 status: PENDING
  *                 shippingAddress:
- *                   fullName: Ahmed Al Mansouri
+ *                   fullName: "Ahmed Al Mansouri"
  *                   phone: "+971501234567"
  *                   streetAddress: "Villa 14, Al Wasl Road"
- *                   city: Dubai
+ *                   city: "Dubai"
  *                   country: "United Arab Emirates"
  *                 items: []
  *       400:

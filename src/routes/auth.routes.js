@@ -62,8 +62,7 @@ const { authStrictLimiter, passwordResetLimiter } = require('../middleware/rateL
  *         description: Email already registered
  */
 const signupValidation = [
-  body('firstName').trim().notEmpty().withMessage('First name is required'),
-  body('lastName').trim().notEmpty().withMessage('Last name is required'),
+  body('fullName').trim().notEmpty().withMessage('Full name is required'),
   body('email').trim().isEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
 ];
@@ -160,7 +159,7 @@ router.post('/google', authStrictLimiter, googleLogin);
  *     summary: Login with Apple
  *     description: |
  *       Sign in with Apple. Send the **identityToken** (JWT) from the client after Apple Sign In.
- *       Optionally send **firstName**, **lastName**, **email** in the body (Apple provides name only on first authorization; client should pass them for new accounts).
+ *       Optionally send **fullName** (or legacy **firstName** and **lastName**) and **email** in the body — Apple provides the name only on first authorization, so the client must pass it for new accounts.
  *       Server verifies the token with Apple's public keys (JWKS). Returns same shape as Google login.
  *     tags: [Auth]
  *     requestBody:
@@ -178,13 +177,17 @@ router.post('/google', authStrictLimiter, googleLogin);
  *               id_token:
  *                 type: string
  *                 description: Alias for identityToken (optional)
+ *               fullName:
+ *                 type: string
+ *                 description: User full name (preferred; Apple sends name only on first sign-in, pass it from the client)
+ *                 example: "John Doe"
  *               firstName:
  *                 type: string
- *                 description: User first name (optional; Apple sends only on first sign-in; pass from client)
+ *                 description: Legacy field, concatenated with lastName when fullName is absent
  *                 example: "John"
  *               lastName:
  *                 type: string
- *                 description: User last name (optional)
+ *                 description: Legacy field, concatenated with firstName when fullName is absent
  *                 example: "Doe"
  *               email:
  *                 type: string
@@ -192,8 +195,7 @@ router.post('/google', authStrictLimiter, googleLogin);
  *                 description: Fallback email if not in token (optional)
  *           example:
  *             identityToken: "eyJraWQiOi..."
- *             firstName: "John"
- *             lastName: "Doe"
+ *             fullName: "John Doe"
  *     responses:
  *       200:
  *         description: Apple login successful; returns user and JWT
@@ -373,8 +375,9 @@ router.put('/change-password/:userId', verifyToken, changePasswordValidation, ha
  *                   properties:
  *                     id: { type: string, format: uuid }
  *                     email: { type: string, format: email }
- *                     firstName: { type: string }
- *                     lastName: { type: string }
+ *                     fullName: { type: string, nullable: true }
+ *                     firstName: { type: string, nullable: true, description: "Derived from fullName for back-compat" }
+ *                     lastName: { type: string, nullable: true, description: "Derived from fullName for back-compat" }
  *                     role: { type: string }
  *                     status: { type: string }
  *                     avatar: { type: string, nullable: true }
@@ -397,7 +400,7 @@ router.get('/user/:userId', verifyToken, getMe);
  * /auth/profile/{userId}:
  *   put:
  *     summary: Update user profile (name, email)
- *     description: Update firstName, lastName, or email for the authenticated user. userId in path must match the JWT. For preferred language and address use PATCH /user/profile/preferred-language and PATCH /user/profile/address.
+ *     description: Update fullName or email for the authenticated user. userId in path must match the JWT. For preferred language and address use PATCH /user/profile/preferred-language and PATCH /user/profile/address.
  *     tags: [Auth]
  *     security:
  *       - bearerAuth: []
@@ -417,12 +420,9 @@ router.get('/user/:userId', verifyToken, getMe);
  *           schema:
  *             type: object
  *             properties:
- *               firstName:
+ *               fullName:
  *                 type: string
- *                 example: "John"
- *               lastName:
- *                 type: string
- *                 example: "Doe"
+ *                 example: "John Doe"
  *               email:
  *                 type: string
  *                 format: email

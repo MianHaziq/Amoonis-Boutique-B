@@ -129,9 +129,10 @@ const options = {
             'Single user as returned by admin user APIs (`GET/POST/PUT /users`, `GET /users/{id}`). `role` and `status` are **title-cased** for display (e.g. `Manager`, `Active`). For managers, `managerPermissions` lists granted API areas; for others they are empty.',
           properties: {
             id: { type: 'string', format: 'uuid' },
-            name: { type: 'string', example: 'Sam Lee', description: 'firstName + lastName' },
-            firstName: { type: 'string' },
-            lastName: { type: 'string' },
+            name: { type: 'string', example: 'Sam Lee', description: 'Display name (same as fullName)' },
+            fullName: { type: 'string', nullable: true, example: 'Sam Lee', description: 'Canonical name field for the user' },
+            firstName: { type: 'string', nullable: true, description: 'Derived from fullName for back-compat' },
+            lastName: { type: 'string', nullable: true, description: 'Derived from fullName for back-compat' },
             email: { type: 'string', format: 'email' },
             avatar: {
               type: 'string',
@@ -163,13 +164,12 @@ const options = {
         },
         UserInput: {
           type: 'object',
-          required: ['email', 'firstName', 'lastName', 'password'],
+          required: ['email', 'fullName', 'password'],
           description:
             'Create user (admin). For **MANAGER**, also send `managerTitle` and non-empty `managerPermissions`. **ADMIN** cannot be created here (`403`).',
           properties: {
             email: { type: 'string', format: 'email' },
-            firstName: { type: 'string' },
-            lastName: { type: 'string' },
+            fullName: { type: 'string', example: 'Sam Lee' },
             password: { type: 'string', format: 'password', description: 'Login password for the new account' },
             role: {
               type: 'string',
@@ -206,8 +206,7 @@ const options = {
             'Partial update (admin). Send only fields to change. If the user is or becomes a **MANAGER**, `managerTitle` and at least one `managerPermissions` must remain valid (see server validation). Clearing role to CUSTOMER/ADMIN clears manager fields.',
           properties: {
             email: { type: 'string', format: 'email' },
-            firstName: { type: 'string' },
-            lastName: { type: 'string' },
+            fullName: { type: 'string' },
             password: { type: 'string', format: 'password', description: 'New password; omit to keep current' },
             role: { type: 'string', enum: ['CUSTOMER', 'ADMIN', 'MANAGER'] },
             status: { type: 'string', enum: ['ACTIVE', 'INACTIVE'] },
@@ -263,11 +262,20 @@ const options = {
               type: 'string',
               format: 'email',
             },
+            fullName: {
+              type: 'string',
+              nullable: true,
+              description: 'Canonical display name',
+            },
             firstName: {
               type: 'string',
+              nullable: true,
+              description: 'Derived from fullName for back-compat',
             },
             lastName: {
               type: 'string',
+              nullable: true,
+              description: 'Derived from fullName for back-compat',
             },
             role: { type: 'string', enum: ['CUSTOMER', 'ADMIN', 'MANAGER'], description: 'Raw DB enum (not title-cased)' },
             status: { type: 'string', enum: ['ACTIVE', 'INACTIVE'] },
@@ -296,8 +304,9 @@ const options = {
           properties: {
             id: { type: 'string', format: 'uuid', description: 'User UUID' },
             email: { type: 'string', format: 'email', description: 'User email' },
-            firstName: { type: 'string', description: 'First name' },
-            lastName: { type: 'string', description: 'Last name' },
+            fullName: { type: 'string', nullable: true, description: 'Canonical display name' },
+            firstName: { type: 'string', nullable: true, description: 'Derived from fullName for back-compat' },
+            lastName: { type: 'string', nullable: true, description: 'Derived from fullName for back-compat' },
             avatar: { type: 'string', nullable: true, description: 'Profile image URL' },
             role: { type: 'string', enum: ['CUSTOMER', 'ADMIN', 'MANAGER'], description: 'User role' },
             managerTitle: { type: 'string', nullable: true, description: 'Job title when role is MANAGER' },
@@ -329,18 +338,18 @@ const options = {
         },
         AddressInput: {
           type: 'object',
-          description: 'Full shipping address. Used both for saved addresses and inline checkout.',
-          required: ['fullName', 'phone', 'streetAddress', 'city', 'country'],
+          description:
+            'Saved shipping address. **All fields are optional.** Recipient `fullName` and `phone` are read from the user profile at checkout time, so the address-add form does not need to collect them. `city` and `country` are typically pre-filled from the user profile (`addressCity`, `addressCountry`) on the client; the user can edit them before saving.',
           properties: {
             label: { type: 'string', nullable: true, example: 'Home', description: 'Friendly label (Home, Work, etc.)' },
-            fullName: { type: 'string', example: 'Ahmed Al Mansouri', description: 'Recipient full name' },
-            phone: { type: 'string', example: '+971501234567', description: 'Recipient phone number' },
-            streetAddress: { type: 'string', example: 'Villa 14, Al Wasl Road', description: 'Street / building address (line 1)' },
-            apartment: { type: 'string', nullable: true, example: 'Apt 401', description: 'Apartment, floor, villa number (optional line 2)' },
-            city: { type: 'string', example: 'Dubai', description: 'City' },
+            fullName: { type: 'string', nullable: true, example: 'Ahmed Al Mansouri', description: 'Optional. Recipient name. Usually omitted — server uses the user profile name on orders.' },
+            phone: { type: 'string', nullable: true, example: '+971501234567', description: 'Optional. Recipient phone. Usually omitted — server uses the user profile phone on orders.' },
+            streetAddress: { type: 'string', nullable: true, example: 'Villa 14, Al Wasl Road', description: 'Street / building address (line 1)' },
+            apartment: { type: 'string', nullable: true, example: 'Apt 401', description: 'Apartment, floor, villa number (line 2)' },
+            city: { type: 'string', nullable: true, example: 'Dubai', description: 'City. Pre-fill from user profile `addressCity` on the client.' },
             state: { type: 'string', nullable: true, example: 'Dubai', description: 'Emirate / state / province' },
-            postalCode: { type: 'string', nullable: true, example: null, description: 'Postal / ZIP code (optional in UAE)' },
-            country: { type: 'string', example: 'United Arab Emirates', description: 'Country' },
+            postalCode: { type: 'string', nullable: true, example: null, description: 'Postal / ZIP code' },
+            country: { type: 'string', nullable: true, example: 'United Arab Emirates', description: 'Country. Pre-fill from user profile `addressCountry` on the client.' },
             isDefault: { type: 'boolean', example: true, description: 'Set as the default address for this user' },
           },
         },
@@ -349,14 +358,14 @@ const options = {
           properties: {
             id: { type: 'string', format: 'uuid' },
             label: { type: 'string', nullable: true, example: 'Home' },
-            fullName: { type: 'string', example: 'Ahmed Al Mansouri' },
-            phone: { type: 'string', example: '+971501234567' },
-            streetAddress: { type: 'string', example: 'Villa 14, Al Wasl Road' },
+            fullName: { type: 'string', nullable: true, example: null, description: 'Usually null on new addresses — name lives on the user profile.' },
+            phone: { type: 'string', nullable: true, example: null, description: 'Usually null on new addresses — phone lives on the user profile.' },
+            streetAddress: { type: 'string', nullable: true, example: 'Villa 14, Al Wasl Road' },
             apartment: { type: 'string', nullable: true, example: null },
-            city: { type: 'string', example: 'Dubai' },
+            city: { type: 'string', nullable: true, example: 'Dubai' },
             state: { type: 'string', nullable: true, example: 'Dubai' },
             postalCode: { type: 'string', nullable: true, example: null },
-            country: { type: 'string', example: 'United Arab Emirates' },
+            country: { type: 'string', nullable: true, example: 'United Arab Emirates' },
             isDefault: { type: 'boolean', example: true },
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
@@ -419,15 +428,11 @@ const options = {
         },
         SignupInput: {
           type: 'object',
-          required: ['firstName', 'lastName', 'email', 'password'],
+          required: ['fullName', 'email', 'password'],
           properties: {
-            firstName: {
+            fullName: {
               type: 'string',
-              example: 'John',
-            },
-            lastName: {
-              type: 'string',
-              example: 'Doe',
+              example: 'John Doe',
             },
             email: {
               type: 'string',

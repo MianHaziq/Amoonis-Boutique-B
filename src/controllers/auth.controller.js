@@ -12,6 +12,29 @@ function hashResetToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken)).digest('hex');
 }
 
+// Derive a back-compat first/last from the canonical fullName so existing
+// clients keep receiving these fields during the rollout. First whitespace-
+// separated token is the first name, the remainder is the last name.
+function splitFullName(fullName) {
+  const trimmed = (fullName || '').trim();
+  if (!trimmed) return { firstName: null, lastName: null };
+  const parts = trimmed.split(/\s+/);
+  return {
+    firstName: parts[0],
+    lastName: parts.length > 1 ? parts.slice(1).join(' ') : null,
+  };
+}
+
+// Build the name fields for an API response: prefer the canonical fullName,
+// fall back to legacy firstName/lastName for users created before the migration.
+function nameFieldsForResponse(user) {
+  const fullName = user.fullName || [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || null;
+  const split = user.fullName
+    ? splitFullName(user.fullName)
+    : { firstName: user.firstName ?? null, lastName: user.lastName ?? null };
+  return { fullName, firstName: split.firstName, lastName: split.lastName };
+}
+
 const googleClient = new OAuth2Client();
 const GOOGLE_AUDIENCE = (process.env.GOOGLE_CLIENT_ID || '')
   .split(',')
@@ -29,8 +52,7 @@ function authSessionUserFields(user) {
   const base = {
     id: user.id,
     email: user.email,
-    firstName: user.firstName,
-    lastName: user.lastName,
+    ...nameFieldsForResponse(user),
     role: user.role,
     status: user.status,
     managerTitle: user.role === 'MANAGER' ? user.managerTitle || null : null,
@@ -64,10 +86,11 @@ const sendEmail = async (to, subject, html) => {
 // Signup
 const signup = async (req, res, next) => {
   try {
-    const { firstName, lastName, email, password } = req.body;
+    const { fullName, email, password } = req.body;
+    const trimmedFullName = (fullName || '').trim();
 
-    if (!firstName || !lastName || !email || !password) {
-      return error(res, 'First name, last name, email, and password are required', 400);
+    if (!trimmedFullName || !email || !password) {
+      return error(res, 'Full name, email, and password are required', 400);
     }
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
@@ -77,18 +100,32 @@ const signup = async (req, res, next) => {
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    const user = await prisma.user.create({
+    const created = await prisma.user.create({
       data: {
-        firstName,
-        lastName,
+        fullName: trimmedFullName,
         email,
         password: hashedPassword,
       },
-      select: { id: true, email: true, firstName: true, lastName: true, role: true, status: true, createdAt: true },
+      select: { id: true, email: true, fullName: true, firstName: true, lastName: true, role: true, status: true, createdAt: true },
     });
 
-    const token = generateToken(user.id, user.role);
-    return success(res, { user, token }, 'User registered successfully', 201);
+    const token = generateToken(created.id, created.role);
+    return success(
+      res,
+      {
+        user: {
+          id: created.id,
+          email: created.email,
+          ...nameFieldsForResponse(created),
+          role: created.role,
+          status: created.status,
+          createdAt: created.createdAt,
+        },
+        token,
+      },
+      'User registered successfully',
+      201
+    );
   } catch (err) {
     next(err);
   }
@@ -137,7 +174,7 @@ const googleLogin = async (req, res, next) => {
       return error(res, 'Google token is required', 400);
     }
 
-    let googleId, email, given_name, family_name, picture;
+    let googleId, email, name, given_name, family_name, picture;
 
     if (idToken) {
       // Flow 1: ID token verification (from Google One Tap / GoogleLogin component)
@@ -152,6 +189,7 @@ const googleLogin = async (req, res, next) => {
         const payload = ticket.getPayload();
         googleId = payload.sub;
         email = payload.email;
+        name = payload.name;
         given_name = payload.given_name;
         family_name = payload.family_name;
         picture = payload.picture;
@@ -170,6 +208,7 @@ const googleLogin = async (req, res, next) => {
         const userInfo = await response.json();
         googleId = userInfo.sub;
         email = userInfo.email;
+        name = userInfo.name;
         given_name = userInfo.given_name;
         family_name = userInfo.family_name;
         picture = userInfo.picture;
@@ -182,8 +221,9 @@ const googleLogin = async (req, res, next) => {
       return error(res, 'Google account does not have an email address', 400);
     }
 
-    const firstName = given_name || '';
-    const lastName = family_name || '';
+    const fullName = (name && name.trim())
+      || [given_name, family_name].filter(Boolean).join(' ').trim()
+      || null;
     let user = null;
     let isNewUser = false;
 
@@ -195,8 +235,7 @@ const googleLogin = async (req, res, next) => {
       user = await prisma.user.update({
         where: { id: user.id },
         data: {
-          firstName: firstName || user.firstName,
-          lastName: lastName || user.lastName,
+          fullName: fullName || user.fullName,
           avatar: picture || user.avatar,
         },
       });
@@ -221,15 +260,13 @@ const googleLogin = async (req, res, next) => {
           user = await prisma.user.upsert({
             where: { googleId },
             update: {
-              firstName: firstName || undefined,
-              lastName: lastName || undefined,
+              fullName: fullName || undefined,
               avatar: picture || undefined,
             },
             create: {
               googleId,
               email,
-              firstName,
-              lastName,
+              fullName,
               avatar: picture || null,
               isEmailVerified: true,
             },
@@ -274,7 +311,7 @@ const googleLogin = async (req, res, next) => {
 const appleLogin = async (req, res, next) => {
   try {
     const identityToken = req.body.identityToken || req.body.id_token;
-    const { firstName: bodyFirstName, lastName: bodyLastName, email: bodyEmail } = req.body;
+    const { fullName: bodyFullName, firstName: bodyFirstName, lastName: bodyLastName, email: bodyEmail } = req.body;
 
     if (!identityToken) {
       return error(res, 'Identity token is required', 400);
@@ -301,20 +338,18 @@ const appleLogin = async (req, res, next) => {
     const appleId = payload.sub;
     const emailFromToken = payload.email || null;
     const email = emailFromToken || bodyEmail || null;
-    const firstName = (bodyFirstName || '').trim() || null;
-    const lastName = (bodyLastName || '').trim() || null;
+    const fullName = (bodyFullName && bodyFullName.trim())
+      || [bodyFirstName, bodyLastName].map((s) => (s || '').trim()).filter(Boolean).join(' ')
+      || null;
 
     let user = await prisma.user.findUnique({ where: { appleId } });
     let isNewUser = false;
 
     if (user) {
-      const updateData = {};
-      if (firstName) updateData.firstName = firstName;
-      if (lastName) updateData.lastName = lastName;
-      if (Object.keys(updateData).length > 0) {
+      if (fullName) {
         user = await prisma.user.update({
           where: { id: user.id },
-          data: updateData,
+          data: { fullName },
         });
       }
     } else {
@@ -341,14 +376,12 @@ const appleLogin = async (req, res, next) => {
           user = await prisma.user.upsert({
             where: { appleId },
             update: {
-              firstName: firstName || undefined,
-              lastName: lastName || undefined,
+              fullName: fullName || undefined,
             },
             create: {
               appleId,
               email,
-              firstName: firstName || 'Apple',
-              lastName: lastName || 'User',
+              fullName: fullName || null,
               isEmailVerified: !!emailFromToken,
             },
           });
@@ -381,8 +414,7 @@ const appleLogin = async (req, res, next) => {
       user: {
         id: user.id,
         email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
+        ...nameFieldsForResponse(user),
         avatar: user.avatar,
         role: user.role,
         status: user.status,
@@ -527,6 +559,7 @@ const getProfile = async (req, res, next) => {
       select: {
         id: true,
         email: true,
+        fullName: true,
         firstName: true,
         lastName: true,
         avatar: true,
@@ -548,7 +581,12 @@ const getProfile = async (req, res, next) => {
       return error(res, 'User not found', 404);
     }
 
-    return success(res, user, 'Profile fetched successfully', 200);
+    return success(
+      res,
+      { ...user, ...nameFieldsForResponse(user) },
+      'Profile fetched successfully',
+      200
+    );
   } catch (err) {
     next(err);
   }
@@ -648,6 +686,7 @@ const getMe = async (req, res, next) => {
       select: {
         id: true,
         email: true,
+        fullName: true,
         firstName: true,
         lastName: true,
         password: true,
@@ -672,6 +711,7 @@ const getMe = async (req, res, next) => {
 
     return success(res, {
       ...userData,
+      ...nameFieldsForResponse(userData),
       managerTitle: userData.role === 'MANAGER' ? userData.managerTitle : null,
       managerPermissions: userData.role === 'MANAGER' ? userData.managerPermissions || [] : [],
       hasPassword: !!password,
@@ -690,7 +730,7 @@ const updateProfile = async (req, res, next) => {
     if (req.userId && req.userId !== userId) {
       return error(res, 'Forbidden', 403);
     }
-    const { firstName, lastName, email } = req.body;
+    const { fullName, email } = req.body;
 
     const existingUser = await prisma.user.findUnique({
       where: { id: userId },
@@ -710,8 +750,13 @@ const updateProfile = async (req, res, next) => {
     }
 
     const updateData = {};
-    if (firstName) updateData.firstName = firstName;
-    if (lastName) updateData.lastName = lastName;
+    if (fullName !== undefined) {
+      const trimmed = String(fullName).trim();
+      if (!trimmed) {
+        return error(res, 'fullName cannot be empty', 400);
+      }
+      updateData.fullName = trimmed;
+    }
     if (email) updateData.email = email;
 
     const user = await prisma.user.update({
@@ -720,6 +765,7 @@ const updateProfile = async (req, res, next) => {
       select: {
         id: true,
         email: true,
+        fullName: true,
         firstName: true,
         lastName: true,
         role: true,
@@ -731,7 +777,12 @@ const updateProfile = async (req, res, next) => {
       },
     });
 
-    return success(res, user, 'Profile updated successfully', 200);
+    return success(
+      res,
+      { ...user, ...nameFieldsForResponse(user) },
+      'Profile updated successfully',
+      200
+    );
   } catch (err) {
     next(err);
   }
