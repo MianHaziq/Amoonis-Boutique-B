@@ -84,6 +84,16 @@ const options = {
           'Discount / promo codes. **Admin**: full CRUD at `/promo-codes` (requires ADMIN or MANAGER with `PROMO_CODES`). Scope via `appliesTo` (ALL_PRODUCTS / SPECIFIC_PRODUCTS / SPECIFIC_CATEGORIES). Type is PERCENTAGE (with optional `maxDiscountAmount` cap) or FIXED. Availability via `startsAt`/`expiresAt`; `minOrderAmount` / `maxOrderAmount` guard cart totals; `usageLimit` / `usageLimitPerUser` cap redemptions. **User**: `GET /promo-codes/available` for active offers, `POST /promo-codes/validate` to preview the discount on the user\'s cart before checkout.',
       },
       { name: 'Addresses', description: 'Saved shipping addresses for the authenticated user. Up to 10 per account. One address is always the default.' },
+      {
+        name: 'Contact',
+        description:
+          'In-app contact / issue submission. **POST /contact/issue** — authenticated; body is just `subject` + `message`. `userId` is taken from the JWT. The user must have a phone number on their profile — if not, returns 400 and the app should send `PATCH /user/profile/phone` first.',
+      },
+      {
+        name: 'Contact Admin',
+        description:
+          'Admin / manager view of user-submitted contacts. Requires **ADMIN** or **MANAGER** with the **CONTACT** permission. **GET /contact/admin/issues** lists submissions with the sender\'s user details (name, email, phone) embedded.',
+      },
     ],
     components: {
       securitySchemes: {
@@ -1300,6 +1310,7 @@ const options = {
     './src/routes/analytics.routes.js',
     './src/routes/promoCode.routes.js',
     './src/routes/address.routes.js',
+    './src/routes/contact.routes.js',
   ],
 };
 

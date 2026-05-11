@@ -45,6 +45,7 @@ model User {
   notificationPreferences UserNotificationPreferences?
 
   promoCodeUsages PromoCodeUsage[]
+  userContacts    UserContact[]
 }
 
 // ============================================
@@ -130,19 +131,20 @@ model Settings {
 // CONTACT
 // ============================================
 
-model ContactMessage {
+/// Contact / issue submitted by an authenticated user. Always tied to a User
+/// so the admin sees who sent it (name, email, phone) via the join.
+model UserContact {
   id        String   @id @default(uuid())
-  firstName String
-  lastName  String?
-  email     String
-  phone     String?
-  subject   String   @default("general")
-  message   String
+  userId    String
+  subject   String
+  message   String   @db.Text
   status    String   @default("NEW")
-  adminNote String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
   @@index([status])
   @@index([createdAt])
 }

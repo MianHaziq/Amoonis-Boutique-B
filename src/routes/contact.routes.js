@@ -2,14 +2,10 @@ const express = require('express');
 const { body } = require('express-validator');
 const router = express.Router();
 const {
-  submitContact,
-  getAllMessages,
-  getMessageStats,
-  getMessageById,
-  updateMessageStatus,
-  addAdminNote,
-  deleteMessage,
+  createUserContact,
+  getAllUserContacts,
 } = require('../controllers/contact.controller');
+const { verifyToken } = require('../middleware/auth');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors } = require('../middleware/validate');
 
@@ -17,21 +13,29 @@ const { handleValidationErrors } = require('../middleware/validate');
  * @swagger
  * tags:
  *   - name: Contact
- *     description: Public contact form
+ *     description: In-app contact / issue submission (authenticated)
  *   - name: Contact Admin
- *     description: Admin contact message management
+ *     description: Admin / manager view of user-submitted contacts
  */
 
 // ============================================
-// PUBLIC ROUTE
+// AUTHENTICATED USER ROUTE (submit a contact / issue)
 // ============================================
 
 /**
  * @swagger
- * /contact:
+ * /contact/issue:
  *   post:
- *     summary: Submit contact form
+ *     summary: Submit a contact / issue as a logged-in user
+ *     description: |
+ *       Requires the user to have a phone number on their profile. If the user's
+ *       `phone` is null/empty, the request is rejected with **400** — the app
+ *       should ask the user to add their phone via `PATCH /user/profile/phone`
+ *       before submitting. The user's name, email and phone are not sent in the
+ *       body; they are read from the profile (via `userId` taken from the JWT).
  *     tags: [Contact]
+ *     security:
+ *       - bearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -39,61 +43,38 @@ const { handleValidationErrors } = require('../middleware/validate');
  *           schema:
  *             type: object
  *             required:
- *               - firstName
- *               - email
+ *               - subject
  *               - message
  *             properties:
- *               firstName:
- *                 type: string
- *               lastName:
- *                 type: string
- *               email:
- *                 type: string
- *                 format: email
- *               phone:
- *                 type: string
  *               subject:
  *                 type: string
- *                 enum: [general, support, sales, other]
+ *                 example: "Order missing item"
  *               message:
  *                 type: string
+ *                 example: "My package was missing the scarf I ordered."
  *     responses:
- *       200:
- *         description: Message sent successfully
+ *       201:
+ *         description: Contact submitted successfully
  *       400:
- *         description: Missing required fields
+ *         description: Missing fields, or user has no phone number on profile
+ *       401:
+ *         description: Unauthorized
  */
-const contactValidation = [
-  body('firstName').trim().notEmpty().withMessage('First name is required'),
-  body('email').trim().isEmail().withMessage('Valid email is required'),
+const userContactValidation = [
+  body('subject').trim().notEmpty().withMessage('Subject is required'),
   body('message').trim().notEmpty().withMessage('Message is required'),
 ];
-router.post('/', contactValidation, handleValidationErrors, submitContact);
+router.post('/issue', verifyToken, userContactValidation, handleValidationErrors, createUserContact);
 
 // ============================================
-// ADMIN ROUTES
+// ADMIN ROUTE
 // ============================================
 
 /**
  * @swagger
- * /contact/admin/stats:
+ * /contact/admin/issues:
  *   get:
- *     summary: Get contact message statistics
- *     tags: [Contact Admin]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Message stats by status
- */
-router.get('/admin/stats', verifyAdminOrManager,
-  requireManagerPermission('CONTACT'), getMessageStats);
-
-/**
- * @swagger
- * /contact/admin/messages:
- *   get:
- *     summary: Get all contact messages with pagination
+ *     summary: List user-submitted contacts with user details
  *     tags: [Contact Admin]
  *     security:
  *       - bearerAuth: []
@@ -119,118 +100,9 @@ router.get('/admin/stats', verifyAdminOrManager,
  *           enum: [NEW, READ, REPLIED, ARCHIVED]
  *     responses:
  *       200:
- *         description: List of contact messages with pagination
+ *         description: List of user contacts with embedded user details
  */
-router.get('/admin/messages', verifyAdminOrManager,
-  requireManagerPermission('CONTACT'), getAllMessages);
-
-/**
- * @swagger
- * /contact/admin/{id}:
- *   get:
- *     summary: Get single contact message (auto-marks as READ)
- *     tags: [Contact Admin]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Message details
- *       404:
- *         description: Message not found
- */
-router.get('/admin/:id', verifyAdminOrManager,
-  requireManagerPermission('CONTACT'), getMessageById);
-
-/**
- * @swagger
- * /contact/admin/{id}/status:
- *   patch:
- *     summary: Update message status
- *     tags: [Contact Admin]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - status
- *             properties:
- *               status:
- *                 type: string
- *                 enum: [NEW, READ, REPLIED, ARCHIVED]
- *     responses:
- *       200:
- *         description: Status updated
- */
-router.patch('/admin/:id/status', verifyAdminOrManager,
-  requireManagerPermission('CONTACT'), updateMessageStatus);
-
-/**
- * @swagger
- * /contact/admin/{id}/note:
- *   patch:
- *     summary: Add/update admin note on message
- *     tags: [Contact Admin]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               note:
- *                 type: string
- *     responses:
- *       200:
- *         description: Note updated
- */
-router.patch('/admin/:id/note', verifyAdminOrManager,
-  requireManagerPermission('CONTACT'), addAdminNote);
-
-/**
- * @swagger
- * /contact/admin/{id}:
- *   delete:
- *     summary: Delete a contact message
- *     tags: [Contact Admin]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Message deleted
- *       404:
- *         description: Message not found
- */
-router.delete('/admin/:id', verifyAdminOrManager,
-  requireManagerPermission('CONTACT'), deleteMessage);
+router.get('/admin/issues', verifyAdminOrManager,
+  requireManagerPermission('CONTACT'), getAllUserContacts);
 
 module.exports = router;

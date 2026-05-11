@@ -1,176 +1,96 @@
-const nodemailer = require('nodemailer');
 const prisma = require('../config/db');
 const { success, error } = require('../utils/response');
 
-// Helper: Send email (non-blocking — caller should catch errors)
-const sendEmail = async (to, subject, html) => {
-  const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: process.env.SMTP_PORT,
-    secure: false,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  });
-
-  await transporter.sendMail({
-    from: process.env.FROM_EMAIL,
-    to,
-    subject,
-    html,
-  });
-};
-
-// Subject label mapping
-const subjectLabels = {
-  general: 'General Inquiry',
-  support: 'Technical Support',
-  sales: 'Course Enrollment',
-  other: 'Other',
-};
-
 // ============================================
-// PUBLIC ENDPOINT
+// USER CONTACT (authenticated issue/inquiry)
 // ============================================
 
 /**
- * @desc    Submit contact form (save to DB + optional email)
- * @route   POST /api/contact
- * @access  Public
+ * @desc    Authenticated user submits a contact / issue
+ * @route   POST /api/contact/issue
+ * @access  Private (any logged-in user)
  */
-const submitContact = async (req, res, next) => {
+const createUserContact = async (req, res, next) => {
   try {
-    const { firstName, lastName, email, phone, subject, message } = req.body;
+    const { subject, message } = req.body;
 
-    if (!firstName || !email || !message) {
-      return error(res, 'First name, email, and message are required', 400);
+    if (!subject || !message) {
+      return error(res, 'Subject and message are required', 400);
     }
 
-    // Save to database first (this is the source of truth)
-    const contactMessage = await prisma.contactMessage.create({
+    // Phone number is required on the user profile before they can submit.
+    // App should call PATCH /user/profile/phone first if phone is missing.
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { phone: true },
+    });
+    if (!user) {
+      return error(res, 'User not found', 404);
+    }
+    if (!user.phone || !user.phone.trim()) {
+      return error(res, 'Please add a phone number to your profile before submitting a contact.', 400);
+    }
+
+    const contact = await prisma.userContact.create({
       data: {
-        firstName,
-        lastName: lastName || null,
-        email,
-        phone: phone || null,
-        subject: subject || 'general',
-        message,
+        userId: req.userId,
+        subject: subject.trim(),
+        message: message.trim(),
       },
     });
 
-    // Try to send email notifications (non-blocking)
-    try {
-      const subjectLabel = subjectLabels[subject] || 'General Inquiry';
-      const contactEmail = process.env.CONTACT_EMAIL || 'inquiries@lknightproductions.com';
-
-      // Send notification to business
-      await sendEmail(
-        contactEmail,
-        `New Contact: ${subjectLabel} from ${firstName} ${lastName || ''}`,
-        `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <div style="background: #1a1a2e; padding: 24px; border-radius: 8px 8px 0 0;">
-              <h2 style="color: white; margin: 0;">New Contact Form Submission</h2>
-            </div>
-            <div style="padding: 24px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-              <table style="width: 100%; border-collapse: collapse;">
-                <tr>
-                  <td style="padding: 8px 0; color: #6b7280; width: 120px;"><strong>Name:</strong></td>
-                  <td style="padding: 8px 0; color: #111827;">${firstName} ${lastName || ''}</td>
-                </tr>
-                <tr>
-                  <td style="padding: 8px 0; color: #6b7280;"><strong>Email:</strong></td>
-                  <td style="padding: 8px 0; color: #111827;"><a href="mailto:${email}">${email}</a></td>
-                </tr>
-                ${phone ? `
-                <tr>
-                  <td style="padding: 8px 0; color: #6b7280;"><strong>Phone:</strong></td>
-                  <td style="padding: 8px 0; color: #111827;"><a href="tel:${phone}">${phone}</a></td>
-                </tr>
-                ` : ''}
-                <tr>
-                  <td style="padding: 8px 0; color: #6b7280;"><strong>Subject:</strong></td>
-                  <td style="padding: 8px 0; color: #111827;">${subjectLabel}</td>
-                </tr>
-              </table>
-              <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;" />
-              <p style="color: #6b7280; margin-bottom: 4px;"><strong>Message:</strong></p>
-              <p style="color: #111827; white-space: pre-wrap; line-height: 1.6;">${message}</p>
-            </div>
-          </div>
-        `
-      );
-
-      // Send confirmation to user
-      await sendEmail(
-        email,
-        'Thank you for contacting us',
-        `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <div style="background: #1a1a2e; padding: 24px; border-radius: 8px 8px 0 0; text-align: center;">
-              <h2 style="color: white; margin: 0;">Amoonis Boutique</h2>
-            </div>
-            <div style="padding: 24px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-              <p style="color: #111827; font-size: 16px;">Hi ${firstName},</p>
-              <p style="color: #4b5563; line-height: 1.6;">
-                Thank you for reaching out. We have received your message and will get back to you within 24-48 hours.
-              </p>
-              <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;" />
-              <p style="color: #9ca3af; font-size: 12px; text-align: center;">
-                Amoonis Boutique
-              </p>
-            </div>
-          </div>
-        `
-      );
-    } catch (emailError) {
-      console.warn('[CONTACT] Email notification failed (message saved to DB):', emailError.message);
-    }
-
-    return success(res, null, 'Message sent successfully. We will get back to you soon!', 200);
+    return success(res, contact, 'Contact submitted successfully', 201);
   } catch (err) {
     next(err);
   }
 };
 
-// ============================================
-// ADMIN ENDPOINTS
-// ============================================
-
 /**
- * @desc    Get all contact messages with pagination and filters
- * @route   GET /api/contact/admin/messages
- * @access  Admin
+ * @desc    Admin lists all user-submitted contacts with user details
+ * @route   GET /api/contact/admin/issues
+ * @access  Admin / Manager with CONTACT permission
  */
-const getAllMessages = async (req, res, next) => {
+const getAllUserContacts = async (req, res, next) => {
   try {
     const { page = 1, limit = 10, search, status } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const take = parseInt(limit);
 
-    // Build where clause
     const where = {};
     if (status) {
       where.status = status.toUpperCase();
     }
     if (search) {
       where.OR = [
-        { firstName: { contains: search, mode: 'insensitive' } },
-        { lastName: { contains: search, mode: 'insensitive' } },
-        { email: { contains: search, mode: 'insensitive' } },
+        { subject: { contains: search, mode: 'insensitive' } },
         { message: { contains: search, mode: 'insensitive' } },
+        { user: { fullName: { contains: search, mode: 'insensitive' } } },
+        { user: { email: { contains: search, mode: 'insensitive' } } },
       ];
     }
 
-    const [messages, total] = await Promise.all([
-      prisma.contactMessage.findMany({
+    const [contacts, total] = await Promise.all([
+      prisma.userContact.findMany({
         where,
         skip,
         take,
         orderBy: { createdAt: 'desc' },
+        include: {
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              avatar: true,
+              role: true,
+            },
+          },
+        },
       }),
-      prisma.contactMessage.count({ where }),
+      prisma.userContact.count({ where }),
     ]);
 
     const totalPages = Math.ceil(total / take);
@@ -182,152 +102,14 @@ const getAllMessages = async (req, res, next) => {
       hasNext: parseInt(page) < totalPages,
       hasPrev: parseInt(page) > 1,
     };
-    return success(res, messages, 'Messages fetched successfully', 200, { pagination });
-  } catch (err) {
-    next(err);
-  }
-};
 
-/**
- * @desc    Get contact message stats (counts by status)
- * @route   GET /api/contact/admin/stats
- * @access  Admin
- */
-const getMessageStats = async (req, res, next) => {
-  try {
-    const [total, newCount, readCount, repliedCount, archivedCount] = await Promise.all([
-      prisma.contactMessage.count(),
-      prisma.contactMessage.count({ where: { status: 'NEW' } }),
-      prisma.contactMessage.count({ where: { status: 'READ' } }),
-      prisma.contactMessage.count({ where: { status: 'REPLIED' } }),
-      prisma.contactMessage.count({ where: { status: 'ARCHIVED' } }),
-    ]);
-
-    return success(res, {
-      total,
-      new: newCount,
-      read: readCount,
-      replied: repliedCount,
-      archived: archivedCount,
-    }, 'Stats fetched successfully', 200);
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * @desc    Get single contact message (auto-marks NEW as READ)
- * @route   GET /api/contact/admin/:id
- * @access  Admin
- */
-const getMessageById = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-
-    const message = await prisma.contactMessage.findUnique({ where: { id } });
-    if (!message) {
-      return error(res, 'Message not found', 404);
-    }
-
-    if (message.status === 'NEW') {
-      await prisma.contactMessage.update({
-        where: { id },
-        data: { status: 'READ' },
-      });
-      message.status = 'READ';
-    }
-
-    return success(res, message, 'Message fetched successfully', 200);
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * @desc    Update message status
- * @route   PATCH /api/contact/admin/:id/status
- * @access  Admin
- */
-const updateMessageStatus = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-
-    const validStatuses = ['NEW', 'READ', 'REPLIED', 'ARCHIVED'];
-    if (!status || !validStatuses.includes(status.toUpperCase())) {
-      return error(res, `Invalid status. Must be one of: ${validStatuses.join(', ')}`, 400);
-    }
-
-    const message = await prisma.contactMessage.findUnique({ where: { id } });
-    if (!message) {
-      return error(res, 'Message not found', 404);
-    }
-
-    const updated = await prisma.contactMessage.update({
-      where: { id },
-      data: { status: status.toUpperCase() },
-    });
-
-    return success(res, updated, 'Status updated successfully', 200);
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * @desc    Add/update admin note on a message
- * @route   PATCH /api/contact/admin/:id/note
- * @access  Admin
- */
-const addAdminNote = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { note } = req.body;
-
-    const message = await prisma.contactMessage.findUnique({ where: { id } });
-    if (!message) {
-      return error(res, 'Message not found', 404);
-    }
-
-    const updated = await prisma.contactMessage.update({
-      where: { id },
-      data: { adminNote: note || null },
-    });
-
-    return success(res, updated, 'Note updated successfully', 200);
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * @desc    Delete a contact message
- * @route   DELETE /api/contact/admin/:id
- * @access  Admin
- */
-const deleteMessage = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-
-    const message = await prisma.contactMessage.findUnique({ where: { id } });
-    if (!message) {
-      return error(res, 'Message not found', 404);
-    }
-
-    await prisma.contactMessage.delete({ where: { id } });
-
-    return success(res, null, 'Message deleted successfully', 200);
+    return success(res, contacts, 'Contacts fetched successfully', 200, { pagination });
   } catch (err) {
     next(err);
   }
 };
 
 module.exports = {
-  submitContact,
-  getAllMessages,
-  getMessageStats,
-  getMessageById,
-  updateMessageStatus,
-  addAdminNote,
-  deleteMessage,
+  createUserContact,
+  getAllUserContacts,
 };
