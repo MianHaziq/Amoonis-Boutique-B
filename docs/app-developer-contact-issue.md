@@ -1,160 +1,230 @@
-# Contact / Issue API — App Developer Integration Guide
+# Contact / Issue Form — App Developer Integration Guide
 
-Hey 👋 — here is the final shape of the in-app contact form.
+Hey 👋 — here is everything you need to wire up the in-app **Contact Us / Report an issue** screen.
 
-The form only sends **two fields**: `subject` and `message`. The user's name, email and phone are **not** in the body — the backend reads them from the user profile using the `userId` from the JWT. The admin panel sees the full user details on each submission.
-
-The form does require the user to have a **phone number** on their profile before they can submit. The app should pre-fill name / email / phone from the profile, and if `phone` is empty, ask the user to add it via the existing phone-update API before letting them send the message.
+There is **one submit endpoint** and the body has **two fields only**: `subject` and `message`. The user's name, email and phone are **not** in the body — the backend reads them from the user profile via the JWT, and the admin panel sees them on each row. The only profile requirement is that the user has a **phone number** saved before they can submit; if it's missing, the app must ask the user to add it first.
 
 ---
 
-## TL;DR
+## TL;DR — three calls, in this order
 
-1. **On contact-screen open** → `GET /api/v1/user/profile` to load the user's `fullName`, `email`, `phone`.
-2. **If `phone` is null or empty** → show a "please add your phone number" UI; send the new value via `PATCH /api/v1/user/profile/phone`, then continue.
-3. **Submit** → `POST /api/v1/contact/issue` with `{ subject, message }` only.
+| Step | Call | Purpose |
+|------|------|---------|
+| 1 | `GET /api/v1/user/profile` | Load `fullName`, `email`, `phone` to pre-fill the contact screen |
+| 2 | `PATCH /api/v1/user/profile/phone` *(only if `phone` is null/empty)* | Save the phone the user just typed |
+| 3 | `POST /api/v1/contact/issue` | Submit `{ subject, message }` |
 
-Base URL: `https://<your-host>/api/v1` (the legacy `/api` prefix also works).
+Base URL: `https://<your-host>/api/v1` (the `/api` prefix without `/v1` also works).
+All three calls need the user JWT in `Authorization: Bearer <token>`.
 
 ---
 
-## 1. Load profile for pre-fill
+## 1. Load the profile (for pre-fill)
 
-`GET /api/v1/user/profile`
-
-**Headers**
+### Request
 
 ```
+GET /api/v1/user/profile
 Authorization: Bearer <user JWT>
 ```
 
-The response includes (among other fields):
+### Response (200)
 
 ```json
 {
-  "fullName": "John Doe",
-  "email":    "john@example.com",
-  "phone":    null
+  "success": true,
+  "message": "Profile fetched successfully",
+  "data": {
+    "id": "6f6c6d36-e66a-4002-94f6-de5370612de5",
+    "email": "john@example.com",
+    "fullName": "John Doe",
+    "firstName": "John",
+    "lastName": "Doe",
+    "avatar": null,
+    "role": "CUSTOMER",
+    "status": "ACTIVE",
+    "isEmailVerified": false,
+    "preferredLanguage": "en",
+    "phone": null,
+    "addressCountry": null,
+    "addressCity": null,
+    "createdAt": "2026-04-08T11:22:14.000Z",
+    "updatedAt": "2026-05-11T09:14:02.000Z"
+  }
 }
 ```
 
-Pre-fill the contact screen's display fields:
+### What to do with each field on the screen
 
-| Field on screen | Source | Editable here? |
-|-----------------|--------|----------------|
-| Full name       | `fullName` | No — display only |
-| Email           | `email`    | No — display only |
-| Phone           | `phone`    | Editable if null (see step 2) |
-| Subject         | user input | Yes |
-| Message         | user input | Yes |
+| Field on screen   | Source           | Editable here? | Notes |
+|-------------------|------------------|----------------|-------|
+| Full name         | `data.fullName`  | ❌ display only | Greys out; lives in profile screen for edits |
+| Email             | `data.email`     | ❌ display only | Same — managed elsewhere |
+| Phone number      | `data.phone`     | ✅ only when null/empty | See step 2 |
+| Subject           | user input       | ✅ | Required, single-line |
+| Message           | user input       | ✅ | Required, multi-line textarea |
 
-These three identity fields are **not** sent to the contact endpoint — the backend resolves them from the JWT.
+Pre-fill the three identity fields purely as **display** so the user knows what the support team will see. Don't put them in the contact request body — they get ignored.
 
 ---
 
-## 2. Require phone before submit
+## 2. Ask for a phone number when `phone` is null
 
-If `user.phone` is `null` or empty:
+If `data.phone` is `null` or an empty string, the user cannot submit yet. Show an inline prompt:
 
-- Show an inline prompt: *"Please add your phone number so we can contact you back."*
-- Let the user enter a phone.
-- Call:
+> *"Please add your phone number so we can get back to you."*
+
+Have them type the new phone, then call:
+
+### Request
 
 ```
 PATCH /api/v1/user/profile/phone
 Authorization: Bearer <user JWT>
 Content-Type: application/json
+```
 
+```json
 { "phone": "+971507654321" }
 ```
 
-On `200`, refresh the local profile state with the new phone and unlock the submit button. (Sending an empty string clears it again.)
+### Response (200)
 
-> **Belt-and-suspenders:** the contact endpoint *also* checks this server-side and returns `400` with the message `"Please add a phone number to your profile before submitting a contact."` if the user somehow gets past your client check. Treat that 400 as "open the add-phone flow."
+```json
+{
+  "success": true,
+  "message": "Phone number updated successfully",
+  "data": { "phone": "+971507654321" }
+}
+```
+
+After 200, store the new phone in your local state and enable the Submit button.
+
+> **Belt-and-suspenders:** the contact endpoint also enforces this server-side and returns **400** with the message `"Please add a phone number to your profile before submitting a contact."` if a request slips through without a phone. Treat that 400 the same way — open the add-phone UI.
 
 ---
 
 ## 3. Submit the contact
 
-`POST /api/v1/contact/issue`
-
-**Headers**
+### Request
 
 ```
+POST /api/v1/contact/issue
 Authorization: Bearer <user JWT>
 Content-Type: application/json
 ```
 
-**Body — only these two fields**
+**Body — only these two fields:**
 
 ```json
 {
   "subject": "Order missing item",
-  "message": "My package was missing the scarf I ordered."
+  "message": "My package was missing the scarf I ordered yesterday."
 }
 ```
 
-Both fields are required and trimmed; empty strings are rejected.
+Both are required and trimmed. Empty strings are rejected.
 
-**Success — 201**
+### Response (201)
 
 ```json
 {
   "success": true,
   "message": "Contact submitted successfully",
   "data": {
-    "id": "b76096bc-3d36-41cb-a18f-c00bbfe98790",
+    "id": "9b543679-7eb9-4d48-9993-f0fa5689bded",
     "userId": "fc4a0f2b-c7fe-44ec-b396-40fad318c655",
     "subject": "Order missing item",
-    "message": "My package was missing the scarf I ordered.",
+    "message": "My package was missing the scarf I ordered yesterday.",
     "status": "NEW",
-    "createdAt": "2026-05-11T14:21:39.537Z",
-    "updatedAt": "2026-05-11T14:21:39.537Z"
+    "createdAt": "2026-05-11T14:28:10.843Z",
+    "updatedAt": "2026-05-11T14:28:10.843Z"
   }
 }
 ```
 
-**Errors**
+### Error responses
 
-| Code | When |
-|------|------|
-| 400  | `subject` or `message` missing/empty (`errors[]` includes the field). |
-| 400  | User has no phone on profile — open the add-phone flow and retry. |
-| 401  | Missing / invalid / expired token. |
+| HTTP | When | Body shape | App reaction |
+|------|------|-----------|--------------|
+| 400  | Empty / missing `subject` or `message` | `{ "success": false, "message": "Validation failed", "errors": [{ "field": "subject", "message": "Subject is required" }] }` | Show inline field errors |
+| 400  | User profile has no phone | `{ "success": false, "message": "Please add a phone number to your profile before submitting a contact." }` | Open the add-phone UI, then retry the submit |
+| 401  | Missing / invalid / expired token | `{ "success": false, "message": "Access denied. No token provided." }` (or `Token expired...`, `Invalid token.`) | Run the re-login flow |
 
 ---
 
 ## 4. End-to-end flow on the app
 
 ```
-[Open contact screen]
-        │
-        ▼
-GET /user/profile
-        │
-        ▼
-   ┌────────────┐
-   │ phone null │── yes ──► Show "Add phone" UI
-   └─────┬──────┘            │
-         │ no                ▼
-         │            PATCH /user/profile/phone
-         │                   │
-         ▼                   ▼
-[Show form: name/email/phone read-only,
- subject + message inputs]
+[User taps "Contact us"]
          │
          ▼
+GET /user/profile
+         │
+   ┌─────┴──────┐
+   │ phone null │── yes ──► Show "Add phone" UI ──► PATCH /user/profile/phone ──┐
+   └─────┬──────┘                                                                │
+         │ no                                                                    │
+         ▼                                                                       │
+[Render contact screen]                                                          │
+  • fullName  (read-only)  ◄──────────────────────────────────────────────────── │
+  • email     (read-only)                                                        │
+  • phone     (read-only, refreshed from PATCH response) ◄─────────────────────  │
+  • subject   (input, required)
+  • message   (textarea, required)
+         │
+         ▼  [User taps Send]
 POST /contact/issue { subject, message }
          │
-         ▼
-   [Success toast] ─── go back ───►
+   ┌─────┴─────┐
+   │  201      │── show success state, clear form, navigate back
+   │  400 (phone) │── re-open Add phone UI
+   │  400 (validation) │── highlight field
+   │  401      │── re-login
+   └───────────┘
 ```
 
 ---
 
-## 5. Admin side (FYI — not your job, just so you know what the admin sees)
+## 5. UI checklist
 
-`GET /api/v1/contact/admin/issues` (admin / manager with `CONTACT` permission) returns each submission with the sender's user record embedded:
+- ✅ Show the user's `fullName`, `email`, `phone` on the screen, all read-only, so they know what support will see.
+- ✅ Show a hint near the phone field: *"This is how we'll reach you back."*
+- ✅ If `phone` is empty on screen load, gate the form behind an "Add phone number" CTA instead of letting the user type subject/message first.
+- ✅ Disable Submit while a request is in flight; re-enable on response.
+- ✅ Don't send `fullName`, `email`, `phone`, `userId` in the body — only `subject` and `message`. Anything else is ignored.
+- ✅ On 201, show a confirmation ("Thanks — we'll reply within 24 hours"), then pop the screen.
+- ✅ On the `phone-missing` 400, route back to the Add phone UI, not the field-validation UI.
+
+---
+
+## 6. Quick cURL recipes (for testing locally)
+
+```bash
+TOKEN="<paste a user JWT here>"
+
+# 1. Pull profile
+curl https://<host>/api/v1/user/profile \
+  -H "Authorization: Bearer $TOKEN"
+
+# 2. Save a phone number (only when profile.phone is null)
+curl -X PATCH https://<host>/api/v1/user/profile/phone \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"+971501234567"}'
+
+# 3. Submit the contact
+curl -X POST https://<host>/api/v1/contact/issue \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"subject":"Order missing item","message":"My package was missing the scarf."}'
+```
+
+---
+
+## 7. What the admin will see (FYI)
+
+`GET /api/v1/contact/admin/issues` — admin or manager with `CONTACT` permission. Each row comes back with the sender's profile joined in, so support knows who sent it and how to reach them:
 
 ```json
 {
@@ -174,37 +244,14 @@ POST /contact/issue { subject, message }
 }
 ```
 
-That's why we need the phone on the profile — the admin uses it to follow up.
+That's why we hard-require the phone before submit.
 
 ---
 
-## 6. Quick cURL recipes
+## 8. Open questions / nice-to-haves
 
-```bash
-# Get the current profile (for pre-fill)
-curl https://<host>/api/v1/user/profile \
-  -H "Authorization: Bearer $USER_TOKEN"
+- No user-facing "my issues history" endpoint yet. Tell me if you want `GET /api/v1/contact/my-issues` and I'll add it.
+- No attachments support today (subject + message only). Let me know if you need image uploads for screenshots.
+- No status updates pushed back to the user yet (the admin can mark things READ / REPLIED / ARCHIVED internally). Ping me if support wants to notify users when their issue is replied to.
 
-# Add or update the user's phone
-curl -X PATCH https://<host>/api/v1/user/profile/phone \
-  -H "Authorization: Bearer $USER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"phone":"+971501234567"}'
-
-# Submit a contact
-curl -X POST https://<host>/api/v1/contact/issue \
-  -H "Authorization: Bearer $USER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"subject":"Order missing item","message":"My package was missing the scarf."}'
-```
-
----
-
-## 7. Notes
-
-- Don't put `fullName`, `email`, or `phone` in the contact request body — they will be ignored. The backend trusts the JWT, not the body, for identity.
-- After a successful 201, clear the form. No follow-up call needed; the admin sees the row immediately.
-- A 401 means the session expired — route through normal re-login.
-- There's no user-facing "my issues history" endpoint yet — ping me if you want one (`GET /api/v1/contact/my-issues`) and I'll add it.
-
-Reach out if anything's unclear or if you want the phone check moved client-side only (currently it's enforced on both sides for safety).
+Ping me on anything that's unclear, or if any of the response shapes need to change for the UI.
