@@ -9,13 +9,15 @@ const {
   changePassword,
   forgotPassword,
   resetPassword,
+  refreshAccessToken,
+  logout,
   getMe,
   updateProfile,
   deleteAccount,
 } = require('../controllers/auth.controller');
 const { handleValidationErrors } = require('../middleware/validate');
 const { verifyToken } = require('../middleware/auth');
-const { authStrictLimiter, passwordResetLimiter } = require('../middleware/rateLimit');
+const { authStrictLimiter, passwordResetLimiter, authLimiter } = require('../middleware/rateLimit');
 
 /**
  * @swagger
@@ -284,6 +286,80 @@ const resetPasswordValidation = [
   body('newPassword').isLength({ min: 6 }).withMessage('New password must be at least 6 characters'),
 ];
 router.post('/reset-password', passwordResetLimiter, resetPasswordValidation, handleValidationErrors, resetPassword);
+
+/**
+ * @swagger
+ * /auth/refresh:
+ *   post:
+ *     summary: Exchange a refresh token for a new access token
+ *     description: |
+ *       Rotates the supplied refresh token: the old refresh token is revoked and a new
+ *       refresh token + access token pair is returned. Use this when the access token
+ *       expires. Refresh tokens are single-use; persist the new value returned here.
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [refreshToken]
+ *             properties:
+ *               refreshToken:
+ *                 type: string
+ *                 description: Refresh token returned by signin / signup / google / apple
+ *     responses:
+ *       200:
+ *         description: New token pair
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     token: { type: string, description: New access token }
+ *                     refreshToken: { type: string, description: New refresh token (rotated) }
+ *                     refreshTokenExpiresAt: { type: string, format: date-time }
+ *       400:
+ *         description: refreshToken missing
+ *       401:
+ *         description: Invalid or expired refresh token
+ *       403:
+ *         description: Account deactivated
+ */
+const refreshValidation = [body('refreshToken').notEmpty().withMessage('refreshToken is required')];
+router.post('/refresh', authLimiter, refreshValidation, handleValidationErrors, refreshAccessToken);
+
+/**
+ * @swagger
+ * /auth/logout:
+ *   post:
+ *     summary: Logout — revoke the supplied refresh token
+ *     description: |
+ *       Pass the refresh token in the body to invalidate it. With no body and a valid
+ *       Bearer access token, every refresh token for the authenticated user is revoked.
+ *       Access tokens remain valid until natural expiry; bump tokenVersion via password
+ *       change for an immediate global kick.
+ *     tags: [Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               refreshToken:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Logged out successfully
+ */
+router.post('/logout', authLimiter, logout);
 
 /**
  * @swagger
