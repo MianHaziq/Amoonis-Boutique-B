@@ -309,7 +309,7 @@ router.get('/manager-permissions', verifyAdmin, getManagerPermissionCatalog);
  *   delete:
  *     summary: Delete user
  *     description: |
- *       Requires an **Administrator** JWT. Permanently deletes the account. Confirm your business rules (e.g. users with past orders) before calling.
+ *       Requires an **Administrator** JWT. Permanently deletes the account and **cascades** to all related rows: orders (and their items), cart, addresses, saved push devices, notification preferences, contacts, refresh tokens, and promo-code usages. This is irreversible — order history for this customer will be lost.
  *     tags: [Users]
  *     security:
  *       - bearerAuth: []
