@@ -14,23 +14,6 @@ const capitalize = (str) => {
   return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
 };
 
-// Resolve a user's display name: prefer the canonical fullName column, then
-// fall back to legacy firstName/lastName for users created before the migration.
-const resolveDisplayName = (user) =>
-  (user.fullName && user.fullName.trim())
-  || [user.firstName, user.lastName].filter(Boolean).join(' ').trim()
-  || '';
-
-const splitDisplayName = (displayName) => {
-  const trimmed = (displayName || '').trim();
-  if (!trimmed) return { firstName: null, lastName: null };
-  const parts = trimmed.split(/\s+/);
-  return {
-    firstName: parts[0],
-    lastName: parts.length > 1 ? parts.slice(1).join(' ') : null,
-  };
-};
-
 const getAvatarInitials = (displayName) => {
   const parts = (displayName || '').trim().split(/\s+/).filter(Boolean);
   const first = parts[0]?.charAt(0)?.toUpperCase() || '';
@@ -42,14 +25,11 @@ const getAvatarInitials = (displayName) => {
  * Helper to transform user data for frontend
  */
 const transformUser = (user) => {
-  const displayName = resolveDisplayName(user);
-  const split = splitDisplayName(displayName);
+  const displayName = (user.fullName || '').trim();
   return {
     id: user.id,
     name: displayName,
     fullName: displayName || null,
-    firstName: split.firstName,
-    lastName: split.lastName,
     email: user.email,
     avatar: user.avatar || getAvatarInitials(displayName),
     role: capitalize(user.role) || 'Customer',
@@ -157,9 +137,6 @@ const getAllUsers = async (req, res, next) => {
       where.OR = [
         { email: { contains: search, mode: 'insensitive' } },
         { fullName: { contains: search, mode: 'insensitive' } },
-        // Legacy fallbacks for users created before the fullName migration.
-        { firstName: { contains: search, mode: 'insensitive' } },
-        { lastName: { contains: search, mode: 'insensitive' } },
       ];
     }
 
@@ -172,7 +149,7 @@ const getAllUsers = async (req, res, next) => {
     }
 
     // Build orderBy
-    const validSortFields = ['fullName', 'firstName', 'lastName', 'email', 'createdAt', 'role', 'status'];
+    const validSortFields = ['fullName', 'email', 'createdAt', 'role', 'status'];
     const sortField = validSortFields.includes(sortBy) ? sortBy : 'createdAt';
     const sortOrder = order === 'asc' ? 'asc' : 'desc';
 
