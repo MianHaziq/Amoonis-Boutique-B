@@ -1,12 +1,25 @@
 const prisma = require('../config/db');
+const { autoTranslate } = require('../utils/bilingual');
+
+const CATEGORY_BILINGUAL = [
+  { src: 'title', dst: 'title_ar' },
+  { src: 'description', dst: 'description_ar' },
+];
 
 async function createCategory(data) {
+  const draft = {
+    title: data.title ?? null,
+    title_ar: data.title_ar ?? null,
+    description: data.description ?? null,
+    description_ar: data.description_ar ?? null,
+  };
+  await autoTranslate(draft, CATEGORY_BILINGUAL);
   return prisma.category.create({
     data: {
-      title: data.title,
-      title_ar: data.title_ar ?? null,
-      description: data.description ?? null,
-      description_ar: data.description_ar ?? null,
+      title: draft.title,
+      title_ar: draft.title_ar ?? null,
+      description: draft.description ?? null,
+      description_ar: draft.description_ar ?? null,
       image: data.image ?? null,
       totalProducts: 0,
     },
@@ -14,13 +27,23 @@ async function createCategory(data) {
 }
 
 async function updateCategory(id, data) {
+  // Only translate sides the admin actually touched in this request. autoTranslate may add
+  // the twin field to the draft (e.g. admin sent only `title` → fills `title_ar`), so we
+  // gate the Prisma update on the draft, not on what the admin originally sent.
+  const draft = {};
+  if (data.title !== undefined) draft.title = data.title;
+  if (data.title_ar !== undefined) draft.title_ar = data.title_ar;
+  if (data.description !== undefined) draft.description = data.description;
+  if (data.description_ar !== undefined) draft.description_ar = data.description_ar;
+  await autoTranslate(draft, CATEGORY_BILINGUAL);
+
   return prisma.category.update({
     where: { id },
     data: {
-      ...(data.title != null && { title: data.title }),
-      ...(data.title_ar !== undefined && { title_ar: data.title_ar ?? null }),
-      ...(data.description !== undefined && { description: data.description }),
-      ...(data.description_ar !== undefined && { description_ar: data.description_ar ?? null }),
+      ...(draft.title != null && { title: draft.title }),
+      ...(draft.title_ar !== undefined && { title_ar: draft.title_ar ?? null }),
+      ...(draft.description !== undefined && { description: draft.description }),
+      ...(draft.description_ar !== undefined && { description_ar: draft.description_ar ?? null }),
       ...(data.image !== undefined && { image: data.image }),
     },
   });

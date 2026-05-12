@@ -1,4 +1,18 @@
 const prisma = require('../config/db');
+const { autoTranslate, autoTranslateMany } = require('../utils/bilingual');
+
+const PRODUCT_BILINGUAL = [
+  { src: 'title', dst: 'title_ar' },
+  { src: 'subtitle', dst: 'subtitle_ar' },
+];
+const PRODUCT_DESCRIPTION_BILINGUAL = [
+  { src: 'title', dst: 'title_ar' },
+  { src: 'description', dst: 'description_ar' },
+];
+const PRODUCT_OPTION_BILINGUAL = [
+  { src: 'title', dst: 'title_ar' },
+  { src: 'options', dst: 'options_ar', kind: 'arrayOfString' },
+];
 
 const MAX_IMAGES = 10;
 const ACTIVE_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PROCESSING'];
@@ -101,15 +115,30 @@ async function createProduct(data) {
   const quantity = data.quantity != null ? Math.max(0, parseInt(data.quantity, 10) || 0) : 0;
   const productOptionRows = normalizeProductOptions(data.productOptions);
 
+  // Auto-translate the en/_ar twins before the DB write. We translate the parent product
+  // fields and every child description/option in a single batched Azure call so an entire
+  // product create costs one round-trip, not N.
+  const productDraft = {
+    title: data.title ?? null,
+    title_ar: data.title_ar ?? null,
+    subtitle: data.subtitle ?? null,
+    subtitle_ar: data.subtitle_ar ?? null,
+  };
+  await Promise.all([
+    autoTranslate(productDraft, PRODUCT_BILINGUAL),
+    autoTranslateMany(descriptionRows, PRODUCT_DESCRIPTION_BILINGUAL),
+    autoTranslateMany(productOptionRows, PRODUCT_OPTION_BILINGUAL),
+  ]);
+
   // Wrap product create + category counter bump in a single transaction so a counter-update
   // failure rolls the product create back instead of leaving the cached count drifted.
   return prisma.$transaction(async (tx) => {
     const product = await tx.product.create({
       data: {
-        title: data.title,
-        title_ar: data.title_ar ?? null,
-        subtitle: data.subtitle ?? null,
-        subtitle_ar: data.subtitle_ar ?? null,
+        title: productDraft.title,
+        title_ar: productDraft.title_ar ?? null,
+        subtitle: productDraft.subtitle ?? null,
+        subtitle_ar: productDraft.subtitle_ar ?? null,
         price: data.price,
         discountedPrice: data.discountedPrice ?? null,
         quantity,
@@ -160,11 +189,28 @@ async function updateProduct(id, data) {
   });
   if (!existing) return null;
 
+  const bilingualDraft = {};
+  if (data.title !== undefined) bilingualDraft.title = data.title;
+  if (data.title_ar !== undefined) bilingualDraft.title_ar = data.title_ar;
+  if (data.subtitle !== undefined) bilingualDraft.subtitle = data.subtitle;
+  if (data.subtitle_ar !== undefined) bilingualDraft.subtitle_ar = data.subtitle_ar;
+
+  // Normalize children up front so we can translate them BEFORE opening the transaction.
+  // Doing network I/O inside $transaction would pin a DB connection for the duration of
+  // the Azure call and risks transaction timeouts under load.
+  const descriptionRows = data.descriptions !== undefined ? normalizeDescriptions(data.descriptions) : null;
+  const productOptionRows = data.productOptions !== undefined ? normalizeProductOptions(data.productOptions) : null;
+  await Promise.all([
+    autoTranslate(bilingualDraft, PRODUCT_BILINGUAL),
+    descriptionRows ? autoTranslateMany(descriptionRows, PRODUCT_DESCRIPTION_BILINGUAL) : Promise.resolve(),
+    productOptionRows ? autoTranslateMany(productOptionRows, PRODUCT_OPTION_BILINGUAL) : Promise.resolve(),
+  ]);
+
   const updatePayload = {
-    ...(data.title != null && { title: data.title }),
-    ...(data.title_ar !== undefined && { title_ar: data.title_ar ?? null }),
-    ...(data.subtitle !== undefined && { subtitle: data.subtitle }),
-    ...(data.subtitle_ar !== undefined && { subtitle_ar: data.subtitle_ar ?? null }),
+    ...(bilingualDraft.title != null && { title: bilingualDraft.title }),
+    ...(bilingualDraft.title_ar !== undefined && { title_ar: bilingualDraft.title_ar ?? null }),
+    ...(bilingualDraft.subtitle !== undefined && { subtitle: bilingualDraft.subtitle }),
+    ...(bilingualDraft.subtitle_ar !== undefined && { subtitle_ar: bilingualDraft.subtitle_ar ?? null }),
     ...(data.price != null && { price: data.price }),
     ...(data.discountedPrice !== undefined && { discountedPrice: data.discountedPrice }),
     ...(data.quantity !== undefined && { quantity: Math.max(0, parseInt(data.quantity, 10) || 0) }),
@@ -210,9 +256,8 @@ async function updateProduct(id, data) {
       }
     }
 
-    if (data.descriptions !== undefined) {
+    if (descriptionRows !== null) {
       await tx.productDescription.deleteMany({ where: { productId: id } });
-      const descriptionRows = normalizeDescriptions(data.descriptions);
       if (descriptionRows.length > 0) {
         await tx.productDescription.createMany({
           data: descriptionRows.map((row) => ({ productId: id, ...row })),
@@ -220,9 +265,8 @@ async function updateProduct(id, data) {
       }
     }
 
-    if (data.productOptions !== undefined) {
+    if (productOptionRows !== null) {
       await tx.productOption.deleteMany({ where: { productId: id } });
-      const productOptionRows = normalizeProductOptions(data.productOptions);
       if (productOptionRows.length > 0) {
         await tx.productOption.createMany({
           data: productOptionRows.map((row) => ({ productId: id, ...row })),

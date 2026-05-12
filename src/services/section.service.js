@@ -5,6 +5,9 @@
  */
 const prisma = require('../config/db');
 const productService = require('./product.service');
+const { autoTranslate } = require('../utils/bilingual');
+
+const SECTION_BILINGUAL = [{ src: 'title', dst: 'title_ar' }];
 
 function mapCategoryForSection(cat) {
   if (!cat || !cat.category) return null;
@@ -112,10 +115,16 @@ async function createSection(data) {
 
   const maxOrder = await prisma.section.aggregate({ _max: { sortOrder: true } }).then((r) => (r._max.sortOrder ?? -1) + 1);
 
+  const titleDraft = {
+    title,
+    title_ar: data.title_ar != null ? String(data.title_ar).trim() || null : null,
+  };
+  await autoTranslate(titleDraft, SECTION_BILINGUAL);
+
   const section = await prisma.section.create({
     data: {
-      title,
-      title_ar: data.title_ar != null ? String(data.title_ar).trim() || null : null,
+      title: titleDraft.title,
+      title_ar: titleDraft.title_ar ?? null,
       image: data.image != null ? String(data.image).trim() || null : null,
       sortOrder: data.sortOrder != null ? Number(data.sortOrder) : maxOrder,
     },
@@ -158,6 +167,8 @@ async function updateSection(id, data) {
   if (data.title_ar !== undefined) {
     updatePayload.title_ar = data.title_ar ? String(data.title_ar).trim() || null : null;
   }
+  // Fill the missing twin if admin only sent one side.
+  await autoTranslate(updatePayload, SECTION_BILINGUAL);
   if (data.image !== undefined) updatePayload.image = data.image ? String(data.image).trim() : null;
   if (data.sortOrder !== undefined) updatePayload.sortOrder = Number(data.sortOrder);
 

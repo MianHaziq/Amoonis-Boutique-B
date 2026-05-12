@@ -31,6 +31,15 @@ const optional = [
   'CONTACT_EMAIL',
   'FIREBASE_SERVICE_ACCOUNT_JSON',
   'FIREBASE_SERVICE_ACCOUNT_BASE64',
+  // Auto-translation (Azure AI Translator). Leave unset to disable —
+  // admin-supplied bilingual fields will then be saved exactly as provided.
+  'TRANSLATION_PROVIDER',
+  'AZURE_TRANSLATOR_KEY',
+  'AZURE_TRANSLATOR_REGION',
+  'AZURE_TRANSLATOR_ENDPOINT',
+  'TRANSLATION_TIMEOUT_MS',
+  'TRANSLATION_RETRY_ATTEMPTS',
+  'TRANSLATION_CACHE_MAX',
 ];
 
 function validateEnv() {

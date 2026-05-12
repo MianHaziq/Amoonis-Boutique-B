@@ -1,7 +1,12 @@
 const prisma = require('../config/db');
+const { autoTranslate } = require('../utils/bilingual');
 
 const DISCOUNT_TYPES = ['PERCENTAGE', 'FIXED'];
 const APPLIES_TO_VALUES = ['ALL_PRODUCTS', 'SPECIFIC_PRODUCTS', 'SPECIFIC_CATEGORIES'];
+const PROMO_BILINGUAL = [
+  { src: 'name', dst: 'name_ar' },
+  { src: 'description', dst: 'description_ar' },
+];
 
 function decimalToNumber(value) {
   if (value === null || value === undefined) return null;
@@ -194,6 +199,7 @@ const LIST_INCLUDE = {
 
 async function createPromoCode(data) {
   const base = buildPromoCodeData(data, { isUpdate: false });
+  await autoTranslate(base, PROMO_BILINGUAL);
   const productIds = Array.isArray(data.productIds) ? [...new Set(data.productIds.filter(Boolean))] : [];
   const categoryIds = Array.isArray(data.categoryIds) ? [...new Set(data.categoryIds.filter(Boolean))] : [];
 
@@ -231,6 +237,7 @@ async function updatePromoCode(id, data) {
   }
 
   const base = buildPromoCodeData(data, { isUpdate: true });
+  await autoTranslate(base, PROMO_BILINGUAL);
 
   const effectiveAppliesTo = base.appliesTo ?? existing.appliesTo;
   const productIdsProvided = Array.isArray(data.productIds);
