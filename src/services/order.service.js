@@ -134,17 +134,13 @@ async function createOrder(userId, checkoutInput = {}) {
 
   // Recipient identity (fullName + phone) is sourced from the user profile so the
   // checkout payload doesn't need to re-collect what we already have from signup.
-  // Falls back to legacy firstName/lastName for users created before the fullName
-  // migration, and finally to whatever the address row carries (old saved addresses
-  // still have name/phone populated and we don't want to wipe that on their orders).
+  // Falls back to whatever the address row carries (old saved addresses still have
+  // name/phone populated and we don't want to wipe that on their orders).
   const userRow = await prisma.user.findUnique({
     where: { id: userId },
-    select: { fullName: true, firstName: true, lastName: true, phone: true },
+    select: { fullName: true, phone: true },
   });
-  const profileFullName =
-    (userRow?.fullName && userRow.fullName.trim())
-    || [userRow?.firstName, userRow?.lastName].filter(Boolean).join(' ').trim()
-    || null;
+  const profileFullName = (userRow?.fullName && userRow.fullName.trim()) || null;
   const profilePhone = userRow?.phone || null;
 
   // Resolve address and fetch cart in parallel when addressId is provided
@@ -476,7 +472,7 @@ async function getAllOrdersAdmin(page = 1, limit = 10, status = null) {
       take,
       orderBy: { createdAt: 'desc' },
       include: {
-        user: { select: { id: true, email: true, fullName: true, firstName: true, lastName: true } },
+        user: { select: { id: true, email: true, fullName: true } },
         _count: { select: { items: true } },
       },
     }),
@@ -515,16 +511,10 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
     updatedAt: order.updatedAt,
   };
   if (includeUser && order.user) {
-    const fullName =
-      order.user.fullName
-      || [order.user.firstName, order.user.lastName].filter(Boolean).join(' ').trim()
-      || null;
     base.user = {
       id: order.user.id,
       email: order.user.email,
-      fullName,
-      firstName: order.user.firstName ?? null,
-      lastName: order.user.lastName ?? null,
+      fullName: order.user.fullName || null,
     };
   }
   if (order._count) {
@@ -604,7 +594,7 @@ async function getAdminOrderHistory(page = 1, limit = 10, filters = {}) {
   const includeItems = filters.includeItems === true || filters.includeItems === 'true';
 
   const include = {
-    user: { select: { id: true, email: true, fullName: true, firstName: true, lastName: true } },
+    user: { select: { id: true, email: true, fullName: true } },
     _count: { select: { items: true } },
     ...(includeItems
       ? {

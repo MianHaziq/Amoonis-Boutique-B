@@ -63,27 +63,19 @@ function mapAddress(a, profile = {}) {
 }
 
 // Pulls the contact + region defaults from the user profile in one read.
-// fullName falls back to firstName + lastName for users created before the
-// fullName migration so legacy accounts still get a populated response.
 async function loadProfileDefaults(client, userId) {
   const u = await client.user.findUnique({
     where: { id: userId },
     select: {
       fullName: true,
-      firstName: true,
-      lastName: true,
       phone: true,
       addressCity: true,
       addressCountry: true,
     },
   });
   if (!u) return { fullName: null, phone: null, addressCity: null, addressCountry: null };
-  const fullName =
-    (u.fullName && u.fullName.trim())
-    || [u.firstName, u.lastName].filter(Boolean).join(' ').trim()
-    || null;
   return {
-    fullName,
+    fullName: (u.fullName && u.fullName.trim()) || null,
     phone: u.phone || null,
     addressCity: u.addressCity || null,
     addressCountry: u.addressCountry || null,

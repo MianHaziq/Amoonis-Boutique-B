@@ -161,7 +161,7 @@ router.post('/google', authStrictLimiter, googleLogin);
  *     summary: Login with Apple
  *     description: |
  *       Sign in with Apple. Send the **identityToken** (JWT) from the client after Apple Sign In.
- *       Optionally send **fullName** (or legacy **firstName** and **lastName**) and **email** in the body — Apple provides the name only on first authorization, so the client must pass it for new accounts.
+ *       Optionally send **fullName** and **email** in the body — Apple provides the name only on first authorization, so the client must pass it for new accounts.
  *       Server verifies the token with Apple's public keys (JWKS). Returns same shape as Google login.
  *     tags: [Auth]
  *     requestBody:
@@ -181,16 +181,8 @@ router.post('/google', authStrictLimiter, googleLogin);
  *                 description: Alias for identityToken (optional)
  *               fullName:
  *                 type: string
- *                 description: User full name (preferred; Apple sends name only on first sign-in, pass it from the client)
+ *                 description: User full name (Apple sends name only on first sign-in, pass it from the client)
  *                 example: "John Doe"
- *               firstName:
- *                 type: string
- *                 description: Legacy field, concatenated with lastName when fullName is absent
- *                 example: "John"
- *               lastName:
- *                 type: string
- *                 description: Legacy field, concatenated with firstName when fullName is absent
- *                 example: "Doe"
  *               email:
  *                 type: string
  *                 format: email
@@ -452,8 +444,6 @@ router.put('/change-password/:userId', verifyToken, changePasswordValidation, ha
  *                     id: { type: string, format: uuid }
  *                     email: { type: string, format: email }
  *                     fullName: { type: string, nullable: true }
- *                     firstName: { type: string, nullable: true, description: "Derived from fullName for back-compat" }
- *                     lastName: { type: string, nullable: true, description: "Derived from fullName for back-compat" }
  *                     role: { type: string }
  *                     status: { type: string }
  *                     avatar: { type: string, nullable: true }

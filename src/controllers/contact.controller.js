@@ -80,8 +80,6 @@ const getAllUserContacts = async (req, res, next) => {
             select: {
               id: true,
               fullName: true,
-              firstName: true,
-              lastName: true,
               email: true,
               phone: true,
               avatar: true,
