@@ -34,6 +34,11 @@ model User {
   addressCity        String?
   resetToken         String?
   resetTokenExpiry   DateTime?
+  /// Bumped to invalidate all currently-issued access tokens for this user.
+  /// New JWTs include this value as `tv`; verifyToken rejects mismatches.
+  /// Backwards compatible: legacy tokens without `tv` are still accepted
+  /// during the rollout window.
+  tokenVersion       Int       @default(0)
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
@@ -46,6 +51,27 @@ model User {
 
   promoCodeUsages PromoCodeUsage[]
   userContacts    UserContact[]
+  refreshTokens   RefreshToken[]
+}
+
+/// Server-side refresh-token store. The raw token is shown to the client once
+/// in the auth response and is never persisted in plaintext — only its SHA-256
+/// hash. Rotating on every refresh and revoking on logout/password-change is
+/// what gives long-lived sessions a safe revocation path.
+model RefreshToken {
+  id          String   @id @default(uuid())
+  userId      String
+  tokenHash   String   @unique
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  /// Tracks which device requested the original sign-in (informational only).
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 // ============================================

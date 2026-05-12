@@ -3,7 +3,66 @@ const prisma = require('../config/db');
 const { error } = require('../utils/response');
 
 /**
- * Verify JWT token middleware. Returns consistent { success: false, message } on auth failure.
+ * Small in-memory cache so verifyToken doesn't hit the DB on every authenticated
+ * request. TTL is intentionally short (30s) so a status/role change propagates
+ * quickly without a full token expiry. Cleared on signal events (password
+ * change, status update) is handled by bumping User.tokenVersion — the cached
+ * entry then no longer matches the JWT claim and is rejected.
+ */
+const USER_CACHE_TTL_MS = 30 * 1000;
+const USER_CACHE_MAX = 10000;
+const userCache = new Map();
+
+function getCached(userId) {
+  const entry = userCache.get(userId);
+  if (!entry) return null;
+  if (Date.now() - entry.fetchedAt > USER_CACHE_TTL_MS) {
+    userCache.delete(userId);
+    return null;
+  }
+  return entry;
+}
+
+function setCached(userId, payload) {
+  if (userCache.size >= USER_CACHE_MAX) {
+    // Evict the oldest 25% in a single pass — cheaper than full LRU bookkeeping.
+    const sorted = [...userCache.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+    const drop = Math.floor(sorted.length / 4);
+    for (let i = 0; i < drop; i++) userCache.delete(sorted[i][0]);
+  }
+  userCache.set(userId, { ...payload, fetchedAt: Date.now() });
+}
+
+function invalidateCachedUser(userId) {
+  userCache.delete(userId);
+}
+
+/**
+ * Load the current authoritative user fields used by middleware, hitting the
+ * in-memory cache when fresh. Returns null when the user no longer exists.
+ */
+async function loadUserForAuth(userId) {
+  const cached = getCached(userId);
+  if (cached) return cached;
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      role: true,
+      status: true,
+      tokenVersion: true,
+      managerPermissions: true,
+    },
+  });
+  if (!user) return null;
+  setCached(user.id, user);
+  return user;
+}
+
+/**
+ * Verify JWT and load the live user record. Rejects deactivated, deleted, or
+ * stale-token-version sessions. Preserves the existing { success: false, message }
+ * shape on every failure so the mobile app keeps parsing errors unchanged.
  */
 const verifyToken = async (req, res, next) => {
   try {
@@ -15,18 +74,39 @@ const verifyToken = async (req, res, next) => {
 
     const token = authHeader.split(' ')[1];
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.userId = decoded.id;
-    req.userRole = decoded.role;
-
-    next();
-  } catch (err) {
-    if (err.name === 'TokenExpiredError') {
-      return error(res, 'Token expired. Please login again.', 401);
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (err) {
+      if (err.name === 'TokenExpiredError') {
+        return error(res, 'Token expired. Please login again.', 401);
+      }
+      if (err.name === 'JsonWebTokenError') {
+        return error(res, 'Invalid token.', 401);
+      }
+      throw err;
     }
-    if (err.name === 'JsonWebTokenError') {
+
+    const user = await loadUserForAuth(decoded.id);
+    if (!user) {
       return error(res, 'Invalid token.', 401);
     }
+    if (user.status !== 'ACTIVE') {
+      return error(res, 'Your account has been deactivated. Please contact support.', 403);
+    }
+    // Reject tokens issued before the user's tokenVersion was bumped.
+    // Legacy tokens (no `tv` claim) are accepted during the rollout window so
+    // existing sessions don't get logged out at deployment.
+    if (decoded.tv != null && decoded.tv !== user.tokenVersion) {
+      return error(res, 'Session expired. Please login again.', 401);
+    }
+
+    req.userId = user.id;
+    req.userRole = user.role;
+    req.userStatus = user.status;
+    req.managerPermissions = user.managerPermissions || [];
+    next();
+  } catch (err) {
     next(err);
   }
 };
@@ -43,78 +123,38 @@ const verifyAdmin = async (req, res, next) => {
     }
 
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    const user = await prisma.user.findUnique({
-      where: { id: decoded.id },
-      select: { id: true, role: true },
-    });
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (err) {
+      if (err.name === 'TokenExpiredError') {
+        return error(res, 'Token expired. Please login again.', 401);
+      }
+      if (err.name === 'JsonWebTokenError') {
+        return error(res, 'Invalid token.', 401);
+      }
+      throw err;
+    }
+
+    const user = await loadUserForAuth(decoded.id);
 
     if (!user || user.role !== 'ADMIN') {
       return error(res, 'Access denied. Admin privileges required.', 403);
     }
+    if (user.status !== 'ACTIVE') {
+      return error(res, 'Your account has been deactivated. Please contact support.', 403);
+    }
+    if (decoded.tv != null && decoded.tv !== user.tokenVersion) {
+      return error(res, 'Session expired. Please login again.', 401);
+    }
 
-    req.userId = decoded.id;
+    req.userId = user.id;
     req.user = user;
     req.isAdmin = true;
 
     next();
   } catch (err) {
-    if (err.name === 'TokenExpiredError') {
-      return error(res, 'Token expired. Please login again.', 401);
-    }
-    if (err.name === 'JsonWebTokenError') {
-      return error(res, 'Invalid token.', 401);
-    }
-    next(err);
-  }
-};
-
-/**
- * Verify instructor or admin middleware. Returns consistent { success: false, message } on failure.
- */
-const verifyInstructorOrAdmin = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return error(res, 'Access denied. No token provided.', 401);
-    }
-
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    const user = await prisma.user.findUnique({
-      where: { id: decoded.id },
-      select: { id: true, role: true },
-    });
-
-    if (!user) {
-      return error(res, 'Access denied. User not found.', 403);
-    }
-
-    if (user.role === 'ADMIN') {
-      req.userId = decoded.id;
-      req.user = user;
-      req.isAdmin = true;
-      return next();
-    }
-
-    if (user.role === 'INSTRUCTOR') {
-      req.userId = decoded.id;
-      req.user = user;
-      req.isInstructor = true;
-      return next();
-    }
-
-    return error(res, 'Access denied. Instructor or Admin privileges required.', 403);
-  } catch (err) {
-    if (err.name === 'TokenExpiredError') {
-      return error(res, 'Token expired. Please login again.', 401);
-    }
-    if (err.name === 'JsonWebTokenError') {
-      return error(res, 'Invalid token.', 401);
-    }
     next(err);
   }
 };
@@ -122,5 +162,6 @@ const verifyInstructorOrAdmin = async (req, res, next) => {
 module.exports = {
   verifyToken,
   verifyAdmin,
-  verifyInstructorOrAdmin,
+  invalidateCachedUser,
+  loadUserForAuth,
 };

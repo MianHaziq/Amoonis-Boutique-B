@@ -17,6 +17,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('./src/config/swagger');
+const prisma = require('./src/config/db');
 
 process.on('uncaughtException', (err) => {
   console.error('[SERVER] Uncaught Exception:', err);
@@ -99,6 +100,24 @@ app.get('/', (req, res) => {
     docs: '/api-docs',
     api: '/api/v1',
   });
+});
+
+// Liveness — process is up. Cheap, never touches the DB. Use this from
+// container orchestrators (Railway, Kubernetes liveness probes) to decide
+// whether the process is alive.
+app.get('/health/live', (req, res) => {
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+});
+
+// Readiness — process can serve traffic. Pings the DB so a transient outage
+// flips the probe to 503 and an upstream load balancer drains the pod.
+app.get('/health/ready', async (req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return res.status(200).json({ status: 'ready', db: 'up' });
+  } catch (err) {
+    return res.status(503).json({ status: 'unavailable', db: 'down' });
+  }
 });
 
 // Mount v1 routes

@@ -6,6 +6,8 @@ const { v4: uuidv4 } = require('uuid');
 const { OAuth2Client } = require('google-auth-library');
 const nodemailer = require('nodemailer');
 const { verifyAppleToken } = require('../services/appleAuth.service');
+const refreshTokenService = require('../services/refreshToken.service');
+const { invalidateCachedUser } = require('../middleware/auth');
 const { success, error } = require('../utils/response');
 
 function hashResetToken(rawToken) {
@@ -42,11 +44,39 @@ const GOOGLE_AUDIENCE = (process.env.GOOGLE_CLIENT_ID || '')
   .filter(Boolean);
 
 // Helper: Generate JWT token
-const generateToken = (userId, role) => {
-  return jwt.sign({ id: userId, role }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-  });
+// `tokenVersion` is included as `tv` so a server-side bump (logout-all / password
+// change / admin kick) instantly invalidates already-issued tokens. Callers that
+// don't pass it fall back to 0, matching the User default.
+const generateToken = (userId, role, tokenVersion = 0) => {
+  return jwt.sign(
+    { id: userId, role, tv: tokenVersion },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+  );
 };
+
+// Issues an access token plus a refresh token for the given user row. The
+// refresh token is the only field added to the response — mobile clients that
+// have not yet adopted it can keep ignoring the new key safely.
+async function issueAuthTokens(user, req) {
+  const accessToken = generateToken(user.id, user.role, user.tokenVersion ?? 0);
+  let refreshToken = null;
+  let refreshTokenExpiresAt = null;
+  try {
+    const issued = await refreshTokenService.issueRefreshToken(
+      user.id,
+      req?.headers?.['user-agent'] || null
+    );
+    refreshToken = issued.token;
+    refreshTokenExpiresAt = issued.expiresAt;
+  } catch (err) {
+    // Refresh-token persistence failure must NOT block sign-in for the mobile
+    // app. Log and proceed with the access token only — the app keeps working
+    // exactly like before.
+    console.error('[auth] issueRefreshToken failed:', err.message);
+  }
+  return { accessToken, refreshToken, refreshTokenExpiresAt };
+}
 
 function authSessionUserFields(user) {
   const base = {
@@ -106,26 +136,26 @@ const signup = async (req, res, next) => {
         email,
         password: hashedPassword,
       },
-      select: { id: true, email: true, fullName: true, firstName: true, lastName: true, role: true, status: true, createdAt: true },
+      select: { id: true, email: true, fullName: true, firstName: true, lastName: true, role: true, status: true, tokenVersion: true, createdAt: true },
     });
 
-    const token = generateToken(created.id, created.role);
-    return success(
-      res,
-      {
-        user: {
-          id: created.id,
-          email: created.email,
-          ...nameFieldsForResponse(created),
-          role: created.role,
-          status: created.status,
-          createdAt: created.createdAt,
-        },
-        token,
+    const { accessToken, refreshToken, refreshTokenExpiresAt } = await issueAuthTokens(created, req);
+    const responseData = {
+      user: {
+        id: created.id,
+        email: created.email,
+        ...nameFieldsForResponse(created),
+        role: created.role,
+        status: created.status,
+        createdAt: created.createdAt,
       },
-      'User registered successfully',
-      201
-    );
+      token: accessToken,
+    };
+    if (refreshToken) {
+      responseData.refreshToken = refreshToken;
+      responseData.refreshTokenExpiresAt = refreshTokenExpiresAt;
+    }
+    return success(res, responseData, 'User registered successfully', 201);
   } catch (err) {
     next(err);
   }
@@ -154,11 +184,16 @@ const signin = async (req, res, next) => {
       return error(res, 'Your account has been deactivated. Please contact support.', 403);
     }
 
-    const token = generateToken(user.id, user.role);
-    return success(res, {
+    const { accessToken, refreshToken, refreshTokenExpiresAt } = await issueAuthTokens(user, req);
+    const responseData = {
       user: authSessionUserFields(user),
-      token,
-    }, 'Login successful', 200);
+      token: accessToken,
+    };
+    if (refreshToken) {
+      responseData.refreshToken = refreshToken;
+      responseData.refreshTokenExpiresAt = refreshTokenExpiresAt;
+    }
+    return success(res, responseData, 'Login successful', 200);
   } catch (err) {
     next(err);
   }
@@ -296,12 +331,25 @@ const googleLogin = async (req, res, next) => {
       return error(res, 'Your account has been deactivated. Please contact support.', 403);
     }
 
-    const token = generateToken(user.id, user.role);
-    return success(res, {
+    // Renamed locals here only — the request body already destructured a Google
+    // `accessToken` (the OAuth bearer the client passed us). We need a different
+    // name for our own session access token to avoid shadowing it.
+    const tokens = await issueAuthTokens(user, req);
+    const responseData = {
       user: authSessionUserFields(user),
-      token,
+      token: tokens.accessToken,
       isNewUser,
-    }, isNewUser ? 'Account created successfully' : 'Google login successful', 200);
+    };
+    if (tokens.refreshToken) {
+      responseData.refreshToken = tokens.refreshToken;
+      responseData.refreshTokenExpiresAt = tokens.refreshTokenExpiresAt;
+    }
+    return success(
+      res,
+      responseData,
+      isNewUser ? 'Account created successfully' : 'Google login successful',
+      200
+    );
   } catch (err) {
     next(err);
   }
@@ -337,7 +385,6 @@ const appleLogin = async (req, res, next) => {
 
     const appleId = payload.sub;
     const emailFromToken = payload.email || null;
-    const email = emailFromToken || bodyEmail || null;
     const fullName = (bodyFullName && bodyFullName.trim())
       || [bodyFirstName, bodyLastName].map((s) => (s || '').trim()).filter(Boolean).join(' ')
       || null;
@@ -353,8 +400,28 @@ const appleLogin = async (req, res, next) => {
         });
       }
     } else {
-      user = email ? await prisma.user.findUnique({ where: { email } }) : null;
+      // SECURITY: only the email Apple itself signed (`payload.email`) is trusted
+      // for linking to an existing account. `bodyEmail` is supplied by the
+      // client and could be any address; if we used it for lookup, an attacker
+      // could pass a victim's email and have their own Apple `sub` linked to
+      // the victim's account on the spot. Apple always includes the email on
+      // the *first* Sign in with Apple for a given app, which is the only
+      // situation where a brand-new appleId needs to be linked, so this branch
+      // covers all legitimate first-time sign-ins.
+      user = emailFromToken
+        ? await prisma.user.findUnique({ where: { email: emailFromToken } })
+        : null;
+
       if (user) {
+        if (user.appleId && user.appleId !== appleId) {
+          // Another Apple identity is already linked to this email. Refuse to
+          // silently re-link — that path is account takeover.
+          return error(
+            res,
+            'This email is already linked to a different Apple ID. Please sign in with your original method.',
+            409
+          );
+        }
         user = await prisma.user.update({
           where: { id: user.id },
           data: {
@@ -363,40 +430,56 @@ const appleLogin = async (req, res, next) => {
           },
         });
       } else {
-        if (!email) {
+        // No existing user. Create a fresh account.
+        //   - Prefer the email Apple signed (verified).
+        //   - Fall back to bodyEmail only when *no* user exists with that
+        //     email — that means no account is being taken over.
+        //   - Mark email verified only when it came from Apple.
+        const createEmail = emailFromToken || (bodyEmail ? String(bodyEmail).trim().toLowerCase() : null);
+        if (!createEmail) {
           return error(
             res,
             'Email is required to create an account. Please share your email with Sign in with Apple.',
             400
           );
         }
-        // Upsert on appleId to absorb the race where two parallel first-time Apple logins
-        // both miss the findUnique. Postgres unique constraint serializes them.
+
+        if (!emailFromToken && bodyEmail) {
+          // Defence-in-depth: even with `bodyEmail`, if a user already has it,
+          // refuse to attach this Apple identity — we cannot prove the caller
+          // owns that mailbox.
+          const collision = await prisma.user.findUnique({ where: { email: createEmail } });
+          if (collision) {
+            return error(
+              res,
+              'An account with this email already exists. Please sign in with your original method, then link Apple from settings.',
+              409
+            );
+          }
+        }
+
         try {
           user = await prisma.user.upsert({
             where: { appleId },
-            update: {
-              fullName: fullName || undefined,
-            },
+            update: { fullName: fullName || undefined },
             create: {
               appleId,
-              email,
+              email: createEmail,
               fullName: fullName || null,
               isEmailVerified: !!emailFromToken,
             },
           });
           isNewUser = !user.updatedAt || user.createdAt.getTime() === user.updatedAt.getTime();
         } catch (raceErr) {
-          // Email already exists with a different unique key — link Apple to that account.
           if (raceErr.code === 'P2002') {
-            user = await prisma.user.findUnique({ where: { email } });
-            if (user && !user.appleId) {
-              user = await prisma.user.update({
-                where: { id: user.id },
-                data: { appleId, isEmailVerified: user.isEmailVerified || !!emailFromToken },
-              });
+            // Another request linked this Apple ID concurrently. Re-read by
+            // appleId and proceed (do NOT silently link by email).
+            const recheck = await prisma.user.findUnique({ where: { appleId } });
+            if (recheck) {
+              user = recheck;
+            } else {
+              throw raceErr;
             }
-            if (!user) throw raceErr;
           } else {
             throw raceErr;
           }
@@ -408,9 +491,8 @@ const appleLogin = async (req, res, next) => {
       return error(res, 'Your account has been deactivated. Please contact support.', 403);
     }
 
-    const token = generateToken(user.id, user.role);
-
-    return success(res, {
+    const { accessToken, refreshToken, refreshTokenExpiresAt } = await issueAuthTokens(user, req);
+    const responseData = {
       user: {
         id: user.id,
         email: user.email,
@@ -420,9 +502,19 @@ const appleLogin = async (req, res, next) => {
         status: user.status,
         isEmailVerified: user.isEmailVerified,
       },
-      token,
+      token: accessToken,
       isNewUser,
-    }, isNewUser ? 'Account created successfully' : 'Apple login successful', 200);
+    };
+    if (refreshToken) {
+      responseData.refreshToken = refreshToken;
+      responseData.refreshTokenExpiresAt = refreshTokenExpiresAt;
+    }
+    return success(
+      res,
+      responseData,
+      isNewUser ? 'Account created successfully' : 'Apple login successful',
+      200
+    );
   } catch (err) {
     next(err);
   }
@@ -456,10 +548,23 @@ const changePassword = async (req, res, next) => {
     }
 
     const hashedPassword = await bcrypt.hash(newPassword, 12);
+    // Bumping tokenVersion invalidates every access token currently in
+    // circulation for this user (other devices / sessions). Combined with the
+    // refresh-token revocation below this gives a real "sign me out
+    // everywhere" guarantee on the password-change event.
     await prisma.user.update({
       where: { id: userId },
-      data: { password: hashedPassword },
+      data: {
+        password: hashedPassword,
+        tokenVersion: { increment: 1 },
+      },
     });
+    try {
+      await refreshTokenService.revokeAllForUser(userId);
+    } catch (revErr) {
+      console.error('[auth] revokeAllForUser after password change failed:', revErr.message);
+    }
+    invalidateCachedUser(userId);
 
     return success(res, null, 'Password changed successfully', 200);
   } catch (err) {
@@ -541,8 +646,17 @@ const resetPassword = async (req, res, next) => {
         password: hashedPassword,
         resetToken: null,
         resetTokenExpiry: null,
+        // Invalidate all in-flight access tokens for this user — the password
+        // changed, so prior sessions on other devices should not survive.
+        tokenVersion: { increment: 1 },
       },
     });
+    try {
+      await refreshTokenService.revokeAllForUser(user.id);
+    } catch (revErr) {
+      console.error('[auth] revokeAllForUser after password reset failed:', revErr.message);
+    }
+    invalidateCachedUser(user.id);
 
     return success(res, null, 'Password reset successfully', 200);
   } catch (err) {
@@ -817,6 +931,74 @@ const deleteAccount = async (req, res, next) => {
   }
 };
 
+// Refresh — exchange a refresh token for a new access token (and rotate the
+// refresh token). Returns the same shape mobile clients already parse for tokens,
+// with the same key names (`token` + `refreshToken`) so adoption is incremental.
+const refreshAccessToken = async (req, res, next) => {
+  try {
+    const provided = req.body?.refreshToken;
+    if (!provided || typeof provided !== 'string') {
+      return error(res, 'refreshToken is required', 400);
+    }
+
+    const rotated = await refreshTokenService.rotateRefreshToken(
+      provided,
+      req?.headers?.['user-agent'] || null
+    );
+    if (!rotated) {
+      return error(res, 'Invalid or expired refresh token. Please login again.', 401);
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: rotated.userId },
+      select: { id: true, role: true, status: true, tokenVersion: true },
+    });
+    if (!user) {
+      // The user was deleted between issuing the refresh token and now —
+      // revoke this token defensively and reject.
+      await refreshTokenService.revokeAllForUser(rotated.userId).catch(() => {});
+      return error(res, 'Invalid or expired refresh token. Please login again.', 401);
+    }
+    if (user.status !== 'ACTIVE') {
+      await refreshTokenService.revokeAllForUser(user.id).catch(() => {});
+      return error(res, 'Your account has been deactivated. Please contact support.', 403);
+    }
+
+    const accessToken = generateToken(user.id, user.role, user.tokenVersion ?? 0);
+    return success(
+      res,
+      {
+        token: accessToken,
+        refreshToken: rotated.token,
+        refreshTokenExpiresAt: rotated.expiresAt,
+      },
+      'Token refreshed successfully',
+      200
+    );
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Logout — revokes the refresh token only. Access tokens stay valid until they
+// expire on their own (typical mobile pattern). For a hard "kick", use change
+// password or admin status toggle, both of which bump tokenVersion.
+const logout = async (req, res, next) => {
+  try {
+    const provided = req.body?.refreshToken;
+    if (provided) {
+      await refreshTokenService.revokeRawToken(provided);
+    } else if (req.userId) {
+      // Fallback: token-authenticated logout with no body — revoke every
+      // refresh token for the current user.
+      await refreshTokenService.revokeAllForUser(req.userId);
+    }
+    return success(res, null, 'Logged out successfully', 200);
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   signup,
   signin,
@@ -825,6 +1007,8 @@ module.exports = {
   changePassword,
   forgotPassword,
   resetPassword,
+  refreshAccessToken,
+  logout,
   getMe,
   getProfile,
   updateProfile,
