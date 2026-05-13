@@ -1,4 +1,4 @@
-# Auto-Translation Setup (Azure AI Translator)
+# Auto-Translation Setup (Google Cloud Translation — default)
 
 When the admin saves a product/category/section/promo-code, the backend automatically detects whether the text is English or Arabic, routes it into the correct column (`title` for English, `title_ar` for Arabic — even if the admin typed into the "wrong" field), and translates the other side. Both English and Arabic always end up populated in the database, and both are returned in API responses. The admin can still edit either side manually at any time — manual values always win over auto-translation.
 
@@ -10,31 +10,56 @@ This doc lists everything you (the deploy operator) need to do.
 
 ## TL;DR — what you have to do
 
-1. Create an Azure Translator resource (free tier — 2,000,000 chars/month).
-2. Add 4 environment variables.
+1. Create a Google Cloud project + enable Cloud Translation API + generate an API key (~5 min).
+2. Add 2 environment variables to `.env`.
 3. Restart the backend.
 4. (Optional) Run the one-time backfill script for existing rows.
 
-That's the whole list. The code is already wired and tested.
+That's the whole list. The code is already wired and tested. Azure is also supported as an alternative — see the bottom of this doc.
+
+### Free tier (verified May 2026)
+
+| Provider | Free tier | Beyond free tier | Notes |
+|---|---|---|---|
+| **Google Cloud Translation** *(default)* | **500,000 chars/month** | $20 per 1M chars | Free tier never expires, resets monthly. Applies to v2 NMT and v3 Basic/Advanced NMT. |
+| Azure AI Translator | 2,000,000 chars/month | ~$10 per 1M chars | F0 tier, no time limit. |
+
+For a boutique catalog (~5K products, low monthly write volume), Google's 500K/month is **plenty** — you'll likely never see a bill. The one-time backfill of an existing catalog (~1–2M chars) would cost roughly $20–30 once, then ongoing usage stays inside the free tier.
 
 ---
 
-## 1. Create an Azure Translator resource (~3 minutes)
+## 1. Create a Google Cloud Translation API key (~5 minutes)
 
-1. Go to <https://portal.azure.com> → sign in (free Microsoft account works).
-2. Click **Create a resource** → search **"Translator"** → select **Translator** (publisher: Microsoft) → **Create**.
-3. Fill the form:
-   - **Subscription**: your subscription (Free Trial is fine).
-   - **Resource group**: create one, e.g. `amoon-bloom`.
-   - **Region**: pick one close to your backend (e.g. `UAE North`, `West Europe`, `East US`). **Remember this value — you'll paste it into `AZURE_TRANSLATOR_REGION`.**
-   - **Name**: anything, e.g. `amoon-translator`.
-   - **Pricing tier**: **Free F0** (2M chars/month, $0).
-4. Click **Review + create** → **Create**. Wait ~30 seconds.
-5. Open the created resource → left sidebar → **Keys and Endpoint**.
-6. Copy:
-   - **KEY 1** (a long hex string) → this is `AZURE_TRANSLATOR_KEY`.
-   - **Location/Region** (e.g. `uaenorth`) → this is `AZURE_TRANSLATOR_REGION`.
-   - Note: the **Text Translation** endpoint is the global one — `https://api.cognitive.microsofttranslator.com`. You don't need a regional endpoint for translation.
+### 1.1 Sign in / create a Google Cloud account
+
+1. Go to <https://console.cloud.google.com> and sign in with any Google account (Gmail works).
+2. Accept the terms if prompted. First-time users get a **$300 free credit** (you won't need it — Translation has its own permanent free tier).
+
+### 1.2 Create (or pick) a project
+
+1. Top bar → click the project dropdown → **NEW PROJECT**.
+2. Name it `amoon-bloom` (or anything) → **Create**.
+3. Wait ~10 seconds, then make sure the new project is selected in the top bar.
+
+### 1.3 Enable the Cloud Translation API
+
+1. In the search bar at the top of the console, type **"Cloud Translation API"** and click the result.
+2. Click **Enable**. (If you haven't yet enabled billing on the project, Google will prompt you to set up a billing account here. The card is for identity verification — Translation stays free under the monthly cap.)
+3. Wait ~30 seconds.
+
+### 1.4 Create the API key
+
+1. Left sidebar → **APIs & Services → Credentials** (or search "Credentials" in the top bar).
+2. Click **+ CREATE CREDENTIALS** → **API key**.
+3. A modal pops up with your key. **Copy it now** — this is `GOOGLE_TRANSLATE_API_KEY`.
+4. Click **Edit API key** (or the pencil icon next to the new key in the list).
+5. Under **API restrictions**:
+   - Select **Restrict key**.
+   - Tick **Cloud Translation API** only.
+   - Save.
+
+   This means the key can only call the Translation API — if it ever leaks, attackers can't use it to drain your other Google services.
+6. (Optional but recommended) Under **Application restrictions** → set **IP addresses** and add your backend server's outbound IP (Railway shows this in the project dashboard). If your IP is dynamic, skip this and rely on the API restriction above.
 
 ---
 
@@ -42,30 +67,28 @@ That's the whole list. The code is already wired and tested.
 
 Add these to your **`.env`** (local dev) and to **Railway → Variables** (production).
 
-### Required to enable translation
+### Required
 
 | Variable | Value | Notes |
 |---|---|---|
-| `TRANSLATION_PROVIDER` | `azure` | Set to `none` (or unset) to disable auto-translation entirely. |
-| `AZURE_TRANSLATOR_KEY` | `<your KEY 1>` | From step 1.6 above. Treat as a secret. |
-| `AZURE_TRANSLATOR_REGION` | `<your region>` | The Location field, e.g. `uaenorth`. Must be lowercase, no spaces. |
+| `TRANSLATION_PROVIDER` | `google` | Set to `none` (or unset key) to disable auto-translation entirely. |
+| `GOOGLE_TRANSLATE_API_KEY` | `<your API key>` | From step 1.4 above. Treat as a secret — never commit to git. |
 
 ### Optional tuning (sensible defaults already set)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AZURE_TRANSLATOR_ENDPOINT` | `https://api.cognitive.microsofttranslator.com` | Override only if Microsoft tells you to use a regional endpoint. |
-| `TRANSLATION_TIMEOUT_MS` | `5000` | Max ms to wait for one Azure call before giving up. |
+| `GOOGLE_TRANSLATE_ENDPOINT` | `https://translation.googleapis.com` | Only override if Google publishes a regional endpoint you must use. |
+| `TRANSLATION_TIMEOUT_MS` | `5000` | Max ms to wait for one translate call before giving up. |
 | `TRANSLATION_RETRY_ATTEMPTS` | `1` | Retries on 5xx / network errors. 4xx never retries (fails fast). |
 | `TRANSLATION_CACHE_MAX` | `5000` | In-memory LRU cache size (entries). Repeat strings cost $0. |
 
 ### Example block
 
 ```env
-# --- Auto-translation ---
-TRANSLATION_PROVIDER=azure
-AZURE_TRANSLATOR_KEY=abcdef0123456789abcdef0123456789
-AZURE_TRANSLATOR_REGION=uaenorth
+# --- Auto-translation (Google Cloud Translation) ---
+TRANSLATION_PROVIDER=google
+GOOGLE_TRANSLATE_API_KEY=AIzaSyA-your-key-here...
 ```
 
 ---
@@ -162,8 +185,9 @@ Each admin write costs **one Azure round-trip** regardless of how many fields ar
 
 The translation service logs to stdout under `[translation]`. To watch usage and quota:
 
-- Azure Portal → your Translator resource → **Metrics** → add `Total Calls` and `Characters Translated`.
-- Free tier quota resets on the 1st of each month. Stay under 2M chars/month to pay $0.
+- **Google Cloud Console** → your project → **APIs & Services → Dashboard** → click "Cloud Translation API" → see request count and character usage charts.
+- **Quotas**: same screen → Quotas tab. Confirms your free monthly quota (500K chars) and how much you've used.
+- Free tier resets on the 1st of each month. Stay under 500K chars/month (Google) or 2M chars/month (Azure) to pay $0.
 
 ---
 
@@ -171,9 +195,11 @@ The translation service logs to stdout under `[translation]`. To watch usage and
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Server logs `AZURE_TRANSLATOR_KEY missing` | Env not picked up | Verify `.env` is loaded; restart server |
-| Test script reports `401` / `403` | Wrong key or region | Re-copy from Azure portal; region must match the resource's Location |
-| `429 Too Many Requests` | Quota exhausted (over 2M/month) | Upgrade to S1 paid tier (~$10/M chars) or wait for monthly reset |
+| Server logs `GOOGLE_TRANSLATE_API_KEY missing` | Env not picked up | Verify `.env` is loaded; restart server |
+| Test script reports `400 API key not valid` | Wrong/copied with whitespace | Re-copy from Google Cloud Console → APIs & Services → Credentials |
+| Test script reports `403 PERMISSION_DENIED` | API key is restricted to a different API or IP | Check the key's API restrictions allow **Cloud Translation API**; loosen IP restriction if blocking your IP |
+| `403 has not been used in project … or it is disabled` | Cloud Translation API not enabled on the project the key belongs to | Console → search "Cloud Translation API" → Enable |
+| `429 Too Many Requests` / `RESOURCE_EXHAUSTED` | Quota exhausted (over 500K/month) | Either wait for monthly reset (1st of next month) or add billing to keep going at $20/M |
 | Arabic comes back garbled / English passes through | Network failure mid-call | Check `[translation]` logs; transient — admin can re-save |
 
 ---
@@ -181,14 +207,47 @@ The translation service logs to stdout under `[translation]`. To watch usage and
 ## Files added/changed
 
 ```
-src/services/translation.service.js   # Azure wrapper, cache, batching, retry
+src/services/translation.service.js   # Multi-provider wrapper (google/azure/none)
 src/utils/bilingual.js                # autoTranslate / autoTranslateMany helpers
 src/services/category.service.js      # wired
 src/services/section.service.js       # wired
 src/services/product.service.js       # wired (parent + descriptions + options)
 src/services/promoCode.service.js     # wired
-src/config/env.js                     # registers new env vars
+src/config/env.js                     # registers translation env vars
 scripts/backfill-translations.js      # one-time backfill for existing rows
 scripts/test-translation.js           # smoke test (offline + live modes)
 docs/translation-setup.md             # this doc
 ```
+
+---
+
+## Alternative: using Azure AI Translator instead
+
+The codebase supports Azure as a drop-in alternative. Switch by changing two env vars — no code change.
+
+### Create the Azure resource
+
+1. Go to <https://portal.azure.com> → **Create a resource** → search **"Translator"** → **Create**.
+2. Form values:
+   - **Subscription**: any active subscription.
+   - **Resource group**: `amoon-bloom` (or any).
+   - **Region**: any (e.g. `UAE North`, `West Europe`). Save the value — it goes in `AZURE_TRANSLATOR_REGION`.
+   - **Name**: e.g. `amoon-translator`.
+   - **Pricing tier**: **Free F0** (2M chars/month, $0). Do not pick S1 by accident.
+3. After ~30 seconds the resource is ready → left sidebar → **Keys and Endpoint** → copy **KEY 1**.
+
+### Env vars
+
+```env
+TRANSLATION_PROVIDER=azure
+AZURE_TRANSLATOR_KEY=abcdef0123456789...
+AZURE_TRANSLATOR_REGION=uaenorth
+```
+
+Set `TRANSLATION_PROVIDER=azure` (instead of `google`) and the runtime switches without any other change. Both providers go through the same wrapper, cache, retry, batching, and bilingual helper — your services don't know the difference.
+
+### When Azure makes more sense than Google
+
+- **Higher free volume**: Azure F0 gives 2M chars/month (4× Google's 500K).
+- **Microsoft-shop environments**: if you're already on Azure for other services, billing is consolidated.
+- **Slightly more consistent translations for formal/technical text** (per public benchmarks). Google tends to win on casual / marketing copy, but the difference is small.

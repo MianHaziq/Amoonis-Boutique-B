@@ -83,7 +83,8 @@ async function offlineTests() {
 }
 
 async function liveTests() {
-  console.log('\n[live] AZURE_TRANSLATOR_KEY detected — running real round-trips');
+  const provider = (process.env.TRANSLATION_PROVIDER || 'google').toLowerCase();
+  console.log(`\n[live] ${provider} provider configured — running real round-trips`);
   _resetCache();
 
   // 1. Single translate, en → ar

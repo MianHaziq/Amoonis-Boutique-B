@@ -5,7 +5,7 @@ const router = express.Router();
 const promoCodeController = require('../controllers/promoCode.controller');
 const { verifyToken } = require('../middleware/auth');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
-const { handleValidationErrors } = require('../middleware/validate');
+const { handleValidationErrors, requireEitherBilingual } = require('../middleware/validate');
 const { publicLimiter, authLimiter } = require('../middleware/rateLimit');
 
 /**
@@ -45,8 +45,10 @@ const idParam = [param('id').isUUID().withMessage('Valid promo code ID required'
 const createValidation = [
   body('code').isString().trim().notEmpty().withMessage('code is required')
     .isLength({ min: 2, max: 40 }).withMessage('code must be 2–40 characters'),
-  body('name').isString().trim().notEmpty().withMessage('name is required'),
+  // Bilingual name — either English or Arabic acceptable; backend auto-translates.
+  body('name').optional({ nullable: true }).isString().trim(),
   body('name_ar').optional({ nullable: true }).isString().trim(),
+  requireEitherBilingual('name', 'name_ar', 'Promo code name'),
   body('description').optional({ nullable: true }).isString(),
   body('description_ar').optional({ nullable: true }).isString().trim(),
   body('discountType').isString().isIn(['PERCENTAGE', 'FIXED'])

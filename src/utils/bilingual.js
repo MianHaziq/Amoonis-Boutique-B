@@ -208,8 +208,42 @@ function objectId(o) {
   return id;
 }
 
+/**
+ * NOT-NULL safety net for CREATE flows.
+ *
+ * The DB schema enforces NOT NULL on the English-side columns of bilingual pairs
+ * (e.g. Category.title, Section.title, Product.title). Normally autoTranslate fills
+ * both sides before the Prisma write — but if the translation API failed (network /
+ * quota / 5xx), only the admin-supplied side has a value. To avoid crashing the save
+ * with a NOT NULL constraint violation, copy the populated side across so both columns
+ * hold the same text. Admin can re-save later to get a real translation.
+ *
+ * Only use this on CREATE flows. On UPDATE, leaving the missing side undefined is
+ * correct — Prisma will simply not touch the existing column.
+ *
+ * @param {object} payload  Mutated in place.
+ * @param {Array}  schema   Same schema used with autoTranslate.
+ */
+function fillBilingualGapsFromTwin(payload, schema) {
+  if (!payload || !Array.isArray(schema)) return;
+  for (const field of schema) {
+    if (field.kind === 'arrayOfString') {
+      const en = Array.isArray(payload[field.src]) ? payload[field.src].filter(isFilled) : [];
+      const ar = Array.isArray(payload[field.dst]) ? payload[field.dst].filter(isFilled) : [];
+      if (en.length === 0 && ar.length > 0) payload[field.src] = [...ar];
+      if (ar.length === 0 && en.length > 0) payload[field.dst] = [...en];
+    } else {
+      const en = isFilled(payload[field.src]) ? payload[field.src] : null;
+      const ar = isFilled(payload[field.dst]) ? payload[field.dst] : null;
+      if (!en && ar) payload[field.src] = ar;
+      if (!ar && en) payload[field.dst] = en;
+    }
+  }
+}
+
 module.exports = {
   autoTranslate,
   autoTranslateMany,
   detectLanguage,
+  fillBilingualGapsFromTwin,
 };
