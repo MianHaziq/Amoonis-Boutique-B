@@ -103,7 +103,7 @@ const { verifyAdmin } = require('../middleware/auth');
  *       - in: query
  *         name: search
  *         schema: { type: string }
- *         description: Case-insensitive match on email or name (fullName, plus legacy firstName/lastName)
+ *         description: Case-insensitive match on email or fullName
  *       - in: query
  *         name: role
  *         schema: { type: string, enum: [CUSTOMER, ADMIN, MANAGER] }
@@ -112,7 +112,7 @@ const { verifyAdmin } = require('../middleware/auth');
  *         schema: { type: string, enum: [ACTIVE, INACTIVE] }
  *       - in: query
  *         name: sortBy
- *         schema: { type: string, enum: [fullName, firstName, lastName, email, createdAt, role, status] }
+ *         schema: { type: string, enum: [fullName, email, createdAt, role, status] }
  *       - in: query
  *         name: order
  *         schema: { type: string, enum: [asc, desc], default: desc }
@@ -309,7 +309,7 @@ router.get('/manager-permissions', verifyAdmin, getManagerPermissionCatalog);
  *   delete:
  *     summary: Delete user
  *     description: |
- *       Requires an **Administrator** JWT. Permanently deletes the account. Confirm your business rules (e.g. users with past orders) before calling.
+ *       Requires an **Administrator** JWT. Permanently deletes the account and **cascades** to all related rows: orders (and their items), cart, addresses, saved push devices, notification preferences, contacts, refresh tokens, and promo-code usages. This is irreversible — order history for this customer will be lost.
  *     tags: [Users]
  *     security:
  *       - bearerAuth: []

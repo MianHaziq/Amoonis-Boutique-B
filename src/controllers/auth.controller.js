@@ -14,29 +14,6 @@ function hashResetToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken)).digest('hex');
 }
 
-// Derive a back-compat first/last from the canonical fullName so existing
-// clients keep receiving these fields during the rollout. First whitespace-
-// separated token is the first name, the remainder is the last name.
-function splitFullName(fullName) {
-  const trimmed = (fullName || '').trim();
-  if (!trimmed) return { firstName: null, lastName: null };
-  const parts = trimmed.split(/\s+/);
-  return {
-    firstName: parts[0],
-    lastName: parts.length > 1 ? parts.slice(1).join(' ') : null,
-  };
-}
-
-// Build the name fields for an API response: prefer the canonical fullName,
-// fall back to legacy firstName/lastName for users created before the migration.
-function nameFieldsForResponse(user) {
-  const fullName = user.fullName || [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || null;
-  const split = user.fullName
-    ? splitFullName(user.fullName)
-    : { firstName: user.firstName ?? null, lastName: user.lastName ?? null };
-  return { fullName, firstName: split.firstName, lastName: split.lastName };
-}
-
 const googleClient = new OAuth2Client();
 const GOOGLE_AUDIENCE = (process.env.GOOGLE_CLIENT_ID || '')
   .split(',')
@@ -82,7 +59,7 @@ function authSessionUserFields(user) {
   const base = {
     id: user.id,
     email: user.email,
-    ...nameFieldsForResponse(user),
+    fullName: user.fullName || null,
     role: user.role,
     status: user.status,
     managerTitle: user.role === 'MANAGER' ? user.managerTitle || null : null,
@@ -136,7 +113,7 @@ const signup = async (req, res, next) => {
         email,
         password: hashedPassword,
       },
-      select: { id: true, email: true, fullName: true, firstName: true, lastName: true, role: true, status: true, tokenVersion: true, createdAt: true },
+      select: { id: true, email: true, fullName: true, role: true, status: true, tokenVersion: true, createdAt: true },
     });
 
     const { accessToken, refreshToken, refreshTokenExpiresAt } = await issueAuthTokens(created, req);
@@ -144,7 +121,7 @@ const signup = async (req, res, next) => {
       user: {
         id: created.id,
         email: created.email,
-        ...nameFieldsForResponse(created),
+        fullName: created.fullName || null,
         role: created.role,
         status: created.status,
         createdAt: created.createdAt,
@@ -359,7 +336,7 @@ const googleLogin = async (req, res, next) => {
 const appleLogin = async (req, res, next) => {
   try {
     const identityToken = req.body.identityToken || req.body.id_token;
-    const { fullName: bodyFullName, firstName: bodyFirstName, lastName: bodyLastName, email: bodyEmail } = req.body;
+    const { fullName: bodyFullName, email: bodyEmail } = req.body;
 
     if (!identityToken) {
       return error(res, 'Identity token is required', 400);
@@ -385,9 +362,7 @@ const appleLogin = async (req, res, next) => {
 
     const appleId = payload.sub;
     const emailFromToken = payload.email || null;
-    const fullName = (bodyFullName && bodyFullName.trim())
-      || [bodyFirstName, bodyLastName].map((s) => (s || '').trim()).filter(Boolean).join(' ')
-      || null;
+    const fullName = (bodyFullName && bodyFullName.trim()) || null;
 
     let user = await prisma.user.findUnique({ where: { appleId } });
     let isNewUser = false;
@@ -496,7 +471,7 @@ const appleLogin = async (req, res, next) => {
       user: {
         id: user.id,
         email: user.email,
-        ...nameFieldsForResponse(user),
+        fullName: user.fullName || null,
         avatar: user.avatar,
         role: user.role,
         status: user.status,
@@ -674,8 +649,6 @@ const getProfile = async (req, res, next) => {
         id: true,
         email: true,
         fullName: true,
-        firstName: true,
-        lastName: true,
         avatar: true,
         role: true,
         status: true,
@@ -695,12 +668,7 @@ const getProfile = async (req, res, next) => {
       return error(res, 'User not found', 404);
     }
 
-    return success(
-      res,
-      { ...user, ...nameFieldsForResponse(user) },
-      'Profile fetched successfully',
-      200
-    );
+    return success(res, user, 'Profile fetched successfully', 200);
   } catch (err) {
     next(err);
   }
@@ -801,8 +769,6 @@ const getMe = async (req, res, next) => {
         id: true,
         email: true,
         fullName: true,
-        firstName: true,
-        lastName: true,
         password: true,
         googleId: true,
         appleId: true,
@@ -825,7 +791,6 @@ const getMe = async (req, res, next) => {
 
     return success(res, {
       ...userData,
-      ...nameFieldsForResponse(userData),
       managerTitle: userData.role === 'MANAGER' ? userData.managerTitle : null,
       managerPermissions: userData.role === 'MANAGER' ? userData.managerPermissions || [] : [],
       hasPassword: !!password,
@@ -880,8 +845,6 @@ const updateProfile = async (req, res, next) => {
         id: true,
         email: true,
         fullName: true,
-        firstName: true,
-        lastName: true,
         role: true,
         status: true,
         avatar: true,
@@ -891,12 +854,7 @@ const updateProfile = async (req, res, next) => {
       },
     });
 
-    return success(
-      res,
-      { ...user, ...nameFieldsForResponse(user) },
-      'Profile updated successfully',
-      200
-    );
+    return success(res, user, 'Profile updated successfully', 200);
   } catch (err) {
     next(err);
   }

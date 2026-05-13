@@ -52,8 +52,6 @@ const { handleValidationErrors } = require('../middleware/validate');
  *                 id: "550e8400-e29b-41d4-a716-446655440000"
  *                 email: "user@example.com"
  *                 fullName: "John Doe"
- *                 firstName: "John"
- *                 lastName: "Doe"
  *                 avatar: null
  *                 role: "CUSTOMER"
  *                 status: "ACTIVE"
