@@ -5,6 +5,9 @@
  */
 const prisma = require('../config/db');
 const productService = require('./product.service');
+const { autoTranslate } = require('../utils/bilingual');
+
+const SECTION_BILINGUAL = [{ src: 'title', dst: 'title_ar' }];
 
 function mapCategoryForSection(cat) {
   if (!cat || !cat.category) return null;
@@ -104,18 +107,29 @@ async function getSectionById(id) {
 }
 
 async function createSection(data) {
-  const title = String(data.title || '').trim();
-  if (!title) throw new Error('Section title is required');
+  const titleEn = String(data.title ?? '').trim();
+  const titleAr = String(data.title_ar ?? '').trim();
+  if (!titleEn && !titleAr) throw new Error('Section title is required (provide title or title_ar)');
 
   const productIds = Array.isArray(data.productIds) ? data.productIds.filter((id) => id && String(id).trim()) : [];
   const categoryIds = Array.isArray(data.categoryIds) ? data.categoryIds.filter((id) => id && String(id).trim()) : [];
 
   const maxOrder = await prisma.section.aggregate({ _max: { sortOrder: true } }).then((r) => (r._max.sortOrder ?? -1) + 1);
 
+  const titleDraft = {
+    title: titleEn || null,
+    title_ar: titleAr || null,
+  };
+  await autoTranslate(titleDraft, SECTION_BILINGUAL);
+  // If translation failed and only one side has content, copy across so NOT NULL is satisfied.
+  // Admin can re-save later when Google is back to get a proper translation.
+  if (!titleDraft.title && titleDraft.title_ar) titleDraft.title = titleDraft.title_ar;
+  if (!titleDraft.title_ar && titleDraft.title) titleDraft.title_ar = titleDraft.title;
+
   const section = await prisma.section.create({
     data: {
-      title,
-      title_ar: data.title_ar != null ? String(data.title_ar).trim() || null : null,
+      title: titleDraft.title,
+      title_ar: titleDraft.title_ar ?? null,
       image: data.image != null ? String(data.image).trim() || null : null,
       sortOrder: data.sortOrder != null ? Number(data.sortOrder) : maxOrder,
     },
@@ -158,6 +172,8 @@ async function updateSection(id, data) {
   if (data.title_ar !== undefined) {
     updatePayload.title_ar = data.title_ar ? String(data.title_ar).trim() || null : null;
   }
+  // Fill the missing twin if admin only sent one side.
+  await autoTranslate(updatePayload, SECTION_BILINGUAL);
   if (data.image !== undefined) updatePayload.image = data.image ? String(data.image).trim() : null;
   if (data.sortOrder !== undefined) updatePayload.sortOrder = Number(data.sortOrder);
 

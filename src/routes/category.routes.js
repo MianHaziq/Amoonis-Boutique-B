@@ -3,7 +3,7 @@ const { body, param } = require('express-validator');
 const router = express.Router();
 const categoryController = require('../controllers/category.controller');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
-const { handleValidationErrors } = require('../middleware/validate');
+const { handleValidationErrors, requireEitherBilingual } = require('../middleware/validate');
 const { publicLimiter } = require('../middleware/rateLimit');
 
 /**
@@ -68,8 +68,11 @@ const { publicLimiter } = require('../middleware/rateLimit');
  *         description: Unauthorized
  */
 const createValidation = [
-  body('title').trim().notEmpty().withMessage('Title is required'),
+  // Bilingual title: either English (`title`) or Arabic (`title_ar`) is acceptable.
+  // The backend auto-translates the missing side; see docs/translation-setup.md.
+  body('title').optional().trim(),
   body('title_ar').optional().trim(),
+  requireEitherBilingual('title', 'title_ar', 'Title'),
   body('description').optional().trim(),
   body('description_ar').optional().trim(),
   body('image').optional().trim(),

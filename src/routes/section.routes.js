@@ -3,7 +3,7 @@ const { body, param } = require('express-validator');
 const router = express.Router();
 const sectionController = require('../controllers/section.controller');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
-const { handleValidationErrors } = require('../middleware/validate');
+const { handleValidationErrors, requireEitherBilingual } = require('../middleware/validate');
 
 /**
  * @swagger
@@ -123,8 +123,10 @@ router.get(
  *         description: Product or category ID not found
  */
 const createValidation = [
-  body('title').trim().notEmpty().withMessage('Section title is required'),
+  // Bilingual title — either English or Arabic acceptable, backend auto-translates the rest.
+  body('title').optional().trim(),
   body('title_ar').optional().trim(),
+  requireEitherBilingual('title', 'title_ar', 'Section title'),
   body('image').optional().trim(),
   body('productIds').optional().isArray().withMessage('productIds must be an array'),
   body('productIds.*').optional().isUUID().withMessage('Each productId must be a valid UUID'),

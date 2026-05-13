@@ -31,6 +31,19 @@ const optional = [
   'CONTACT_EMAIL',
   'FIREBASE_SERVICE_ACCOUNT_JSON',
   'FIREBASE_SERVICE_ACCOUNT_BASE64',
+  // Auto-translation. Pick a provider with TRANSLATION_PROVIDER:
+  //   google → Google Cloud Translation (needs GOOGLE_TRANSLATE_API_KEY)
+  //   azure  → Azure AI Translator (needs AZURE_TRANSLATOR_KEY + REGION)
+  //   none   → kill switch; admin-supplied bilingual fields saved as provided.
+  'TRANSLATION_PROVIDER',
+  'GOOGLE_TRANSLATE_API_KEY',
+  'GOOGLE_TRANSLATE_ENDPOINT',
+  'AZURE_TRANSLATOR_KEY',
+  'AZURE_TRANSLATOR_REGION',
+  'AZURE_TRANSLATOR_ENDPOINT',
+  'TRANSLATION_TIMEOUT_MS',
+  'TRANSLATION_RETRY_ATTEMPTS',
+  'TRANSLATION_CACHE_MAX',
 ];
 
 function validateEnv() {
