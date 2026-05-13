@@ -1,5 +1,5 @@
 const prisma = require('../config/db');
-const { autoTranslate, autoTranslateMany } = require('../utils/bilingual');
+const { autoTranslate, autoTranslateMany, fillBilingualGapsFromTwin } = require('../utils/bilingual');
 
 const PRODUCT_BILINGUAL = [
   { src: 'title', dst: 'title_ar' },
@@ -13,6 +13,11 @@ const PRODUCT_OPTION_BILINGUAL = [
   { src: 'title', dst: 'title_ar' },
   { src: 'options', dst: 'options_ar', kind: 'arrayOfString' },
 ];
+
+// NOT NULL constraints in the schema — must be filled at write time.
+const PRODUCT_REQUIRED_PAIRS = [{ src: 'title', dst: 'title_ar' }];
+const PRODUCT_DESCRIPTION_REQUIRED_PAIRS = [{ src: 'description', dst: 'description_ar' }];
+const PRODUCT_OPTION_REQUIRED_PAIRS = [{ src: 'title', dst: 'title_ar' }];
 
 const MAX_IMAGES = 10;
 const ACTIVE_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PROCESSING'];
@@ -73,13 +78,16 @@ function normalizeDescriptions(descriptions) {
   return descriptions
     .map((d, i) => {
       if (d == null || typeof d !== 'object') return null;
-      const text = d.description != null ? String(d.description).trim() : '';
-      if (!text) return null;
+      const descEn = d.description != null ? String(d.description).trim() : '';
+      const descAr = d.description_ar != null ? String(d.description_ar).trim() : '';
+      // At least one side of description must be filled (validator enforces this too,
+      // but double-check here so the service is safe when called from non-HTTP paths).
+      if (!descEn && !descAr) return null;
       return {
         title: d.title != null ? String(d.title).trim() || null : null,
         title_ar: d.title_ar != null ? String(d.title_ar).trim() || null : null,
-        description: text,
-        description_ar: d.description_ar != null ? String(d.description_ar).trim() || null : null,
+        description: descEn || null,
+        description_ar: descAr || null,
         sortOrder: i,
       };
     })
@@ -91,16 +99,23 @@ function normalizeProductOptions(productOptions) {
   return productOptions
     .map((item, i) => {
       if (item == null || typeof item !== 'object') return null;
-      const title = item.title != null ? String(item.title).trim() : '';
-      if (!title) return null;
+      const titleEn = item.title != null ? String(item.title).trim() : '';
+      const titleAr = item.title_ar != null ? String(item.title_ar).trim() : '';
+      // At least one side of title must be filled.
+      if (!titleEn && !titleAr) return null;
       const options = Array.isArray(item.options)
         ? item.options.filter((v) => v != null && String(v).trim() !== '').map((v) => String(v).trim())
         : [];
-      const title_ar = item.title_ar != null ? String(item.title_ar).trim() || null : null;
       const options_ar = Array.isArray(item.options_ar)
         ? item.options_ar.filter((v) => v != null && String(v).trim() !== '').map((v) => String(v).trim())
         : [];
-      return { title, title_ar, options, options_ar, sortOrder: i };
+      return {
+        title: titleEn || null,
+        title_ar: titleAr || null,
+        options,
+        options_ar,
+        sortOrder: i,
+      };
     })
     .filter(Boolean);
 }
@@ -116,7 +131,7 @@ async function createProduct(data) {
   const productOptionRows = normalizeProductOptions(data.productOptions);
 
   // Auto-translate the en/_ar twins before the DB write. We translate the parent product
-  // fields and every child description/option in a single batched Azure call so an entire
+  // fields and every child description/option in a single batched call so an entire
   // product create costs one round-trip, not N.
   const productDraft = {
     title: data.title ?? null,
@@ -129,6 +144,12 @@ async function createProduct(data) {
     autoTranslateMany(descriptionRows, PRODUCT_DESCRIPTION_BILINGUAL),
     autoTranslateMany(productOptionRows, PRODUCT_OPTION_BILINGUAL),
   ]);
+
+  // If translation failed for any required column, copy the populated side across so
+  // the Prisma write doesn't trip NOT NULL. Admin can re-save later for a real translation.
+  fillBilingualGapsFromTwin(productDraft, PRODUCT_REQUIRED_PAIRS);
+  for (const row of descriptionRows) fillBilingualGapsFromTwin(row, PRODUCT_DESCRIPTION_REQUIRED_PAIRS);
+  for (const row of productOptionRows) fillBilingualGapsFromTwin(row, PRODUCT_OPTION_REQUIRED_PAIRS);
 
   // Wrap product create + category counter bump in a single transaction so a counter-update
   // failure rolls the product create back instead of leaving the cached count drifted.
@@ -205,6 +226,17 @@ async function updateProduct(id, data) {
     descriptionRows ? autoTranslateMany(descriptionRows, PRODUCT_DESCRIPTION_BILINGUAL) : Promise.resolve(),
     productOptionRows ? autoTranslateMany(productOptionRows, PRODUCT_OPTION_BILINGUAL) : Promise.resolve(),
   ]);
+
+  // Child rows are fully replaced (delete + createMany) on update, so the NOT NULL columns
+  // must be satisfied — copy across from the twin if translation didn't fill them.
+  // The parent bilingualDraft is intentionally NOT gap-filled on update: leaving a side
+  // undefined makes Prisma skip that column, preserving the existing DB value.
+  if (descriptionRows) {
+    for (const row of descriptionRows) fillBilingualGapsFromTwin(row, PRODUCT_DESCRIPTION_REQUIRED_PAIRS);
+  }
+  if (productOptionRows) {
+    for (const row of productOptionRows) fillBilingualGapsFromTwin(row, PRODUCT_OPTION_REQUIRED_PAIRS);
+  }
 
   const updatePayload = {
     ...(bilingualDraft.title != null && { title: bilingualDraft.title }),

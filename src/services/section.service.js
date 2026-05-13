@@ -107,8 +107,9 @@ async function getSectionById(id) {
 }
 
 async function createSection(data) {
-  const title = String(data.title || '').trim();
-  if (!title) throw new Error('Section title is required');
+  const titleEn = String(data.title ?? '').trim();
+  const titleAr = String(data.title_ar ?? '').trim();
+  if (!titleEn && !titleAr) throw new Error('Section title is required (provide title or title_ar)');
 
   const productIds = Array.isArray(data.productIds) ? data.productIds.filter((id) => id && String(id).trim()) : [];
   const categoryIds = Array.isArray(data.categoryIds) ? data.categoryIds.filter((id) => id && String(id).trim()) : [];
@@ -116,10 +117,14 @@ async function createSection(data) {
   const maxOrder = await prisma.section.aggregate({ _max: { sortOrder: true } }).then((r) => (r._max.sortOrder ?? -1) + 1);
 
   const titleDraft = {
-    title,
-    title_ar: data.title_ar != null ? String(data.title_ar).trim() || null : null,
+    title: titleEn || null,
+    title_ar: titleAr || null,
   };
   await autoTranslate(titleDraft, SECTION_BILINGUAL);
+  // If translation failed and only one side has content, copy across so NOT NULL is satisfied.
+  // Admin can re-save later when Google is back to get a proper translation.
+  if (!titleDraft.title && titleDraft.title_ar) titleDraft.title = titleDraft.title_ar;
+  if (!titleDraft.title_ar && titleDraft.title) titleDraft.title_ar = titleDraft.title;
 
   const section = await prisma.section.create({
     data: {

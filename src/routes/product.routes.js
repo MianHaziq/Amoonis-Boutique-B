@@ -3,7 +3,7 @@ const { body, param, query } = require('express-validator');
 const router = express.Router();
 const productController = require('../controllers/product.controller');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
-const { handleValidationErrors } = require('../middleware/validate');
+const { handleValidationErrors, requireEitherBilingual } = require('../middleware/validate');
 const { publicLimiter } = require('../middleware/rateLimit');
 
 /**
@@ -90,9 +90,25 @@ const { publicLimiter } = require('../middleware/rateLimit');
  *       404:
  *         description: Category not found
  */
+// Helper for nested-array bilingual checks (descriptions[] / productOptions[]):
+// each row must have at least one filled side across its bilingual pair(s).
+function eachRowHasOneSide(arr, pairs) {
+  if (!Array.isArray(arr)) return true; // optional — array missing is fine
+  return arr.every((row) => {
+    if (!row || typeof row !== 'object') return false;
+    return pairs.some(([enKey, arKey]) => {
+      const en = String(row[enKey] ?? '').trim();
+      const ar = String(row[arKey] ?? '').trim();
+      return en !== '' || ar !== '';
+    });
+  });
+}
+
 const createValidation = [
-  body('title').trim().notEmpty().withMessage('Title is required'),
+  // Bilingual title — either English or Arabic acceptable.
+  body('title').optional().trim(),
   body('title_ar').optional().trim(),
+  requireEitherBilingual('title', 'title_ar', 'Title'),
   body('subtitle').optional().trim(),
   body('subtitle_ar').optional().trim(),
   body('price').isFloat({ min: 0 }).withMessage('Price must be a positive number'),
@@ -118,17 +134,23 @@ const createValidation = [
     .trim()
     .notEmpty()
     .withMessage('Each image must be a non-empty URL string'),
-  body('descriptions').optional().custom((arr) => {
-    if (!Array.isArray(arr)) return true;
-    return arr.every((d) => d && typeof d === 'object' && (d.description != null && String(d.description).trim() !== ''));
-  }).withMessage('Each description item must have a non-empty description field'),
+  // Each description row must have at least one side filled (English OR Arabic).
+  body('descriptions')
+    .optional()
+    .custom((arr) => eachRowHasOneSide(arr, [['description', 'description_ar']]))
+    .withMessage('Each description item must have either "description" or "description_ar"'),
   body('productOptions').optional().isArray().withMessage('productOptions must be an array'),
-  body('productOptions.*.title').optional().trim().notEmpty().withMessage('Each productOption must have a non-empty title'),
+  body('productOptions.*.title').optional().trim(),
   body('productOptions.*.title_ar').optional().trim(),
   body('productOptions.*.options').optional().isArray().withMessage('productOptions.*.options must be an array of strings'),
   body('productOptions.*.options.*').optional().isString().trim(),
   body('productOptions.*.options_ar').optional().isArray().withMessage('productOptions.*.options_ar must be an array of strings'),
   body('productOptions.*.options_ar.*').optional().isString().trim(),
+  // Each productOption row must have at least one side filled for its title.
+  body('productOptions')
+    .optional()
+    .custom((arr) => eachRowHasOneSide(arr, [['title', 'title_ar']]))
+    .withMessage('Each productOption must have either "title" or "title_ar"'),
 ];
 
 const updateValidation = [
@@ -160,17 +182,22 @@ const updateValidation = [
     .trim()
     .notEmpty()
     .withMessage('Each image must be a non-empty URL string'),
-  body('descriptions').optional().custom((arr) => {
-    if (!Array.isArray(arr)) return true;
-    return arr.every((d) => d && typeof d === 'object' && (d.description != null && String(d.description).trim() !== ''));
-  }).withMessage('Each description item must have a non-empty description field'),
+  // Each description row must have at least one side filled (English OR Arabic).
+  body('descriptions')
+    .optional()
+    .custom((arr) => eachRowHasOneSide(arr, [['description', 'description_ar']]))
+    .withMessage('Each description item must have either "description" or "description_ar"'),
   body('productOptions').optional().isArray().withMessage('productOptions must be an array'),
-  body('productOptions.*.title').optional().trim().notEmpty().withMessage('Each productOption must have a non-empty title'),
+  body('productOptions.*.title').optional().trim(),
   body('productOptions.*.title_ar').optional().trim(),
   body('productOptions.*.options').optional().isArray().withMessage('productOptions.*.options must be an array of strings'),
   body('productOptions.*.options.*').optional().isString().trim(),
   body('productOptions.*.options_ar').optional().isArray().withMessage('productOptions.*.options_ar must be an array of strings'),
   body('productOptions.*.options_ar.*').optional().isString().trim(),
+  body('productOptions')
+    .optional()
+    .custom((arr) => eachRowHasOneSide(arr, [['title', 'title_ar']]))
+    .withMessage('Each productOption must have either "title" or "title_ar"'),
 ];
 
 const idParam = [param('id').isUUID().withMessage('Valid product ID required')];

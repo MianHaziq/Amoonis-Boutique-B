@@ -1,5 +1,5 @@
 const prisma = require('../config/db');
-const { autoTranslate } = require('../utils/bilingual');
+const { autoTranslate, fillBilingualGapsFromTwin } = require('../utils/bilingual');
 
 const DISCOUNT_TYPES = ['PERCENTAGE', 'FIXED'];
 const APPLIES_TO_VALUES = ['ALL_PRODUCTS', 'SPECIFIC_PRODUCTS', 'SPECIFIC_CATEGORIES'];
@@ -7,6 +7,8 @@ const PROMO_BILINGUAL = [
   { src: 'name', dst: 'name_ar' },
   { src: 'description', dst: 'description_ar' },
 ];
+// NOT NULL in the schema — must be filled before the Prisma create.
+const PROMO_REQUIRED_PAIRS = [{ src: 'name', dst: 'name_ar' }];
 
 function decimalToNumber(value) {
   if (value === null || value === undefined) return null;
@@ -156,7 +158,13 @@ function buildPromoCodeData(data, { isUpdate = false } = {}) {
 
   if (!isUpdate) {
     if (!out.code) throw Object.assign(new Error('code is required'), { code: 'PROMO_INVALID_INPUT' });
-    if (!out.name) throw Object.assign(new Error('name is required'), { code: 'PROMO_INVALID_INPUT' });
+    // Bilingual name: either English `name` or Arabic `name_ar` is acceptable. Backend
+    // auto-translates the missing side; the route validator (requireEitherBilingual)
+    // already rejects requests where both are blank, but check here too as a safety net
+    // for callers that bypass the routes.
+    if (!out.name && !out.name_ar) {
+      throw Object.assign(new Error('name is required (provide name or name_ar)'), { code: 'PROMO_INVALID_INPUT' });
+    }
     if (!out.discountType) throw Object.assign(new Error('discountType is required'), { code: 'PROMO_INVALID_INPUT' });
     if (out.discountValue === undefined) throw Object.assign(new Error('discountValue is required'), { code: 'PROMO_INVALID_INPUT' });
   }
@@ -200,6 +208,9 @@ const LIST_INCLUDE = {
 async function createPromoCode(data) {
   const base = buildPromoCodeData(data, { isUpdate: false });
   await autoTranslate(base, PROMO_BILINGUAL);
+  // If translation failed for the required `name` pair, copy from the twin so the NOT NULL
+  // column has a value. Admin can re-save later to get a real translation.
+  fillBilingualGapsFromTwin(base, PROMO_REQUIRED_PAIRS);
   const productIds = Array.isArray(data.productIds) ? [...new Set(data.productIds.filter(Boolean))] : [];
   const categoryIds = Array.isArray(data.categoryIds) ? [...new Set(data.categoryIds.filter(Boolean))] : [];
 

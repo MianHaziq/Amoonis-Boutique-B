@@ -1,39 +1,58 @@
 /**
- * Translation service — Azure AI Translator (Microsoft Translator) wrapper.
+ * Translation service — provider-agnostic wrapper.
+ *
+ * Supported providers (TRANSLATION_PROVIDER env):
+ *   - google  → Google Cloud Translation v2 (recommended; signup is easier than Azure)
+ *   - azure   → Azure AI Translator (Microsoft Translator)
+ *   - none    → kill switch; returns input as-is, never calls a network
  *
  * Responsibilities:
  *   - Translate single strings or batches between languages (en ↔ ar by default).
  *   - Auto-detect source language when caller does not specify `from`.
  *   - In-memory LRU cache so repeat strings ("Free shipping") cost nothing.
- *   - Provider-agnostic public surface: callers depend only on translate/translateBatch.
  *   - Soft failure: on any error returns the original input + logs once. Never throws.
  *
- * Provider switch: set TRANSLATION_PROVIDER=none to short-circuit (returns input as-is).
- * Useful for tests, local dev without an Azure key, or a quick emergency kill switch.
+ * Callers only interact with translate() / translateBatch() — they don't know which
+ * provider is in use. Switching providers is one env var (no code change).
  */
 
-const PROVIDER = (process.env.TRANSLATION_PROVIDER || 'azure').toLowerCase();
+const PROVIDER = (process.env.TRANSLATION_PROVIDER || 'google').toLowerCase();
+
+// --- Google Cloud Translation v2 ---
+const GOOGLE_KEY = process.env.GOOGLE_TRANSLATE_API_KEY || '';
+const GOOGLE_ENDPOINT = (process.env.GOOGLE_TRANSLATE_ENDPOINT || 'https://translation.googleapis.com').replace(/\/+$/, '');
+
+// --- Azure AI Translator ---
 const AZURE_KEY = process.env.AZURE_TRANSLATOR_KEY || '';
 const AZURE_REGION = process.env.AZURE_TRANSLATOR_REGION || 'global';
 const AZURE_ENDPOINT = (process.env.AZURE_TRANSLATOR_ENDPOINT || 'https://api.cognitive.microsofttranslator.com').replace(/\/+$/, '');
+
 const TIMEOUT_MS = Math.max(1000, parseInt(process.env.TRANSLATION_TIMEOUT_MS || '5000', 10));
 const RETRY_ATTEMPTS = Math.max(0, parseInt(process.env.TRANSLATION_RETRY_ATTEMPTS || '1', 10));
 const CACHE_MAX = Math.max(100, parseInt(process.env.TRANSLATION_CACHE_MAX || '5000', 10));
 
-// Azure caps: 1000 elements + 50K chars per request. Hold a small safety margin.
+// Conservative ceilings that work for both providers:
+//   Azure  cap: 1000 segments, 50K chars per request.
+//   Google cap: 128 segments,  ~30K body bytes (≈ 15K Arabic UTF-8 chars).
 const MAX_ITEMS_PER_REQUEST = 100;
-const MAX_CHARS_PER_REQUEST = 45000;
+const MAX_CHARS_PER_REQUEST = 25000;
 
-const enabled = PROVIDER === 'azure' && !!AZURE_KEY;
+const enabled =
+  (PROVIDER === 'google' && !!GOOGLE_KEY) ||
+  (PROVIDER === 'azure' && !!AZURE_KEY);
+
 let warnedDisabled = false;
-
 function warnDisabledOnce() {
   if (warnedDisabled) return;
   warnedDisabled = true;
   if (PROVIDER === 'none') {
     console.warn('[translation] disabled (TRANSLATION_PROVIDER=none) — admin-supplied content saved as-is.');
-  } else if (!AZURE_KEY) {
+  } else if (PROVIDER === 'google' && !GOOGLE_KEY) {
+    console.warn('[translation] GOOGLE_TRANSLATE_API_KEY missing — auto-translation skipped, bilingual fields stay null.');
+  } else if (PROVIDER === 'azure' && !AZURE_KEY) {
     console.warn('[translation] AZURE_TRANSLATOR_KEY missing — auto-translation skipped, bilingual fields stay null.');
+  } else {
+    console.warn(`[translation] unknown provider "${PROVIDER}" — auto-translation disabled.`);
   }
 }
 
@@ -62,7 +81,53 @@ function isTranslatableString(s) {
   return typeof s === 'string' && s.trim().length > 0;
 }
 
-async function azureTranslateRequest(items, to, from) {
+// --- Per-provider request shape ---
+function buildAzureRequest(items, to, from) {
+  const params = new URLSearchParams({ 'api-version': '3.0', to });
+  if (from) params.set('from', from);
+  return {
+    url: `${AZURE_ENDPOINT}/translate?${params.toString()}`,
+    headers: {
+      'Ocp-Apim-Subscription-Key': AZURE_KEY,
+      'Ocp-Apim-Subscription-Region': AZURE_REGION,
+      'Content-Type': 'application/json',
+      'X-ClientTraceId': cryptoRandomId(),
+    },
+    body: JSON.stringify(items.map((it) => ({ text: it.text }))),
+    parse: (json) =>
+      json.map((row) => ({
+        text: row?.translations?.[0]?.text ?? '',
+        detectedLanguage: row?.detectedLanguage?.language ?? null,
+        translated: true,
+      })),
+  };
+}
+
+function buildGoogleRequest(items, to, from) {
+  return {
+    url: `${GOOGLE_ENDPOINT}/language/translate/v2?key=${encodeURIComponent(GOOGLE_KEY)}`,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      q: items.map((it) => it.text),
+      target: to,
+      format: 'text',
+      ...(from ? { source: from } : {}),
+    }),
+    parse: (json) =>
+      (json?.data?.translations || []).map((t) => ({
+        text: t.translatedText || '',
+        detectedLanguage: t.detectedSourceLanguage || null,
+        translated: true,
+      })),
+  };
+}
+
+function buildProviderRequest(items, to, from) {
+  if (PROVIDER === 'google') return buildGoogleRequest(items, to, from);
+  return buildAzureRequest(items, to, from);
+}
+
+async function providerTranslateRequest(items, to, from) {
   if (!enabled) {
     warnDisabledOnce();
     // Signal "no translation produced" via `translated: false`. Callers must not
@@ -70,39 +135,25 @@ async function azureTranslateRequest(items, to, from) {
     return items.map((it) => ({ text: it.text, detectedLanguage: null, translated: false }));
   }
 
-  const params = new URLSearchParams({ 'api-version': '3.0', to });
-  if (from) params.set('from', from);
-  const url = `${AZURE_ENDPOINT}/translate?${params.toString()}`;
-
-  const body = JSON.stringify(items.map((it) => ({ text: it.text })));
-  const headers = {
-    'Ocp-Apim-Subscription-Key': AZURE_KEY,
-    'Ocp-Apim-Subscription-Region': AZURE_REGION,
-    'Content-Type': 'application/json',
-    'X-ClientTraceId': cryptoRandomId(),
-  };
+  const req = buildProviderRequest(items, to, from);
 
   let lastErr;
   for (let attempt = 0; attempt <= RETRY_ATTEMPTS; attempt++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
     try {
-      const res = await fetch(url, { method: 'POST', headers, body, signal: ctrl.signal });
+      const res = await fetch(req.url, { method: 'POST', headers: req.headers, body: req.body, signal: ctrl.signal });
       clearTimeout(timer);
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        const err = new Error(`Azure Translator ${res.status}: ${text.slice(0, 300)}`);
+        const err = new Error(`${PROVIDER} translator ${res.status}: ${text.slice(0, 300)}`);
         err.status = res.status;
         // 4xx — bad input/key/quota. Do not retry, fail fast.
         if (res.status >= 400 && res.status < 500) throw err;
         lastErr = err;
       } else {
         const json = await res.json();
-        return json.map((row) => ({
-          text: row?.translations?.[0]?.text ?? '',
-          detectedLanguage: row?.detectedLanguage?.language ?? null,
-          translated: true,
-        }));
+        return req.parse(json);
       }
     } catch (e) {
       clearTimeout(timer);
@@ -113,7 +164,7 @@ async function azureTranslateRequest(items, to, from) {
       await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
     }
   }
-  throw lastErr || new Error('Azure Translator request failed');
+  throw lastErr || new Error(`${PROVIDER} translator request failed`);
 }
 
 function cryptoRandomId() {
@@ -137,7 +188,7 @@ async function translate(text, { from = null, to } = {}) {
   if (cached !== undefined) return { text: cached.text, sourceLang: cached.sourceLang, fromCache: true, translated: true };
 
   try {
-    const [out] = await azureTranslateRequest([{ text }], to, from);
+    const [out] = await providerTranslateRequest([{ text }], to, from);
     if (!out.translated) return { text, sourceLang: null, fromCache: false, translated: false };
     const result = { text: out.text || text, sourceLang: out.detectedLanguage };
     cache.set(key, result);
@@ -192,7 +243,7 @@ async function translateBatch(requests) {
       }
 
       try {
-        const out = await azureTranslateRequest(
+        const out = await providerTranslateRequest(
           chunk.map((c) => ({ text: c.text })),
           group.to,
           group.from,
@@ -223,15 +274,16 @@ async function translateBatch(requests) {
 
 function isEnabled() { return enabled; }
 function getStatus() {
-  return {
+  const base = {
     provider: PROVIDER,
     enabled,
-    region: AZURE_REGION,
-    endpoint: AZURE_ENDPOINT,
     timeoutMs: TIMEOUT_MS,
     cacheSize: cache.m.size,
     cacheMax: CACHE_MAX,
   };
+  if (PROVIDER === 'google') return { ...base, endpoint: GOOGLE_ENDPOINT, hasKey: !!GOOGLE_KEY };
+  if (PROVIDER === 'azure') return { ...base, region: AZURE_REGION, endpoint: AZURE_ENDPOINT, hasKey: !!AZURE_KEY };
+  return base;
 }
 
 // Test-only: clear the cache between runs.

@@ -1,10 +1,12 @@
 const prisma = require('../config/db');
-const { autoTranslate } = require('../utils/bilingual');
+const { autoTranslate, fillBilingualGapsFromTwin } = require('../utils/bilingual');
 
 const CATEGORY_BILINGUAL = [
   { src: 'title', dst: 'title_ar' },
   { src: 'description', dst: 'description_ar' },
 ];
+// Pairs whose EN column is NOT NULL in the schema — must be filled before Prisma.create.
+const CATEGORY_REQUIRED_PAIRS = [{ src: 'title', dst: 'title_ar' }];
 
 async function createCategory(data) {
   const draft = {
@@ -14,6 +16,8 @@ async function createCategory(data) {
     description_ar: data.description_ar ?? null,
   };
   await autoTranslate(draft, CATEGORY_BILINGUAL);
+  // If Google failed for the required pair, copy across so the NOT NULL column has a value.
+  fillBilingualGapsFromTwin(draft, CATEGORY_REQUIRED_PAIRS);
   return prisma.category.create({
     data: {
       title: draft.title,
