@@ -308,6 +308,10 @@ const deleteUser = async (req, res, next) => {
       return error(res, 'User not found', 404);
     }
 
+    if (user.role === 'ADMIN') {
+      return error(res, 'Admin users cannot be deleted', 403);
+    }
+
     await prisma.user.delete({
       where: { id },
     });
