@@ -1,7 +1,7 @@
 {
   "name": "amoon-bloom-api",
   "version": "1.0.0",
-  "description": "Amoon Bloom mobile ecommerce API — Express, Prisma, PostgreSQL, FCM push",
+  "description": "Amoon Bloom mobile ecommerce API \u2014 Express, Prisma, PostgreSQL, FCM push",
   "main": "server.js",
   "scripts": {
     "start": "prisma migrate deploy && node server.js",
@@ -31,7 +31,6 @@
     "@prisma/client": "^7.3.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
-    "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "express-rate-limit": "^7.5.1",
     "express-validator": "^7.2.0",
