@@ -11,7 +11,7 @@ function listPresets(req, res, next) {
 
 async function getRevenue(req, res, next) {
   try {
-    const { preset, from, to } = req.query;
+    const { preset, from, to, region } = req.query;
     const hasCustom = Boolean(from || to);
     if (hasCustom && (!from || !to)) {
       return error(res, 'Custom range requires both from and to (ISO 8601 dates)', 400);
@@ -26,6 +26,7 @@ async function getRevenue(req, res, next) {
         preset: hasCustom ? null : preset,
         from: from || null,
         to: to || null,
+        region: region || null,
       });
     } catch (e) {
       if (e.message === 'INVALID_PRESET') return error(res, 'Invalid preset', 400);
@@ -42,7 +43,7 @@ async function getRevenue(req, res, next) {
 
 async function getKpi(req, res, next) {
   try {
-    const { preset, from, to } = req.query;
+    const { preset, from, to, region } = req.query;
     const hasCustom = Boolean(from || to);
     if (hasCustom && (!from || !to)) {
       return error(res, 'Custom range requires both from and to (ISO 8601 dates)', 400);
@@ -57,6 +58,7 @@ async function getKpi(req, res, next) {
         preset: hasCustom ? null : preset,
         from: from || null,
         to: to || null,
+        region: region || null,
       });
     } catch (e) {
       if (e.message === 'INVALID_PRESET') return error(res, 'Invalid preset', 400);
@@ -72,7 +74,7 @@ async function getKpi(req, res, next) {
 
 async function getCategorySales(req, res, next) {
   try {
-    const { preset, from, to } = req.query;
+    const { preset, from, to, region } = req.query;
     const hasCustom = Boolean(from || to);
     if (hasCustom && (!from || !to)) {
       return error(res, 'Custom range requires both from and to (ISO 8601 dates)', 400);
@@ -87,6 +89,7 @@ async function getCategorySales(req, res, next) {
         preset: hasCustom ? null : preset,
         from: from || null,
         to: to || null,
+        region: region || null,
       });
     } catch (e) {
       if (e.message === 'INVALID_PRESET') return error(res, 'Invalid preset', 400);
@@ -102,7 +105,7 @@ async function getCategorySales(req, res, next) {
 
 async function getDailySales(req, res, next) {
   try {
-    const { preset, from, to } = req.query;
+    const { preset, from, to, region } = req.query;
     const hasCustom = Boolean(from || to);
     if (hasCustom && (!from || !to)) {
       return error(res, 'Custom range requires both from and to (ISO 8601 dates)', 400);
@@ -117,6 +120,7 @@ async function getDailySales(req, res, next) {
         preset: hasCustom ? null : preset,
         from: from || null,
         to: to || null,
+        region: region || null,
       });
     } catch (e) {
       if (e.message === 'INVALID_PRESET') return error(res, 'Invalid preset', 400);

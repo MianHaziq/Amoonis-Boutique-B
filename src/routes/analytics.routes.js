@@ -62,6 +62,10 @@ router.get(
  *       - in: query
  *         name: to
  *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: region
+ *         schema: { type: string, example: SA }
+ *         description: Scope analytics to a single region (code, e.g. UAE / SA). Omit for the combined view across all regions.
  *     responses:
  *       200:
  *         description: summary, series (for charts), byStatus breakdown
@@ -84,6 +88,7 @@ router.get(
     query('preset').optional().isIn(presetValues),
     query('from').optional().trim().isString(),
     query('to').optional().trim().isString(),
+    query('region').optional().trim().isString(),
   ],
   handleValidationErrors,
   analyticsController.getRevenue
@@ -112,6 +117,10 @@ router.get(
  *       - in: query
  *         name: to
  *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: region
+ *         schema: { type: string, example: SA }
+ *         description: Scope analytics to a single region (code, e.g. UAE / SA). Omit for the combined view across all regions.
  *     responses:
  *       200:
  *         description: KPI payload
@@ -132,6 +141,7 @@ router.get(
     query('preset').optional().isIn(presetValues),
     query('from').optional().trim().isString(),
     query('to').optional().trim().isString(),
+    query('region').optional().trim().isString(),
   ],
   handleValidationErrors,
   analyticsController.getKpi
@@ -159,6 +169,10 @@ router.get(
  *       - in: query
  *         name: to
  *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: region
+ *         schema: { type: string, example: SA }
+ *         description: Scope analytics to a single region (code, e.g. UAE / SA). Omit for the combined view across all regions.
  *     responses:
  *       200:
  *         description: Ranked categories
@@ -179,6 +193,7 @@ router.get(
     query('preset').optional().isIn(presetValues),
     query('from').optional().trim().isString(),
     query('to').optional().trim().isString(),
+    query('region').optional().trim().isString(),
   ],
   handleValidationErrors,
   analyticsController.getCategorySales
@@ -208,6 +223,10 @@ router.get(
  *       - in: query
  *         name: to
  *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: region
+ *         schema: { type: string, example: SA }
+ *         description: Scope analytics to a single region (code, e.g. UAE / SA). Omit for the combined view across all regions.
  *     responses:
  *       200:
  *         description: points[] + summary (includes bestDay when granularity is day)
@@ -228,6 +247,7 @@ router.get(
     query('preset').optional().isIn(presetValues),
     query('from').optional().trim().isString(),
     query('to').optional().trim().isString(),
+    query('region').optional().trim().isString(),
   ],
   handleValidationErrors,
   analyticsController.getDailySales

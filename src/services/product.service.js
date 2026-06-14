@@ -1,5 +1,12 @@
 const prisma = require('../config/db');
 const { autoTranslate, autoTranslateMany, fillBilingualGapsFromTwin } = require('../utils/bilingual');
+const regionService = require('./region.service');
+const { buildVisibilityWhere } = require('../utils/regionVisibility');
+
+// Standard include for region join rows on a product read (staff/admin only).
+const REGION_INCLUDE = {
+  regions: { include: { region: { select: { id: true, code: true, name: true, name_ar: true } } } },
+};
 
 const PRODUCT_BILINGUAL = [
   { src: 'title', dst: 'title_ar' },
@@ -58,11 +65,11 @@ function orderedProductOptions(product) {
 
 function mapProduct(product) {
   if (!product) return null;
-  const { price, discountedPrice, images, descriptions, productOptions, ...rest } = product;
+  const { price, discountedPrice, images, descriptions, productOptions, regions, ...rest } = product;
   const imagesList = orderedImages(product);
   const descriptionsList = orderedDescriptions(product);
   const productOptionsList = orderedProductOptions(product);
-  return {
+  const out = {
     ...rest,
     price: decimalToNumber(price),
     discountedPrice: decimalToNumber(discountedPrice),
@@ -71,6 +78,14 @@ function mapProduct(product) {
     descriptions: descriptionsList,
     productOptions: productOptionsList,
   };
+  // Region tags are only loaded (and only needed) for staff/admin reads. Storefront
+  // responses omit them — the app already filtered by region and doesn't need the tags.
+  if (Array.isArray(regions)) {
+    const regionList = regions.map((r) => r.region).filter(Boolean);
+    out.regions = regionList;
+    out.regionIds = regionList.map((r) => r.id);
+  }
+  return out;
 }
 
 function normalizeDescriptions(descriptions) {
@@ -120,8 +135,31 @@ function normalizeProductOptions(productOptions) {
     .filter(Boolean);
 }
 
+// Normalize a publish status from admin input; defaults to DRAFT.
+function normalizeStatus(value, fallback = 'DRAFT') {
+  if (value === undefined || value === null) return fallback;
+  const v = String(value).trim().toUpperCase();
+  return v === 'PUBLISHED' ? 'PUBLISHED' : v === 'DRAFT' ? 'DRAFT' : fallback;
+}
+
+/**
+ * Resolve the region ids to attach to a piece of content at write time.
+ * - explicit non-empty list  -> validated against existing regions
+ * - omitted / empty          -> default region (matches "default UAE")
+ * Throws REGION_NOT_FOUND for unknown ids.
+ */
+async function resolveWriteRegionIds(regionIds) {
+  if (Array.isArray(regionIds) && regionIds.length > 0) {
+    return regionService.assertValidRegionIds(regionIds);
+  }
+  const def = await regionService.getDefaultRegion();
+  return def ? [def.id] : [];
+}
+
 async function createProduct(data) {
   const categoryId = data.categoryId ? String(data.categoryId).trim() || null : null;
+  const status = normalizeStatus(data.status);
+  const regionIds = await resolveWriteRegionIds(data.regionIds);
   const imageUrls = Array.isArray(data.images)
     ? data.images.filter((u) => typeof u === 'string' && u.trim()).slice(0, MAX_IMAGES)
     : [];
@@ -163,6 +201,10 @@ async function createProduct(data) {
         price: data.price,
         discountedPrice: data.discountedPrice ?? null,
         quantity,
+        status,
+        ...(regionIds.length > 0
+          ? { regions: { create: regionIds.map((regionId) => ({ regionId })) } }
+          : {}),
         ...(categoryId ? { categoryId } : {}),
         ...(imageUrls.length > 0
           ? {
@@ -191,6 +233,7 @@ async function createProduct(data) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
+        ...REGION_INCLUDE,
       },
     });
     if (categoryId) {
@@ -221,6 +264,13 @@ async function updateProduct(id, data) {
   // the Azure call and risks transaction timeouts under load.
   const descriptionRows = data.descriptions !== undefined ? normalizeDescriptions(data.descriptions) : null;
   const productOptionRows = data.productOptions !== undefined ? normalizeProductOptions(data.productOptions) : null;
+
+  // Region links are replaced wholesale when `regionIds` is sent. Validate before
+  // opening the transaction so an unknown id fails fast without a partial write.
+  const newRegionIds = data.regionIds !== undefined
+    ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
+    : null;
+
   await Promise.all([
     autoTranslate(bilingualDraft, PRODUCT_BILINGUAL),
     descriptionRows ? autoTranslateMany(descriptionRows, PRODUCT_DESCRIPTION_BILINGUAL) : Promise.resolve(),
@@ -247,6 +297,7 @@ async function updateProduct(id, data) {
     ...(data.discountedPrice !== undefined && { discountedPrice: data.discountedPrice }),
     ...(data.quantity !== undefined && { quantity: Math.max(0, parseInt(data.quantity, 10) || 0) }),
     ...(data.categoryId !== undefined && { categoryId: data.categoryId || null }),
+    ...(data.status !== undefined && { status: normalizeStatus(data.status, existing.status) }),
   };
 
   // All product mutations + counter rebalances run inside one transaction so a partial
@@ -305,6 +356,16 @@ async function updateProduct(id, data) {
         });
       }
     }
+
+    if (newRegionIds !== null) {
+      await tx.productRegion.deleteMany({ where: { productId: id } });
+      if (newRegionIds.length > 0) {
+        await tx.productRegion.createMany({
+          data: newRegionIds.map((regionId) => ({ productId: id, regionId })),
+          skipDuplicates: true,
+        });
+      }
+    }
   });
 
   return prisma.product.findUnique({
@@ -314,6 +375,7 @@ async function updateProduct(id, data) {
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
+      ...REGION_INCLUDE,
     },
   });
 }
@@ -353,10 +415,13 @@ async function deleteProduct(id) {
   return product;
 }
 
-async function getAllProducts(page = 1, limit = 10, categoryId = null) {
+async function getAllProducts(page = 1, limit = 10, categoryId = null, visibility = {}) {
   const skip = (Math.max(1, page) - 1) * Math.min(100, Math.max(1, limit));
   const take = Math.min(100, Math.max(1, limit));
-  const where = categoryId ? { categoryId } : {};
+  const where = {
+    ...buildVisibilityWhere(visibility),
+    ...(categoryId ? { categoryId } : {}),
+  };
 
   const [items, total] = await Promise.all([
     prisma.product.findMany({
@@ -369,6 +434,7 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
+        ...(visibility.isStaff ? REGION_INCLUDE : {}),
       },
     }),
     prisma.product.count({ where }),
@@ -383,18 +449,19 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null) {
   };
 }
 
-async function getProductsByCategory(categoryId, page = 1, limit = 10) {
-  return getAllProducts(page, limit, categoryId);
+async function getProductsByCategory(categoryId, page = 1, limit = 10, visibility = {}) {
+  return getAllProducts(page, limit, categoryId, visibility);
 }
 
-async function getProductById(id) {
-  const product = await prisma.product.findUnique({
-    where: { id },
+async function getProductById(id, visibility = {}) {
+  const product = await prisma.product.findFirst({
+    where: { id, ...buildVisibilityWhere(visibility) },
     include: {
       category: { select: { id: true, title: true } },
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
+      ...(visibility.isStaff ? REGION_INCLUDE : {}),
     },
   });
   return product ? mapProduct(product) : null;

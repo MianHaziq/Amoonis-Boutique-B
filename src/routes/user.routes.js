@@ -111,6 +111,10 @@ const { verifyAdmin } = require('../middleware/auth');
  *         name: status
  *         schema: { type: string, enum: [ACTIVE, INACTIVE] }
  *       - in: query
+ *         name: region
+ *         schema: { type: string, example: SA }
+ *         description: Filter users by region — accepts a region code (e.g. UAE / SA) or a region UUID.
+ *       - in: query
  *         name: sortBy
  *         schema: { type: string, enum: [fullName, email, createdAt, role, status] }
  *       - in: query

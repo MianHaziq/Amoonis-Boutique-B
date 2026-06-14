@@ -2,6 +2,7 @@ const prisma = require('../config/db');
 const cartService = require('../services/cart.service');
 const pushNotificationService = require('../services/pushNotification.service');
 const promoCodeService = require('../services/promoCode.service');
+const regionService = require('../services/region.service');
 
 function decimalToNumber(v) {
   return v == null ? null : Number(v);
@@ -125,7 +126,7 @@ function trimOrNullStr(v) {
   return s ? s : null;
 }
 
-async function createOrder(userId, checkoutInput = {}) {
+async function createOrder(userId, checkoutInput = {}, opts = {}) {
   const { addressId, shippingAddress, paymentMethod = 'COD', promoCode } = checkoutInput;
 
   if (!VALID_PAYMENT_METHODS.includes(paymentMethod)) {
@@ -138,10 +139,22 @@ async function createOrder(userId, checkoutInput = {}) {
   // name/phone populated and we don't want to wipe that on their orders).
   const userRow = await prisma.user.findUnique({
     where: { id: userId },
-    select: { fullName: true, phone: true },
+    select: { fullName: true, phone: true, regionId: true },
   });
   const profileFullName = (userRow?.fullName && userRow.fullName.trim()) || null;
   const profilePhone = userRow?.phone || null;
+
+  // Region the order is placed in: explicit X-Region header wins, then the user's
+  // home region, then the system default. Stamped on the order for regional analytics.
+  let orderRegionId = userRow?.regionId || null;
+  if (opts.regionCode) {
+    const resolved = await regionService.resolveRegion(opts.regionCode);
+    if (resolved) orderRegionId = resolved.id;
+  }
+  if (!orderRegionId) {
+    const def = await regionService.getDefaultRegion();
+    orderRegionId = def?.id || null;
+  }
 
   // Resolve address and fetch cart in parallel when addressId is provided
   let resolvedAddress = null;
@@ -314,6 +327,7 @@ async function createOrder(userId, checkoutInput = {}) {
         shippingState: resolvedAddress.state,
         shippingPostalCode: resolvedAddress.postalCode,
         shippingCountry: resolvedAddress.country,
+        regionId: orderRegionId,
         status: 'PENDING',
       },
     });

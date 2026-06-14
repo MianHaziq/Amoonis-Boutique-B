@@ -74,6 +74,9 @@ async function main() {
       body: JSON.stringify({
         title: 'E2E Test Product',
         price: 19.99,
+        // Products now default to DRAFT (multi-region module). Publish so the public
+        // GET /products/:id below can see it.
+        status: 'PUBLISHED',
         productOptions: [
           { title: 'Box Color', options: ['red', 'blue', 'black'] },
           { title: 'Flower Color', options: ['orange', 'red', 'blue', 'white', 'yellow'] },

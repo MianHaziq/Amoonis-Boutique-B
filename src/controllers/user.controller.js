@@ -37,6 +37,10 @@ const transformUser = (user) => {
     managerPermissions: user.role === 'MANAGER' ? user.managerPermissions || [] : [],
     status: capitalize(user.status) || 'Active',
     isEmailVerified: user.isEmailVerified,
+    regionId: user.regionId || null,
+    region: user.region
+      ? { id: user.region.id, code: user.region.code, name: user.region.name, name_ar: user.region.name_ar ?? null }
+      : null,
     joinedAt: user.createdAt,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -123,6 +127,7 @@ const getAllUsers = async (req, res, next) => {
       search,
       role,
       status,
+      region,
       sortBy = 'createdAt',
       order = 'desc',
     } = req.query;
@@ -148,6 +153,13 @@ const getAllUsers = async (req, res, next) => {
       where.status = status.toUpperCase();
     }
 
+    // Region filter accepts a region code (e.g. UAE) or a region id.
+    if (region) {
+      const regionService = require('../services/region.service');
+      const matched = await regionService.getRegionByCode(region);
+      where.regionId = matched ? matched.id : String(region);
+    }
+
     // Build orderBy
     const validSortFields = ['fullName', 'email', 'createdAt', 'role', 'status'];
     const sortField = validSortFields.includes(sortBy) ? sortBy : 'createdAt';
@@ -159,6 +171,7 @@ const getAllUsers = async (req, res, next) => {
         skip,
         take,
         orderBy: { [sortField]: sortOrder },
+        include: { region: { select: { id: true, code: true, name: true, name_ar: true } } },
         }),
       prisma.user.count({ where }),
     ]);
@@ -188,7 +201,8 @@ const getUserById = async (req, res, next) => {
 
     const user = await prisma.user.findUnique({
       where: { id },
-          });
+      include: { region: { select: { id: true, code: true, name: true, name_ar: true } } },
+    });
 
     if (!user) {
       return error(res, 'User not found', 404);
@@ -245,6 +259,20 @@ const updateUser = async (req, res, next) => {
     }
     if (status) updateData.status = status.toUpperCase();
     if (avatar !== undefined) updateData.avatar = avatar;
+
+    // Admin may reassign a user's region by regionId or region code. Empty/null clears it.
+    if (req.body.regionId !== undefined || req.body.region !== undefined) {
+      const regionService = require('../services/region.service');
+      const ref = req.body.regionId ?? req.body.region;
+      if (!ref) {
+        updateData.regionId = null;
+      } else {
+        const byId = await regionService.getRegionById(String(ref));
+        const matched = byId || (await regionService.getRegionByCode(String(ref)));
+        if (!matched) return error(res, `Unknown region: ${ref}`, 400);
+        updateData.regionId = matched.id;
+      }
+    }
 
     if (password) {
       updateData.password = await bcrypt.hash(password, 12);

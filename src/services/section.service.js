@@ -5,14 +5,76 @@
  */
 const prisma = require('../config/db');
 const productService = require('./product.service');
+const regionService = require('./region.service');
 const { autoTranslate } = require('../utils/bilingual');
+const { buildVisibilityWhere } = require('../utils/regionVisibility');
 
 const SECTION_BILINGUAL = [{ src: 'title', dst: 'title_ar' }];
+
+const SECTION_REGION_INCLUDE = {
+  regions: { include: { region: { select: { id: true, code: true, name: true, name_ar: true } } } },
+};
+
+function normalizeStatus(value, fallback = 'DRAFT') {
+  if (value === undefined || value === null) return fallback;
+  const v = String(value).trim().toUpperCase();
+  return v === 'PUBLISHED' ? 'PUBLISHED' : v === 'DRAFT' ? 'DRAFT' : fallback;
+}
+
+async function resolveWriteRegionIds(regionIds) {
+  if (Array.isArray(regionIds) && regionIds.length > 0) {
+    return regionService.assertValidRegionIds(regionIds);
+  }
+  const def = await regionService.getDefaultRegion();
+  return def ? [def.id] : [];
+}
+
+function mapSectionRegions(section) {
+  if (!section || !Array.isArray(section.regions)) return [];
+  return section.regions.map((r) => r.region).filter(Boolean);
+}
+
+/**
+ * Builds the section query include. For storefront (non-staff) requests, the nested
+ * products and categories are filtered to PUBLISHED + in-region so a UAE-only product
+ * never leaks into a Saudi user's view through a multi-region section.
+ */
+function sectionInclude(visibility = {}) {
+  const contentWhere = buildVisibilityWhere(visibility);
+  const hasFilter = Object.keys(contentWhere).length > 0;
+  const isStaff = !!visibility.isStaff;
+  // Region tags are only loaded for staff reads. The nested visibility WHERE (region +
+  // published filtering of products/categories) always applies for storefront so a
+  // UAE-only product can't leak into a Saudi section.
+  return {
+    products: {
+      orderBy: { sortOrder: 'asc' },
+      ...(hasFilter ? { where: { product: contentWhere } } : {}),
+      include: {
+        product: {
+          include: {
+            category: { select: { id: true, title: true } },
+            images: { orderBy: { sortOrder: 'asc' } },
+            descriptions: { orderBy: { sortOrder: 'asc' } },
+            productOptions: { orderBy: { sortOrder: 'asc' } },
+            ...(isStaff ? SECTION_REGION_INCLUDE : {}),
+          },
+        },
+      },
+    },
+    categories: {
+      orderBy: { sortOrder: 'asc' },
+      ...(hasFilter ? { where: { category: contentWhere } } : {}),
+      include: { category: isStaff ? { include: SECTION_REGION_INCLUDE } : true },
+    },
+    ...(isStaff ? SECTION_REGION_INCLUDE : {}),
+  };
+}
 
 function mapCategoryForSection(cat) {
   if (!cat || !cat.category) return null;
   const { category } = cat;
-  return {
+  const out = {
     id: category.id,
     title: category.title,
     title_ar: category.title_ar ?? null,
@@ -20,9 +82,16 @@ function mapCategoryForSection(cat) {
     description_ar: category.description_ar ?? null,
     image: category.image ?? null,
     totalProducts: category.totalProducts ?? 0,
+    status: category.status,
     createdAt: category.createdAt,
     updatedAt: category.updatedAt,
   };
+  if (Array.isArray(category.regions)) {
+    const regionList = category.regions.map((r) => r.region).filter(Boolean);
+    out.regions = regionList;
+    out.regionIds = regionList.map((r) => r.id);
+  }
+  return out;
 }
 
 function mapProductForSection(pr) {
@@ -30,80 +99,44 @@ function mapProductForSection(pr) {
   return productService.mapProduct(pr.product);
 }
 
-async function getSections() {
-  const sections = await prisma.section.findMany({
-    orderBy: { sortOrder: 'asc' },
-    include: {
-      products: {
-        orderBy: { sortOrder: 'asc' },
-        include: {
-          product: {
-            include: {
-              category: { select: { id: true, title: true } },
-              images: { orderBy: { sortOrder: 'asc' } },
-              descriptions: { orderBy: { sortOrder: 'asc' } },
-              productOptions: { orderBy: { sortOrder: 'asc' } },
-            },
-          },
-        },
-      },
-      categories: {
-        orderBy: { sortOrder: 'asc' },
-        include: {
-          category: true,
-        },
-      },
-    },
-  });
-
-  return sections.map((s) => ({
+function mapSection(s) {
+  if (!s) return null;
+  const out = {
     id: s.id,
     title: s.title,
     title_ar: s.title_ar ?? null,
     image: s.image ?? null,
     sortOrder: s.sortOrder,
+    status: s.status,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
-    products: s.products.map(mapProductForSection).filter(Boolean),
-    categories: s.categories.map(mapCategoryForSection).filter(Boolean),
-  }));
+    products: (s.products || []).map(mapProductForSection).filter(Boolean),
+    categories: (s.categories || []).map(mapCategoryForSection).filter(Boolean),
+  };
+  // Region tags only present on staff reads.
+  if (Array.isArray(s.regions)) {
+    const regionList = mapSectionRegions(s);
+    out.regions = regionList;
+    out.regionIds = regionList.map((r) => r.id);
+  }
+  return out;
 }
 
-async function getSectionById(id) {
-  const section = await prisma.section.findUnique({
-    where: { id },
-    include: {
-      products: {
-        orderBy: { sortOrder: 'asc' },
-        include: {
-          product: {
-            include: {
-              category: { select: { id: true, title: true } },
-              images: { orderBy: { sortOrder: 'asc' } },
-              descriptions: { orderBy: { sortOrder: 'asc' } },
-              productOptions: { orderBy: { sortOrder: 'asc' } },
-            },
-          },
-        },
-      },
-      categories: {
-        orderBy: { sortOrder: 'asc' },
-        include: { category: true },
-      },
-    },
+async function getSections(visibility = {}) {
+  const sections = await prisma.section.findMany({
+    where: buildVisibilityWhere(visibility),
+    orderBy: { sortOrder: 'asc' },
+    include: sectionInclude(visibility),
   });
-  if (!section) return null;
-  return {
-    id: section.id,
-    title: section.title,
-    title_ar: section.title_ar ?? null,
-    image: section.image ?? null,
-    sortOrder: section.sortOrder,
-    createdAt: section.createdAt,
-    updatedAt: section.updatedAt,
-    products: section.products.map(mapProductForSection).filter(Boolean),
-    categories: section.categories.map(mapCategoryForSection).filter(Boolean),
-  };
+  return sections.map(mapSection);
+}
+
+async function getSectionById(id, visibility = {}) {
+  const section = await prisma.section.findFirst({
+    where: { id, ...buildVisibilityWhere(visibility) },
+    include: sectionInclude(visibility),
+  });
+  return mapSection(section);
 }
 
 async function createSection(data) {
@@ -113,6 +146,8 @@ async function createSection(data) {
 
   const productIds = Array.isArray(data.productIds) ? data.productIds.filter((id) => id && String(id).trim()) : [];
   const categoryIds = Array.isArray(data.categoryIds) ? data.categoryIds.filter((id) => id && String(id).trim()) : [];
+  const status = normalizeStatus(data.status);
+  const regionIds = await resolveWriteRegionIds(data.regionIds);
 
   const maxOrder = await prisma.section.aggregate({ _max: { sortOrder: true } }).then((r) => (r._max.sortOrder ?? -1) + 1);
 
@@ -132,6 +167,10 @@ async function createSection(data) {
       title_ar: titleDraft.title_ar ?? null,
       image: data.image != null ? String(data.image).trim() || null : null,
       sortOrder: data.sortOrder != null ? Number(data.sortOrder) : maxOrder,
+      status,
+      ...(regionIds.length > 0
+        ? { regions: { create: regionIds.map((regionId) => ({ regionId })) } }
+        : {}),
     },
   });
 
@@ -156,7 +195,7 @@ async function createSection(data) {
     });
   }
 
-  return getSectionById(section.id);
+  return getSectionById(section.id, { isStaff: true });
 }
 
 async function updateSection(id, data) {
@@ -176,12 +215,27 @@ async function updateSection(id, data) {
   await autoTranslate(updatePayload, SECTION_BILINGUAL);
   if (data.image !== undefined) updatePayload.image = data.image ? String(data.image).trim() : null;
   if (data.sortOrder !== undefined) updatePayload.sortOrder = Number(data.sortOrder);
+  if (data.status !== undefined) updatePayload.status = normalizeStatus(data.status, existing.status);
+
+  const newRegionIds = data.regionIds !== undefined
+    ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
+    : null;
 
   if (Object.keys(updatePayload).length > 0) {
     await prisma.section.update({
       where: { id },
       data: updatePayload,
     });
+  }
+
+  if (newRegionIds !== null) {
+    await prisma.sectionRegion.deleteMany({ where: { sectionId: id } });
+    if (newRegionIds.length > 0) {
+      await prisma.sectionRegion.createMany({
+        data: newRegionIds.map((regionId) => ({ sectionId: id, regionId })),
+        skipDuplicates: true,
+      });
+    }
   }
 
   if (data.productIds !== undefined) {
@@ -214,7 +268,7 @@ async function updateSection(id, data) {
     }
   }
 
-  return getSectionById(id);
+  return getSectionById(id, { isStaff: true });
 }
 
 async function deleteSection(id) {

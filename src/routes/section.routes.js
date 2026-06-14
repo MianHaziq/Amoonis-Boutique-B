@@ -4,6 +4,15 @@ const router = express.Router();
 const sectionController = require('../controllers/section.controller');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors, requireEitherBilingual } = require('../middleware/validate');
+const { attachStaffIfPresent } = require('../middleware/optionalStaff');
+const { resolveRegion } = require('../middleware/region');
+
+// Shared region/draft validators for create + update.
+const regionStatusValidation = [
+  body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
+  body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
+  body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
+];
 
 /**
  * @swagger
@@ -17,8 +26,17 @@ const { handleValidationErrors, requireEitherBilingual } = require('../middlewar
  * /sections:
  *   get:
  *     summary: List sections (public)
- *     description: Returns all sections in display order for the user panel. Each section includes products and categories in the same shape as product list and category list (id, image, title, price, etc. for products; id, title, image, totalProducts for categories).
+ *     description: |
+ *       Returns sections in display order for the user panel. Each section includes products and
+ *       categories in the same shape as the product/category list APIs. Storefront sends **X-Region**
+ *       and gets only PUBLISHED sections for that region — and the nested products/categories are
+ *       themselves region+published filtered (a UAE-only product won't appear for an SA user). Staff
+ *       (admin/manager token) get all sections and unfiltered nested content.
  *     tags: [Sections]
+ *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
+ *       - $ref: '#/components/parameters/RegionFilterQuery'
+ *       - $ref: '#/components/parameters/StatusFilterQuery'
  *     responses:
  *       200:
  *         description: Sections with products and categories
@@ -35,7 +53,7 @@ const { handleValidationErrors, requireEitherBilingual } = require('../middlewar
  *                     $ref: '#/components/schemas/SectionWithItems'
  *                 meta: { type: object, properties: { total: { type: integer } } }
  */
-router.get('/', sectionController.getSections);
+router.get('/', attachStaffIfPresent, resolveRegion, sectionController.getSections);
 
 /**
  * @swagger
@@ -44,6 +62,7 @@ router.get('/', sectionController.getSections);
  *     summary: Get one section (public)
  *     tags: [Sections]
  *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
  *       - in: path
  *         name: id
  *         required: true
@@ -56,6 +75,8 @@ router.get('/', sectionController.getSections);
  */
 router.get(
   '/:id',
+  attachStaffIfPresent,
+  resolveRegion,
   [param('id').isUUID().withMessage('Valid section ID required')],
   handleValidationErrors,
   sectionController.getSectionById
@@ -133,6 +154,7 @@ const createValidation = [
   body('categoryIds').optional().isArray().withMessage('categoryIds must be an array'),
   body('categoryIds.*').optional().isUUID().withMessage('Each categoryId must be a valid UUID'),
   body('sortOrder').optional().isInt({ min: 0 }).withMessage('sortOrder must be a non-negative integer'),
+  ...regionStatusValidation,
 ];
 router.post('/', verifyAdminOrManager, requireManagerPermission('SECTIONS'), createValidation, handleValidationErrors, sectionController.createSection);
 
@@ -177,6 +199,7 @@ const updateValidation = [
   body('productIds.*').optional().isUUID().withMessage('Each productId must be a valid UUID'),
   body('categoryIds').optional().isArray().withMessage('categoryIds must be an array'),
   body('categoryIds.*').optional().isUUID().withMessage('Each categoryId must be a valid UUID'),
+  ...regionStatusValidation,
 ];
 router.put('/:id', verifyAdminOrManager, requireManagerPermission('SECTIONS'), updateValidation, handleValidationErrors, sectionController.updateSection);
 
