@@ -1,55 +1,122 @@
 /**
- * Landing page banner images. Admin adds/reorders/deletes; public gets ordered list.
+ * Landing page banner images. Admin adds/reorders/deletes/edits; storefront gets the
+ * ordered list filtered to its region and to PUBLISHED banners only.
  * Images stored by URL in DB (Bunny CDN URLs can be used later).
  */
 const prisma = require('../config/db');
+const regionService = require('./region.service');
+const { buildVisibilityWhere } = require('../utils/regionVisibility');
 
-async function getBanners() {
-  return prisma.bannerImage.findMany({
+const REGION_INCLUDE = {
+  regions: { include: { region: { select: { id: true, code: true, name: true, name_ar: true } } } },
+};
+
+function normalizeStatus(value, fallback = 'DRAFT') {
+  if (value === undefined || value === null) return fallback;
+  const v = String(value).trim().toUpperCase();
+  return v === 'PUBLISHED' ? 'PUBLISHED' : v === 'DRAFT' ? 'DRAFT' : fallback;
+}
+
+async function resolveWriteRegionIds(regionIds) {
+  if (Array.isArray(regionIds) && regionIds.length > 0) {
+    return regionService.assertValidRegionIds(regionIds);
+  }
+  const def = await regionService.getDefaultRegion();
+  return def ? [def.id] : [];
+}
+
+function mapBanner(banner) {
+  if (!banner) return null;
+  const { regions, ...rest } = banner;
+  if (!Array.isArray(regions)) return { ...rest };
+  const regionList = regions.map((r) => r.region).filter(Boolean);
+  return { ...rest, regions: regionList, regionIds: regionList.map((r) => r.id) };
+}
+
+async function getBanners(visibility = {}) {
+  const banners = await prisma.bannerImage.findMany({
+    where: buildVisibilityWhere(visibility),
     orderBy: { sortOrder: 'asc' },
-    select: {
-      id: true,
-      url: true,
-      sortOrder: true,
-      createdAt: true,
-      updatedAt: true,
-    },
+    include: visibility.isStaff ? REGION_INCLUDE : undefined,
   });
+  return banners.map(mapBanner);
 }
 
 /**
- * Add one or more banner images. New items get sortOrder at the end.
- * @param {string | string[]} urlOrUrls - Single URL or array of URLs
- * @returns {Promise<{ count: number, items: object[] }>}
+ * Add one or more banner images. New items get sortOrder at the end. All added
+ * banners share the given status (default DRAFT) and region set (default region).
+ * @param {string | string[]} urlOrUrls
+ * @param {{ status?: string, regionIds?: string[] }} opts
  */
-async function addBanners(urlOrUrls) {
+async function addBanners(urlOrUrls, opts = {}) {
   const urls = Array.isArray(urlOrUrls) ? urlOrUrls : [urlOrUrls];
-  if (urls.length === 0) {
-    return { count: 0, items: [] };
-  }
+  if (urls.length === 0) return { count: 0, items: [] };
+
+  const status = normalizeStatus(opts.status);
+  const regionIds = await resolveWriteRegionIds(opts.regionIds);
 
   const maxOrder = await prisma.bannerImage
     .aggregate({ _max: { sortOrder: true } })
     .then((r) => (r._max.sortOrder ?? -1) + 1);
 
-  const data = urls.map((url, i) => ({
-    url: String(url).trim(),
-    sortOrder: maxOrder + i,
-  }));
+  const created = await prisma.$transaction(async (tx) => {
+    const rows = [];
+    for (let i = 0; i < urls.length; i++) {
+      const banner = await tx.bannerImage.create({
+        data: {
+          url: String(urls[i]).trim(),
+          sortOrder: maxOrder + i,
+          status,
+          ...(regionIds.length > 0
+            ? { regions: { create: regionIds.map((regionId) => ({ regionId })) } }
+            : {}),
+        },
+        include: REGION_INCLUDE,
+      });
+      rows.push(banner);
+    }
+    return rows;
+  });
 
-  const created = await prisma.bannerImage.createManyAndReturn({ data });
-  created.sort((a, b) => a.sortOrder - b.sortOrder);
-  return { count: created.length, items: created };
+  return { count: created.length, items: created.map(mapBanner) };
 }
 
 /**
- * Reorder banners by providing the desired order of IDs. First id = sortOrder 0, etc.
- * @param {string[]} orderedIds - Array of banner IDs in display order
- * @returns {Promise<object[]>}
+ * Update a single banner's url / status / region set (admin edit).
  */
+async function updateBanner(id, data) {
+  const existing = await prisma.bannerImage.findUnique({ where: { id } });
+  if (!existing) return null;
+
+  const newRegionIds = data.regionIds !== undefined
+    ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
+    : null;
+
+  await prisma.$transaction(async (tx) => {
+    const payload = {};
+    if (data.url !== undefined) payload.url = String(data.url).trim();
+    if (data.status !== undefined) payload.status = normalizeStatus(data.status, existing.status);
+    if (Object.keys(payload).length > 0) {
+      await tx.bannerImage.update({ where: { id }, data: payload });
+    }
+    if (newRegionIds !== null) {
+      await tx.bannerRegion.deleteMany({ where: { bannerId: id } });
+      if (newRegionIds.length > 0) {
+        await tx.bannerRegion.createMany({
+          data: newRegionIds.map((regionId) => ({ bannerId: id, regionId })),
+          skipDuplicates: true,
+        });
+      }
+    }
+  });
+
+  const banner = await prisma.bannerImage.findUnique({ where: { id }, include: REGION_INCLUDE });
+  return mapBanner(banner);
+}
+
 async function updateOrder(orderedIds) {
   if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
-    return getBanners();
+    return getBanners({ isStaff: true });
   }
 
   const updates = orderedIds.map((id, index) =>
@@ -60,17 +127,18 @@ async function updateOrder(orderedIds) {
   );
 
   await prisma.$transaction(updates);
-  return getBanners();
+  return getBanners({ isStaff: true });
 }
 
 async function deleteBanner(id) {
   await prisma.bannerImage.delete({ where: { id } });
-  return getBanners();
+  return getBanners({ isStaff: true });
 }
 
 module.exports = {
   getBanners,
   addBanners,
+  updateBanner,
   updateOrder,
   deleteBanner,
 };

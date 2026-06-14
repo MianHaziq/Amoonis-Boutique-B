@@ -5,6 +5,8 @@ const productController = require('../controllers/product.controller');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors, requireEitherBilingual } = require('../middleware/validate');
 const { publicLimiter } = require('../middleware/rateLimit');
+const { attachStaffIfPresent } = require('../middleware/optionalStaff');
+const { resolveRegion } = require('../middleware/region');
 
 /**
  * @swagger
@@ -151,6 +153,9 @@ const createValidation = [
     .optional()
     .custom((arr) => eachRowHasOneSide(arr, [['title', 'title_ar']]))
     .withMessage('Each productOption must have either "title" or "title_ar"'),
+  body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
+  body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
+  body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
 ];
 
 const updateValidation = [
@@ -198,6 +203,9 @@ const updateValidation = [
     .optional()
     .custom((arr) => eachRowHasOneSide(arr, [['title', 'title_ar']]))
     .withMessage('Each productOption must have either "title" or "title_ar"'),
+  body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
+  body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
+  body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
 ];
 
 const idParam = [param('id').isUUID().withMessage('Valid product ID required')];
@@ -345,9 +353,13 @@ router.delete(
  * /products:
  *   get:
  *     summary: List all products (paginated)
- *     description: Returns paginated products. Use query params page and limit.
+ *     description: |
+ *       Returns paginated products. Storefront sends the **X-Region** header and gets only
+ *       PUBLISHED products in that region. Staff (admin/manager token) get all products across
+ *       all regions and may narrow with the **region** / **status** query filters.
  *     tags: [Products]
  *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
  *       - in: query
  *         name: page
  *         schema: { type: integer, default: 1 }
@@ -356,6 +368,8 @@ router.delete(
  *         name: limit
  *         schema: { type: integer, default: 10 }
  *         description: Items per page (max 100)
+ *       - $ref: '#/components/parameters/RegionFilterQuery'
+ *       - $ref: '#/components/parameters/StatusFilterQuery'
  *     responses:
  *       200:
  *         description: Paginated products
@@ -370,16 +384,17 @@ router.delete(
  *               meta:
  *                 pagination: { page: 1, limit: 10, total: 0, totalPages: 0 }
  */
-router.get('/', publicLimiter, pagination, handleValidationErrors, productController.getAllProducts);
+router.get('/', publicLimiter, attachStaffIfPresent, resolveRegion, pagination, handleValidationErrors, productController.getAllProducts);
 
 /**
  * @swagger
  * /products/category/{categoryId}:
  *   get:
  *     summary: List products by category (paginated)
- *     description: Returns products in the given category. Public, rate-limited.
+ *     description: Returns products in the given category. Public, rate-limited. Honors the X-Region header (storefront) and region/status filters (staff).
  *     tags: [Products]
  *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
  *       - in: path
  *         name: categoryId
  *         required: true
@@ -390,6 +405,8 @@ router.get('/', publicLimiter, pagination, handleValidationErrors, productContro
  *       - in: query
  *         name: limit
  *         schema: { type: integer, default: 10 }
+ *       - $ref: '#/components/parameters/RegionFilterQuery'
+ *       - $ref: '#/components/parameters/StatusFilterQuery'
  *     responses:
  *       200:
  *         description: Paginated products in category
@@ -397,6 +414,8 @@ router.get('/', publicLimiter, pagination, handleValidationErrors, productContro
 router.get(
   '/category/:categoryId',
   publicLimiter,
+  attachStaffIfPresent,
+  resolveRegion,
   categoryIdParam,
   pagination,
   handleValidationErrors,
@@ -408,9 +427,10 @@ router.get(
  * /products/{id}:
  *   get:
  *     summary: Get single product details
- *     description: Returns one product with category info. Public, rate-limited.
+ *     description: Returns one product with category info. Public, rate-limited. A storefront request (X-Region) gets 404 if the product is a draft or not in that region; staff see it regardless.
  *     tags: [Products]
  *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
  *       - in: path
  *         name: id
  *         required: true
@@ -434,6 +454,8 @@ router.get(
 router.get(
   '/:id',
   publicLimiter,
+  attachStaffIfPresent,
+  resolveRegion,
   idParam,
   handleValidationErrors,
   productController.getProductById

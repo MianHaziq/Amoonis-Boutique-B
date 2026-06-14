@@ -7,8 +7,20 @@ const { OAuth2Client } = require('google-auth-library');
 const nodemailer = require('nodemailer');
 const { verifyAppleToken } = require('../services/appleAuth.service');
 const refreshTokenService = require('../services/refreshToken.service');
+const regionService = require('../services/region.service');
 const { invalidateCachedUser } = require('../middleware/auth');
 const { success, error } = require('../utils/response');
+
+// Resolve the region a new account should belong to, from the X-Region header
+// (fallback: `region` in the body). Falls back to the default region. Never throws.
+async function resolveSignupRegionId(req) {
+  try {
+    const region = await regionService.resolveRegion(req.headers['x-region'] || req.body?.region);
+    return region?.id || null;
+  } catch {
+    return null;
+  }
+}
 
 function hashResetToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken)).digest('hex');
@@ -106,14 +118,16 @@ const signup = async (req, res, next) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
+    const regionId = await resolveSignupRegionId(req);
 
     const created = await prisma.user.create({
       data: {
         fullName: trimmedFullName,
         email,
         password: hashedPassword,
+        regionId,
       },
-      select: { id: true, email: true, fullName: true, role: true, status: true, tokenVersion: true, createdAt: true },
+      select: { id: true, email: true, fullName: true, role: true, status: true, tokenVersion: true, regionId: true, createdAt: true },
     });
 
     const { accessToken, refreshToken, refreshTokenExpiresAt } = await issueAuthTokens(created, req);
@@ -124,6 +138,7 @@ const signup = async (req, res, next) => {
         fullName: created.fullName || null,
         role: created.role,
         status: created.status,
+        regionId: created.regionId || null,
         createdAt: created.createdAt,
       },
       token: accessToken,
@@ -281,6 +296,7 @@ const googleLogin = async (req, res, next) => {
               fullName,
               avatar: picture || null,
               isEmailVerified: true,
+              regionId: await resolveSignupRegionId(req),
             },
           });
           // If the row was just created (no prior link), treat as new user for the response.
@@ -442,6 +458,7 @@ const appleLogin = async (req, res, next) => {
               email: createEmail,
               fullName: fullName || null,
               isEmailVerified: !!emailFromToken,
+              regionId: await resolveSignupRegionId(req),
             },
           });
           isNewUser = !user.updatedAt || user.createdAt.getTime() === user.updatedAt.getTime();
@@ -657,6 +674,8 @@ const getProfile = async (req, res, next) => {
         managerPermissions: true,
         preferredLanguage: true,
         phone: true,
+        regionId: true,
+        region: { select: { id: true, code: true, name: true, name_ar: true } },
         addressCountry: true,
         addressCity: true,
         createdAt: true,
