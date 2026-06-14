@@ -4,6 +4,8 @@ const router = express.Router();
 const bannerController = require('../controllers/banner.controller');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors } = require('../middleware/validate');
+const { attachStaffIfPresent } = require('../middleware/optionalStaff');
+const { resolveRegion } = require('../middleware/region');
 
 /**
  * @swagger
@@ -17,8 +19,13 @@ const { handleValidationErrors } = require('../middleware/validate');
  * /banners:
  *   get:
  *     summary: List banner images (public)
- *     description: Returns all banner images in display order (first = top of landing page). No auth required. Used by the user landing page.
+ *     description: |
+ *       Returns banner images in display order (first = top of landing page). No auth required.
+ *       Storefront sends **X-Region** and gets only PUBLISHED banners for that region; staff
+ *       (admin/manager token) get all banners across all regions.
  *     tags: [Banners]
+ *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
  *     responses:
  *       200:
  *         description: Banners in display order
@@ -55,7 +62,7 @@ const { handleValidationErrors } = require('../middleware/validate');
  *               meta:
  *                 total: 1
  */
-router.get('/', bannerController.getBanners);
+router.get('/', attachStaffIfPresent, resolveRegion, bannerController.getBanners);
 
 /**
  * @swagger
@@ -137,8 +144,36 @@ const addValidation = [
     }
     return true;
   }),
+  body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
+  body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
+  body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
 ];
 router.post('/', verifyAdminOrManager, requireManagerPermission('BANNERS'), addValidation, handleValidationErrors, bannerController.addBanners);
+
+/**
+ * @swagger
+ * /banners/{id}:
+ *   put:
+ *     summary: Update a banner's url / status / regions (admin)
+ *     tags: [Banners]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200: { description: Banner updated }
+ *       404: { description: Banner not found }
+ */
+const updateValidation = [
+  param('id').isUUID().withMessage('Valid banner ID required'),
+  body('url').optional().trim().isURL().withMessage('url must be a valid URL'),
+  body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
+  body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
+  body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
+];
+router.put('/:id', verifyAdminOrManager, requireManagerPermission('BANNERS'), updateValidation, handleValidationErrors, bannerController.updateBanner);
 
 /**
  * @swagger

@@ -10,24 +10,107 @@ datasource db {
 }
 
 // ============================================
+// REGIONS (multi-region support)
+// ============================================
+
+/// A storefront region (e.g. UAE, Saudi Arabia). Regions are data, not an enum, so the
+/// admin can add new ones at runtime with no schema migration. `code` is the short token
+/// the mobile app sends in the `X-Region` header (e.g. "UAE", "SA"). Exactly one region
+/// should have `isDefault = true`; it is used when the client sends no/unknown region.
+model Region {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String
+  name_ar   String?
+  isDefault Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products   ProductRegion[]
+  categories CategoryRegion[]
+  banners    BannerRegion[]
+  sections   SectionRegion[]
+  users      User[]
+  orders     Order[]
+
+  @@index([isActive])
+  @@index([sortOrder])
+}
+
+/// Join: which regions a product is visible in. A row per (product, region) pair —
+/// "both regions" = two rows, "UAE only" = one row. No rows = visible in none.
+model ProductRegion {
+  productId String
+  regionId  String
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  region  Region  @relation(fields: [regionId], references: [id], onDelete: Cascade)
+
+  @@id([productId, regionId])
+  @@index([regionId])
+}
+
+model CategoryRegion {
+  categoryId String
+  regionId   String
+  createdAt  DateTime @default(now())
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  region   Region   @relation(fields: [regionId], references: [id], onDelete: Cascade)
+
+  @@id([categoryId, regionId])
+  @@index([regionId])
+}
+
+model BannerRegion {
+  bannerId  String
+  regionId  String
+  createdAt DateTime @default(now())
+
+  banner BannerImage @relation(fields: [bannerId], references: [id], onDelete: Cascade)
+  region Region      @relation(fields: [regionId], references: [id], onDelete: Cascade)
+
+  @@id([bannerId, regionId])
+  @@index([regionId])
+}
+
+model SectionRegion {
+  sectionId String
+  regionId  String
+  createdAt DateTime @default(now())
+
+  section Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  region  Region  @relation(fields: [regionId], references: [id], onDelete: Cascade)
+
+  @@id([sectionId, regionId])
+  @@index([regionId])
+}
+
+// ============================================
 // USER & ADMIN
 // ============================================
 
 model User {
-  id                 String    @id @default(uuid())
-  email              String    @unique
+  id                 String              @id @default(uuid())
+  email              String              @unique
   fullName           String?
   password           String?
-  googleId           String?   @unique
-  appleId            String?   @unique
+  googleId           String?             @unique
+  appleId            String?             @unique
   avatar             String?
-  role               UserRole  @default(CUSTOMER)
+  role               UserRole            @default(CUSTOMER)
   managerTitle       String?
   managerPermissions ManagerPermission[] @default([])
-  status             UserStatus @default(ACTIVE)
-  isEmailVerified    Boolean   @default(false)
+  status             UserStatus          @default(ACTIVE)
+  isEmailVerified    Boolean             @default(false)
   preferredLanguage  String?
   phone              String?
+  /// Region the user belongs to (captured from X-Region at signup). Drives which
+  /// regional catalog they browse by default. Nullable for legacy users (backfilled).
+  regionId           String?
   addressCountry     String?
   addressCity        String?
   resetToken         String?
@@ -36,9 +119,9 @@ model User {
   /// New JWTs include this value as `tv`; verifyToken rejects mismatches.
   /// Backwards compatible: legacy tokens without `tv` are still accepted
   /// during the rollout window.
-  tokenVersion       Int       @default(0)
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  tokenVersion       Int                 @default(0)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
 
   cart      Cart?
   orders    Order[]
@@ -50,6 +133,10 @@ model User {
   promoCodeUsages PromoCodeUsage[]
   userContacts    UserContact[]
   refreshTokens   RefreshToken[]
+
+  region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
+
+  @@index([regionId])
 }
 
 /// Server-side refresh-token store. The raw token is shown to the client once
@@ -57,14 +144,14 @@ model User {
 /// hash. Rotating on every refresh and revoking on logout/password-change is
 /// what gives long-lived sessions a safe revocation path.
 model RefreshToken {
-  id          String   @id @default(uuid())
-  userId      String
-  tokenHash   String   @unique
-  expiresAt   DateTime
-  revokedAt   DateTime?
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
   /// Tracks which device requested the original sign-in (informational only).
-  userAgent   String?
-  createdAt   DateTime @default(now())
+  userAgent String?
+  createdAt DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -77,18 +164,21 @@ model RefreshToken {
 // ============================================
 
 model Section {
-  id        String   @id @default(uuid())
+  id        String        @id @default(uuid())
   title     String
   title_ar  String?
   image     String?
-  sortOrder Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  sortOrder Int           @default(0)
+  status    PublishStatus @default(DRAFT)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
 
   products   SectionProduct[]
   categories SectionCategory[]
+  regions    SectionRegion[]
 
   @@index([sortOrder])
+  @@index([status])
 }
 
 model SectionProduct {
@@ -126,13 +216,17 @@ model SectionCategory {
 // ============================================
 
 model BannerImage {
-  id        String   @id @default(uuid())
-  url       String   @db.Text
-  sortOrder Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id        String        @id @default(uuid())
+  url       String        @db.Text
+  sortOrder Int           @default(0)
+  status    PublishStatus @default(DRAFT)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  regions BannerRegion[]
 
   @@index([sortOrder])
+  @@index([status])
 }
 
 // ============================================
@@ -140,15 +234,15 @@ model BannerImage {
 // ============================================
 
 model Settings {
-  id                String   @id @default("default")
-  siteName          String   @default("Amoon Bloom")
-  logo              String?
-  contactEmail      String   @default("contact@example.com")
-  supportEmail      String   @default("support@example.com")
-  currency          String   @default("USD")
-  maintenanceMode   Boolean  @default(false)
-  hiddenPages       String[] @default([])
-  updatedAt         DateTime @updatedAt
+  id              String   @id @default("default")
+  siteName        String   @default("Amoon Bloom")
+  logo            String?
+  contactEmail    String   @default("contact@example.com")
+  supportEmail    String   @default("support@example.com")
+  currency        String   @default("USD")
+  maintenanceMode Boolean  @default(false)
+  hiddenPages     String[] @default([])
+  updatedAt       DateTime @updatedAt
 }
 
 // ============================================
@@ -178,47 +272,55 @@ model UserContact {
 // ============================================
 
 model Category {
-  id             String    @id @default(uuid())
+  id             String        @id @default(uuid())
   title          String
   title_ar       String?
-  description    String?   @db.Text
-  description_ar String?   @db.Text
+  description    String?       @db.Text
+  description_ar String?       @db.Text
   image          String?
-  totalProducts  Int       @default(0)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  totalProducts  Int           @default(0)
+  status         PublishStatus @default(DRAFT)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
-  products        Product[]
-  sectionCategories SectionCategory[]
+  products            Product[]
+  sectionCategories   SectionCategory[]
   promoCodeCategories PromoCodeCategory[]
+  regions             CategoryRegion[]
 
   @@index([title])
+  @@index([status])
 }
 
 model Product {
-  id              String   @id @default(uuid())
+  id              String        @id @default(uuid())
   title           String
   title_ar        String?
   subtitle        String?
   subtitle_ar     String?
-  price           Decimal  @db.Decimal(10, 2)
-  discountedPrice Decimal? @db.Decimal(10, 2)
-  quantity        Int      @default(0)
+  price           Decimal       @db.Decimal(10, 2)
+  discountedPrice Decimal?      @db.Decimal(10, 2)
+  quantity        Int           @default(0)
   categoryId      String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  status          PublishStatus @default(DRAFT)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
-  category       Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  images         ProductImage[]
-  descriptions   ProductDescription[]
-  productOptions ProductOption[]
-  cartItems      CartItem[]
-  orderItems     OrderItem[]
-  sectionProducts SectionProduct[]
+  category          Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  images            ProductImage[]
+  descriptions      ProductDescription[]
+  productOptions    ProductOption[]
+  cartItems         CartItem[]
+  orderItems        OrderItem[]
+  sectionProducts   SectionProduct[]
   promoCodeProducts PromoCodeProduct[]
+  regions           ProductRegion[]
 
   @@index([categoryId])
   @@index([title])
+  // Composite serves the hot storefront query: WHERE status='PUBLISHED' ORDER BY createdAt DESC.
+  // Leftmost prefix also covers plain status-equality filters/counts.
+  @@index([status, createdAt])
 }
 
 model ProductOption {
@@ -229,7 +331,7 @@ model ProductOption {
   options    String[]
   options_ar String[] @default([])
   sortOrder  Int      @default(0)
-  createdAt DateTime @default(now())
+  createdAt  DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
@@ -245,7 +347,7 @@ model ProductDescription {
   description    String   @db.Text
   description_ar String?  @db.Text
   sortOrder      Int      @default(0)
-  createdAt   DateTime @default(now())
+  createdAt      DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
@@ -298,13 +400,13 @@ model Address {
 // ============================================
 
 model Cart {
-  id           String    @id @default(uuid())
-  userId       String    @unique
-  orderMessage String?   @db.Text
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  orderMessage String?  @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  user  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   items CartItem[]
 
   @@index([userId])
@@ -332,41 +434,46 @@ model CartItem {
 // ============================================
 
 model Order {
-  id                   String        @id @default(uuid())
-  userId               String
-  orderMessage         String?       @db.Text
-  totalAmount          Decimal       @db.Decimal(10, 2)
-  discountAmount       Decimal?      @db.Decimal(10, 2)
-  appliedPromoCode     String?
-  appliedPromoCodeId   String?
-  paymentMethod        PaymentMethod @default(COD)
-  status               OrderStatus   @default(PENDING)
+  id                    String        @id @default(uuid())
+  userId                String
+  orderMessage          String?       @db.Text
+  totalAmount           Decimal       @db.Decimal(10, 2)
+  discountAmount        Decimal?      @db.Decimal(10, 2)
+  appliedPromoCode      String?
+  appliedPromoCodeId    String?
+  paymentMethod         PaymentMethod @default(COD)
+  status                OrderStatus   @default(PENDING)
   /// Soft ref to the saved Address used at checkout (may be null for legacy orders or if address was deleted).
-  addressId            String?
+  addressId             String?
   /// Address snapshot — copied from the saved or inline address at checkout time so order history stays accurate.
-  shippingFullName     String?
-  shippingPhone        String?
+  shippingFullName      String?
+  shippingPhone         String?
   shippingStreetAddress String?
-  shippingApartment    String?
-  shippingCity         String?
-  shippingState        String?
-  shippingPostalCode   String?
-  shippingCountry      String?
+  shippingApartment     String?
+  shippingCity          String?
+  shippingState         String?
+  shippingPostalCode    String?
+  shippingCountry       String?
   /// When true, Product.quantity has been reduced for this order’s line items (set on PENDING→CONFIRMED; cleared on cancel/revert).
-  inventoryDeducted    Boolean       @default(false)
-  createdAt            DateTime      @default(now())
-  updatedAt            DateTime      @updatedAt
+  inventoryDeducted     Boolean       @default(false)
+  /// Region the order was placed in (captured from X-Region / the user's region at checkout).
+  /// Drives region-scoped analytics. Nullable for legacy orders (backfilled to default region).
+  regionId              String?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
 
-  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  address         Address?    @relation(fields: [addressId], references: [id], onDelete: SetNull)
-  appliedPromo    PromoCode?  @relation(fields: [appliedPromoCodeId], references: [id], onDelete: SetNull)
-  items           OrderItem[]
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  address      Address?    @relation(fields: [addressId], references: [id], onDelete: SetNull)
+  appliedPromo PromoCode?  @relation(fields: [appliedPromoCodeId], references: [id], onDelete: SetNull)
+  region       Region?     @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  items        OrderItem[]
 
   @@index([userId])
   @@index([status])
   @@index([createdAt])
   @@index([createdAt, status])
   @@index([addressId])
+  @@index([regionId])
 }
 
 model OrderItem {
@@ -408,10 +515,10 @@ model UserPushDevice {
 
 /// Per-user toggles for Amoon Bloom push channels. All default true when row is created.
 model UserNotificationPreferences {
-  userId        String  @id
-  orderStatus   Boolean @default(true)
-  promotions    Boolean @default(true)
-  announcements Boolean @default(true)
+  userId        String   @id
+  orderStatus   Boolean  @default(true)
+  promotions    Boolean  @default(true)
+  announcements Boolean  @default(true)
   updatedAt     DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -426,33 +533,33 @@ model UserNotificationPreferences {
 /// target set. Percentage discounts can be capped via `maxDiscountAmount`. Availability is
 /// bounded by `startsAt`/`expiresAt` and total / per-user usage counters.
 model PromoCode {
-  id                String          @id @default(uuid())
-  code              String          @unique
-  name              String
-  name_ar           String?
-  description       String?         @db.Text
-  description_ar    String?         @db.Text
+  id             String  @id @default(uuid())
+  code           String  @unique
+  name           String
+  name_ar        String?
+  description    String? @db.Text
+  description_ar String? @db.Text
 
   discountType      DiscountType
-  discountValue     Decimal         @db.Decimal(10, 2)
-  maxDiscountAmount Decimal?        @db.Decimal(10, 2)
+  discountValue     Decimal      @db.Decimal(10, 2)
+  maxDiscountAmount Decimal?     @db.Decimal(10, 2)
 
-  appliesTo         PromoAppliesTo  @default(ALL_PRODUCTS)
+  appliesTo PromoAppliesTo @default(ALL_PRODUCTS)
 
-  minOrderAmount    Decimal?        @db.Decimal(10, 2)
-  maxOrderAmount    Decimal?        @db.Decimal(10, 2)
+  minOrderAmount Decimal? @db.Decimal(10, 2)
+  maxOrderAmount Decimal? @db.Decimal(10, 2)
 
-  startsAt          DateTime?
-  expiresAt         DateTime?
+  startsAt  DateTime?
+  expiresAt DateTime?
 
   usageLimit        Int?
   usageLimitPerUser Int?
-  usageCount        Int             @default(0)
+  usageCount        Int  @default(0)
 
-  isActive          Boolean         @default(true)
+  isActive Boolean @default(true)
 
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   products   PromoCodeProduct[]
   categories PromoCodeCategory[]
@@ -521,6 +628,13 @@ enum PushPlatform {
   IOS
   ANDROID
   WEB
+}
+
+/// Draft/published state for admin-managed content. DRAFT is hidden from the
+/// storefront; only PUBLISHED items are returned to non-staff requests.
+enum PublishStatus {
+  DRAFT
+  PUBLISHED
 }
 
 enum UserRole {

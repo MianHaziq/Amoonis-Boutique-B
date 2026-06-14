@@ -1,5 +1,27 @@
 const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
+const regionService = require('./region.service');
+
+// Region id that can never match a row — so an unknown region code yields zeroed
+// analytics rather than silently falling back to "all regions".
+const NO_MATCH_REGION_ID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * Resolve an optional region filter (a region code in params.region) onto the range.
+ * No region param => combined ("both / mixed") view across all regions.
+ */
+async function attachRegionFilter(range, params) {
+  const code = params && params.region ? String(params.region).trim() : '';
+  if (!code) {
+    range.regionId = null;
+    range.regionCode = null;
+    return range;
+  }
+  const region = await regionService.getRegionByCode(code);
+  range.regionId = region ? region.id : NO_MATCH_REGION_ID;
+  range.regionCode = region ? region.code : code.toUpperCase();
+  return range;
+}
 
 /** Allowed date_trunc units (internal only; never pass user input unchecked). */
 const ALLOWED_TRUNC = new Set(['hour', 'day', 'week', 'month', 'quarter', 'year']);
@@ -158,30 +180,44 @@ const KPI_SELECT = Prisma.sql`
 `;
 
 /**
- * @param {{ isAllTime: boolean, from: Date | null, toExclusive: Date | null }} range
+ * Build the Order-scoped WHERE clause for an analytics query from a date range,
+ * an optional region filter (range.regionId), and any extra base conditions.
+ * Returns Prisma.empty when there is nothing to filter (all-time, all regions).
+ *
+ * This unifies what used to be hand-duplicated all-time vs dated query branches,
+ * and is the single place region scoping is applied across every analytics aggregate.
+ *
+ * @param {object} range  - { isAllTime, from, toExclusive, regionId? }
+ * @param {object} [opts] - { alias?: string, extra?: Prisma.Sql[] }
+ */
+function buildOrderWhere(range, { alias = '', extra = [] } = {}) {
+  const prefix = alias ? `${alias}.` : '';
+  const conds = [...extra];
+  if (!range.isAllTime) {
+    conds.push(Prisma.sql`${Prisma.raw(`${prefix}"createdAt"`)} >= ${range.from}`);
+    conds.push(Prisma.sql`${Prisma.raw(`${prefix}"createdAt"`)} < ${range.toExclusive}`);
+  }
+  if (range.regionId) {
+    conds.push(Prisma.sql`${Prisma.raw(`${prefix}"regionId"`)} = ${range.regionId}`);
+  }
+  if (conds.length === 0) return Prisma.empty;
+  return Prisma.sql`WHERE ${Prisma.join(conds, ' AND ')}`;
+}
+
+/**
+ * @param {{ isAllTime: boolean, from: Date | null, toExclusive: Date | null, regionId?: string|null }} range
  */
 async function fetchSummary(range) {
-  const rows = range.isAllTime
-    ? await prisma.$queryRaw`
-        SELECT
-          COUNT(*) FILTER (WHERE status <> 'CANCELLED')::int AS "activeOrderCount",
-          COALESCE(SUM("totalAmount") FILTER (WHERE status <> 'CANCELLED'), 0) AS "revenue",
-          COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledOrderCount",
-          COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue",
-          COUNT(DISTINCT "userId") FILTER (WHERE status <> 'CANCELLED')::int AS "distinctCustomers"
-        FROM "Order"
-      `
-    : await prisma.$queryRaw`
-        SELECT
-          COUNT(*) FILTER (WHERE status <> 'CANCELLED')::int AS "activeOrderCount",
-          COALESCE(SUM("totalAmount") FILTER (WHERE status <> 'CANCELLED'), 0) AS "revenue",
-          COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledOrderCount",
-          COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue",
-          COUNT(DISTINCT "userId") FILTER (WHERE status <> 'CANCELLED')::int AS "distinctCustomers"
-        FROM "Order"
-        WHERE "createdAt" >= ${range.from}
-          AND "createdAt" < ${range.toExclusive}
-      `;
+  const rows = await prisma.$queryRaw`
+    SELECT
+      COUNT(*) FILTER (WHERE status <> 'CANCELLED')::int AS "activeOrderCount",
+      COALESCE(SUM("totalAmount") FILTER (WHERE status <> 'CANCELLED'), 0) AS "revenue",
+      COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledOrderCount",
+      COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue",
+      COUNT(DISTINCT "userId") FILTER (WHERE status <> 'CANCELLED')::int AS "distinctCustomers"
+    FROM "Order"
+    ${buildOrderWhere(range)}
+  `;
   const r = rows[0] || {};
   const revenue = num(r.revenue);
   const activeOrderCount = num(r.activeOrderCount);
@@ -198,19 +234,6 @@ async function fetchSummary(range) {
 async function fetchSeries(range, trunc) {
   if (!ALLOWED_TRUNC.has(trunc)) throw new Error('INVALID_TRUNC');
   const truncLiteral = Prisma.raw(`'${trunc}'`);
-  if (range.isAllTime) {
-    return prisma.$queryRaw`
-      SELECT
-        date_trunc(${truncLiteral}, "createdAt" AT TIME ZONE 'UTC') AS "bucket",
-        COUNT(*) FILTER (WHERE status <> 'CANCELLED')::int AS "orderCount",
-        COALESCE(SUM("totalAmount") FILTER (WHERE status <> 'CANCELLED'), 0) AS "revenue",
-        COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledOrderCount",
-        COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue"
-      FROM "Order"
-      GROUP BY 1
-      ORDER BY 1 ASC
-    `;
-  }
   return prisma.$queryRaw`
     SELECT
       date_trunc(${truncLiteral}, "createdAt" AT TIME ZONE 'UTC') AS "bucket",
@@ -219,31 +242,19 @@ async function fetchSeries(range, trunc) {
       COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledOrderCount",
       COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue"
     FROM "Order"
-    WHERE "createdAt" >= ${range.from}
-      AND "createdAt" < ${range.toExclusive}
+    ${buildOrderWhere(range)}
     GROUP BY 1
     ORDER BY 1 ASC
   `;
 }
 
 async function fetchStatusBreakdown(range) {
-  if (range.isAllTime) {
-    return prisma.$queryRaw`
-      SELECT status::text AS "status",
-             COUNT(*)::int AS "count",
-             COALESCE(SUM("totalAmount"), 0) AS "revenue"
-      FROM "Order"
-      GROUP BY status
-      ORDER BY "count" DESC
-    `;
-  }
   return prisma.$queryRaw`
     SELECT status::text AS "status",
            COUNT(*)::int AS "count",
            COALESCE(SUM("totalAmount"), 0) AS "revenue"
     FROM "Order"
-    WHERE "createdAt" >= ${range.from}
-      AND "createdAt" < ${range.toExclusive}
+    ${buildOrderWhere(range)}
     GROUP BY status
     ORDER BY "count" DESC
   `;
@@ -255,19 +266,6 @@ async function fetchStatusBreakdown(range) {
 async function fetchSalesByCalendarUnit(range, unit) {
   const u = unit === 'month' ? 'month' : 'day';
   const truncLiteral = Prisma.raw(`'${u}'`);
-  if (range.isAllTime) {
-    return prisma.$queryRaw`
-      SELECT
-        date_trunc(${truncLiteral}, "createdAt" AT TIME ZONE 'UTC') AS "bucket",
-        COUNT(*) FILTER (WHERE status <> 'CANCELLED')::int AS "orderCount",
-        COALESCE(SUM("totalAmount") FILTER (WHERE status <> 'CANCELLED'), 0) AS "revenue",
-        COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledOrderCount",
-        COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue"
-      FROM "Order"
-      GROUP BY 1
-      ORDER BY 1 ASC
-    `;
-  }
   return prisma.$queryRaw`
     SELECT
       date_trunc(${truncLiteral}, "createdAt" AT TIME ZONE 'UTC') AS "bucket",
@@ -276,8 +274,7 @@ async function fetchSalesByCalendarUnit(range, unit) {
       COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledOrderCount",
       COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue"
     FROM "Order"
-    WHERE "createdAt" >= ${range.from}
-      AND "createdAt" < ${range.toExclusive}
+    ${buildOrderWhere(range)}
     GROUP BY 1
     ORDER BY 1 ASC
   `;
@@ -364,6 +361,7 @@ function summarizeSalesPoints(points, isMonthly) {
 async function getDailySalesAnalytics(params) {
   const w = resolveAnalyticsWindow(params);
   if (w.error) return { error: w.error };
+  await attachRegionFilter(w.range, params);
 
   const isAllTime = w.range.isAllTime;
   const unit = isAllTime ? 'month' : 'day';
@@ -399,36 +397,19 @@ async function getDailySalesAnalytics(params) {
 }
 
 async function fetchKpiAggregate(range) {
-  if (range.isAllTime) {
-    return prisma.$queryRaw`
-      SELECT ${KPI_SELECT}
-      FROM "Order"
-    `;
-  }
   return prisma.$queryRaw`
     SELECT ${KPI_SELECT}
     FROM "Order"
-    WHERE "createdAt" >= ${range.from}
-      AND "createdAt" < ${range.toExclusive}
+    ${buildOrderWhere(range)}
   `;
 }
 
 async function fetchUnitsSoldNet(range) {
-  if (range.isAllTime) {
-    return prisma.$queryRaw`
-      SELECT COALESCE(SUM(oi.quantity), 0)::bigint AS "unitsSold"
-      FROM "OrderItem" oi
-      INNER JOIN "Order" o ON o.id = oi."orderId"
-      WHERE o.status <> 'CANCELLED'
-    `;
-  }
   return prisma.$queryRaw`
     SELECT COALESCE(SUM(oi.quantity), 0)::bigint AS "unitsSold"
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
-    WHERE o.status <> 'CANCELLED'
-      AND o."createdAt" >= ${range.from}
-      AND o."createdAt" < ${range.toExclusive}
+    ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status <> 'CANCELLED'`] })}
   `;
 }
 
@@ -436,24 +417,6 @@ async function fetchUnitsSoldNet(range) {
  * Net line revenue by product category (excludes cancelled orders). One grouped query.
  */
 async function fetchCategorySales(range) {
-  if (range.isAllTime) {
-    return prisma.$queryRaw`
-      SELECT
-        COALESCE(c.id::text, '') AS "categoryId",
-        COALESCE(c.title, 'Uncategorized') AS "categoryTitle",
-        COUNT(DISTINCT o.id)::int AS "orderCount",
-        COALESCE(SUM(oi.quantity * oi.price), 0) AS "revenue",
-        COALESCE(SUM(oi.quantity), 0)::bigint AS "unitsSold",
-        COUNT(oi.id)::int AS "lineItemCount"
-      FROM "Order" o
-      INNER JOIN "OrderItem" oi ON oi."orderId" = o.id
-      INNER JOIN "Product" p ON p.id = oi."productId"
-      LEFT JOIN "Category" c ON c.id = p."categoryId"
-      WHERE o.status <> 'CANCELLED'
-      GROUP BY c.id, c.title
-      ORDER BY COALESCE(SUM(oi.quantity * oi.price), 0) DESC NULLS LAST
-    `;
-  }
   return prisma.$queryRaw`
     SELECT
       COALESCE(c.id::text, '') AS "categoryId",
@@ -466,9 +429,7 @@ async function fetchCategorySales(range) {
     INNER JOIN "OrderItem" oi ON oi."orderId" = o.id
     INNER JOIN "Product" p ON p.id = oi."productId"
     LEFT JOIN "Category" c ON c.id = p."categoryId"
-    WHERE o.status <> 'CANCELLED'
-      AND o."createdAt" >= ${range.from}
-      AND o."createdAt" < ${range.toExclusive}
+    ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status <> 'CANCELLED'`] })}
     GROUP BY c.id, c.title
     ORDER BY COALESCE(SUM(oi.quantity * oi.price), 0) DESC NULLS LAST
   `;
@@ -652,11 +613,14 @@ function resolveAnalyticsWindow(params) {
 }
 
 function rangeMetaPayload(range) {
+  // `region` is the applied region filter: null = combined view across all regions.
+  const region = range.regionCode || null;
   if (range.isAllTime) {
     return {
       allTime: true,
       from: null,
       toExclusive: null,
+      region,
       timezoneNote: 'No date filter — entire order history.',
     };
   }
@@ -664,6 +628,7 @@ function rangeMetaPayload(range) {
     allTime: false,
     from: range.from.toISOString(),
     toExclusive: range.toExclusive.toISOString(),
+    region,
     timezoneNote: 'All boundaries use UTC. Align client labels to your store timezone if needed.',
   };
 }
@@ -671,6 +636,7 @@ function rangeMetaPayload(range) {
 async function getRevenueAnalytics(params) {
   const w = resolveAnalyticsWindow(params);
   if (w.error) return { error: w.error };
+  await attachRegionFilter(w.range, params);
 
   const { range, presetLabel, preset, trunc: baseTrunc } = w;
   let trunc = baseTrunc;
@@ -711,6 +677,7 @@ async function getRevenueAnalytics(params) {
 async function getKpiAnalytics(params) {
   const w = resolveAnalyticsWindow(params);
   if (w.error) return { error: w.error };
+  await attachRegionFilter(w.range, params);
 
   const [kpiRows, unitsRows, settingsRow] = await Promise.all([
     fetchKpiAggregate(w.range),
@@ -758,6 +725,7 @@ async function getKpiAnalytics(params) {
 async function getCategorySalesAnalytics(params) {
   const w = resolveAnalyticsWindow(params);
   if (w.error) return { error: w.error };
+  await attachRegionFilter(w.range, params);
 
   const [rows, settingsRow] = await Promise.all([
     fetchCategorySales(w.range),

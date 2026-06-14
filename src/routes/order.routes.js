@@ -40,9 +40,13 @@ const statusBody = [
  *       **Payment** — only `COD` (Cash on Delivery) is supported. Field is optional and defaults to `COD`.
  *
  *       **Promo code** — optional. Pass the code string to apply a discount. Returns `400` with a descriptive message if invalid.
+ *
+ *       **Region** — send the **X-Region** header to stamp the order with the region it was placed in (used for regional analytics). Falls back to the user's own region, then the default region.
  *     tags: [Orders]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
  *     requestBody:
  *       required: true
  *       content:

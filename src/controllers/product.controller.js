@@ -1,5 +1,6 @@
 const productService = require('../services/product.service');
 const { success, error } = require('../utils/response');
+const { visibilityFromReq } = require('../utils/visibilityFromReq');
 
 async function createProduct(req, res, next) {
   try {
@@ -7,6 +8,7 @@ async function createProduct(req, res, next) {
     const data = productService.mapProduct(product);
     return success(res, data, 'Product created successfully', 201);
   } catch (err) {
+    if (err.code === 'REGION_NOT_FOUND') return error(res, err.message, 400);
     if (err.code === 'P2025') return error(res, 'Category not found', 404);
     next(err);
   }
@@ -20,6 +22,7 @@ async function updateProduct(req, res, next) {
     const data = productService.mapProduct(product);
     return success(res, data, 'Product updated successfully');
   } catch (err) {
+    if (err.code === 'REGION_NOT_FOUND') return error(res, err.message, 400);
     if (err.code === 'P2025') return error(res, 'Product or category not found', 404);
     next(err);
   }
@@ -48,7 +51,8 @@ async function getAllProducts(req, res, next) {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const result = await productService.getAllProducts(page, limit);
+    const visibility = await visibilityFromReq(req);
+    const result = await productService.getAllProducts(page, limit, null, visibility);
     return success(res, result.items, 'Products fetched successfully', 200, {
       pagination: {
         page: result.page,
@@ -67,7 +71,8 @@ async function getProductsByCategory(req, res, next) {
     const { categoryId } = req.params;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const result = await productService.getProductsByCategory(categoryId, page, limit);
+    const visibility = await visibilityFromReq(req);
+    const result = await productService.getProductsByCategory(categoryId, page, limit, visibility);
     return success(res, result.items, 'Products fetched successfully', 200, {
       pagination: {
         page: result.page,
@@ -84,7 +89,8 @@ async function getProductsByCategory(req, res, next) {
 async function getProductById(req, res, next) {
   try {
     const { id } = req.params;
-    const product = await productService.getProductById(id);
+    const visibility = await visibilityFromReq(req);
+    const product = await productService.getProductById(id, visibility);
     if (!product) return error(res, 'Product not found', 404);
     return success(res, product, 'Product fetched successfully');
   } catch (err) {

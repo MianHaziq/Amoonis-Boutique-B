@@ -5,6 +5,15 @@ const categoryController = require('../controllers/category.controller');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors, requireEitherBilingual } = require('../middleware/validate');
 const { publicLimiter } = require('../middleware/rateLimit');
+const { attachStaffIfPresent } = require('../middleware/optionalStaff');
+const { resolveRegion } = require('../middleware/region');
+
+// Shared region/draft validators for create + update.
+const regionStatusValidation = [
+  body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
+  body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
+  body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
+];
 
 /**
  * @swagger
@@ -76,6 +85,7 @@ const createValidation = [
   body('description').optional().trim(),
   body('description_ar').optional().trim(),
   body('image').optional().trim(),
+  ...regionStatusValidation,
 ];
 
 const updateValidation = [
@@ -85,6 +95,7 @@ const updateValidation = [
   body('description').optional().trim(),
   body('description_ar').optional().trim(),
   body('image').optional().trim(),
+  ...regionStatusValidation,
 ];
 
 const idParam = [param('id').isUUID().withMessage('Valid category ID required')];
@@ -176,8 +187,14 @@ router.delete(
  * /categories:
  *   get:
  *     summary: List all categories
- *     description: Returns all categories with product count. Public, rate-limited.
+ *     description: |
+ *       Returns categories with product count. Storefront sends **X-Region** and gets only
+ *       PUBLISHED categories in that region; staff get all and may use the **region** / **status** filters.
  *     tags: [Categories]
+ *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
+ *       - $ref: '#/components/parameters/RegionFilterQuery'
+ *       - $ref: '#/components/parameters/StatusFilterQuery'
  *     responses:
  *       200:
  *         description: List of categories
@@ -195,16 +212,17 @@ router.delete(
  *                   totalProducts: 5
  *               meta: { total: 1 }
  */
-router.get('/', publicLimiter, categoryController.getAllCategories);
+router.get('/', publicLimiter, attachStaffIfPresent, resolveRegion, categoryController.getAllCategories);
 
 /**
  * @swagger
  * /categories/{id}:
  *   get:
  *     summary: Get a category with its products
- *     description: Returns single category including all products in it. Public, rate-limited.
+ *     description: Returns single category including all products in it. Public, rate-limited. Storefront (X-Region) gets 404 for a draft or out-of-region category; staff see it regardless.
  *     tags: [Categories]
  *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
  *       - in: path
  *         name: id
  *         required: true
@@ -228,6 +246,8 @@ router.get('/', publicLimiter, categoryController.getAllCategories);
 router.get(
   '/:id',
   publicLimiter,
+  attachStaffIfPresent,
+  resolveRegion,
   idParam,
   handleValidationErrors,
   categoryController.getCategoryById

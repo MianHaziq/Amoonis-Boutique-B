@@ -31,7 +31,10 @@ const { authStrictLimiter, passwordResetLimiter, authLimiter } = require('../mid
  * /auth/signup:
  *   post:
  *     summary: Register a new user
+ *     description: Send the **X-Region** header so the new account is tagged with the region the user signed up in (defaults to the default region if omitted). Also applies to /auth/google and /auth/apple on first sign-in.
  *     tags: [Auth]
+ *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
  *     requestBody:
  *       required: true
  *       content:

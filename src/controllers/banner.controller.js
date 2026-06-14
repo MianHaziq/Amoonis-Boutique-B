@@ -1,12 +1,15 @@
 const bannerService = require('../services/banner.service');
 const { success, error } = require('../utils/response');
+const { visibilityFromReq } = require('../utils/visibilityFromReq');
 
 /**
- * GET /banners – List all banner images in display order (public, for landing page).
+ * GET /banners – List banner images in display order. Storefront gets PUBLISHED banners
+ * for its region; staff (admin/manager token) get all banners across all regions.
  */
 async function getBanners(req, res, next) {
   try {
-    const items = await bannerService.getBanners();
+    const visibility = await visibilityFromReq(req);
+    const items = await bannerService.getBanners(visibility);
     return success(res, items, 'Banners fetched successfully', 200, { total: items.length });
   } catch (err) {
     next(err);
@@ -15,10 +18,11 @@ async function getBanners(req, res, next) {
 
 /**
  * POST /banners – Add one or more banner images (admin). New images appended at end.
+ * Optional `status` (default DRAFT) and `regionIds` (default region) apply to all added.
  */
 async function addBanners(req, res, next) {
   try {
-    const { url, urls } = req.body;
+    const { url, urls, status, regionIds } = req.body;
     const toAdd = url != null ? [url] : Array.isArray(urls) ? urls : [];
     if (toAdd.length === 0) {
       return error(res, 'Provide either url (string) or urls (array of strings)', 400);
@@ -27,9 +31,26 @@ async function addBanners(req, res, next) {
     if (invalid.length > 0) {
       return error(res, 'Each URL must be a non-empty string', 400);
     }
-    const { count, items } = await bannerService.addBanners(toAdd);
+    const { count, items } = await bannerService.addBanners(toAdd, { status, regionIds });
     return success(res, items, count === 1 ? 'Banner added successfully' : `${count} banners added successfully`, 201, { count });
   } catch (err) {
+    if (err.code === 'REGION_NOT_FOUND') return error(res, err.message, 400);
+    next(err);
+  }
+}
+
+/**
+ * PUT /banners/:id – Update a banner's url / status / regions (admin).
+ */
+async function updateBanner(req, res, next) {
+  try {
+    const { id } = req.params;
+    const banner = await bannerService.updateBanner(id, req.body);
+    if (!banner) return error(res, 'Banner not found', 404);
+    return success(res, banner, 'Banner updated successfully', 200);
+  } catch (err) {
+    if (err.code === 'REGION_NOT_FOUND') return error(res, err.message, 400);
+    if (err.code === 'P2025') return error(res, 'Banner not found', 404);
     next(err);
   }
 }
@@ -73,6 +94,7 @@ async function deleteBanner(req, res, next) {
 module.exports = {
   getBanners,
   addBanners,
+  updateBanner,
   updateOrder,
   deleteBanner,
 };
