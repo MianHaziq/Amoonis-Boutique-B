@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "prisma migrate deploy && node server.js",
+    "worker": "node worker.js",
     "seed": "node prisma/seed.js",
     "dev": "nodemon server.js",
     "build": "prisma generate",
@@ -42,6 +43,7 @@
     "multer": "^2.0.2",
     "nodemailer": "^7.0.13",
     "pg": "^8.17.2",
+    "pg-boss": "^10.4.2",
     "prisma": "^7.3.0",
     "resend": "^6.9.3",
     "swagger-jsdoc": "^6.2.8",

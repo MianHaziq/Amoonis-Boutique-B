@@ -1,0 +1,79 @@
+/**
+ * Housekeeping jobs — keep tables from growing unbounded and purge sensitive,
+ * expired data. Each exports its own queue, so this file returns an ARRAY of job
+ * definitions (src/jobs/index.js accepts arrays).
+ */
+
+const prisma = require('../../config/db');
+const { QUEUES } = require('../queues');
+
+// Null out expired password-reset tokens so a leaked DB snapshot can't be used to
+// reset a password with a long-dead token, and the column stays clean.
+async function cleanupResetTokens() {
+  const res = await prisma.user.updateMany({
+    where: { resetTokenExpiry: { lt: new Date() } },
+    data: { resetToken: null, resetTokenExpiry: null },
+  });
+  if (res.count > 0) console.log(`[jobs] cleanup.reset-tokens cleared=${res.count}`);
+  return { cleared: res.count };
+}
+
+// Delete refresh tokens that are expired (unusable) or were revoked long enough ago
+// that they no longer need to exist for audit/rotation.
+async function cleanupRefreshTokens() {
+  const retainDays = Math.max(1, parseInt(process.env.REFRESH_TOKEN_RETAIN_DAYS || '7', 10));
+  const revokedCutoff = new Date(Date.now() - retainDays * 86_400_000);
+  const res = await prisma.refreshToken.deleteMany({
+    where: {
+      OR: [{ expiresAt: { lt: new Date() } }, { revokedAt: { lt: revokedCutoff } }],
+    },
+  });
+  if (res.count > 0) console.log(`[jobs] cleanup.refresh-tokens deleted=${res.count}`);
+  return { deleted: res.count };
+}
+
+// Clear cart items untouched for CART_ABANDON_DAYS so stale carts don't accumulate.
+async function cleanupAbandonedCarts() {
+  const days = Math.max(1, parseInt(process.env.CART_ABANDON_DAYS || '30', 10));
+  const cutoff = new Date(Date.now() - days * 86_400_000);
+  const res = await prisma.cartItem.deleteMany({ where: { updatedAt: { lt: cutoff } } });
+  if (res.count > 0) console.log(`[jobs] cart.abandoned items_deleted=${res.count}`);
+  return { deleted: res.count };
+}
+
+// Deactivate promo codes whose expiry has passed so they drop out of active lookups.
+async function archiveExpiredPromos() {
+  const res = await prisma.promoCode.updateMany({
+    where: { isActive: true, expiresAt: { lt: new Date() } },
+    data: { isActive: false },
+  });
+  if (res.count > 0) console.log(`[jobs] promo.archive-expired deactivated=${res.count}`);
+  return { deactivated: res.count };
+}
+
+module.exports = [
+  {
+    queue: QUEUES.CLEANUP_RESET_TOKENS,
+    handler: cleanupResetTokens,
+    cron: process.env.CLEANUP_RESET_TOKENS_CRON || '0 3 * * *', // daily 03:00 UTC
+    options: { retryLimit: 0 },
+  },
+  {
+    queue: QUEUES.CLEANUP_REFRESH_TOKENS,
+    handler: cleanupRefreshTokens,
+    cron: process.env.CLEANUP_REFRESH_TOKENS_CRON || '15 3 * * *', // daily 03:15 UTC
+    options: { retryLimit: 0 },
+  },
+  {
+    queue: QUEUES.CART_ABANDONED,
+    handler: cleanupAbandonedCarts,
+    cron: process.env.CART_ABANDONED_CRON || '30 3 * * *', // daily 03:30 UTC
+    options: { retryLimit: 0 },
+  },
+  {
+    queue: QUEUES.PROMO_ARCHIVE,
+    handler: archiveExpiredPromos,
+    cron: process.env.PROMO_ARCHIVE_CRON || '45 3 * * *', // daily 03:45 UTC
+    options: { retryLimit: 0 },
+  },
+];

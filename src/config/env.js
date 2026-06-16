@@ -53,6 +53,29 @@ const optional = [
   'MYFATOORAH_CURRENCY',
   'MYFATOORAH_TIMEOUT_MS',
   'MYFATOORAH_WEBHOOK_SECRET',
+  // Background jobs (pg-boss). The engine runs in-process by default and stores jobs
+  // in the existing Postgres (no Redis needed).
+  'JOBS_ENABLED', // 'false' fully disables the engine (enqueue runs inline)
+  'JOBS_IN_PROCESS', // 'false' = API doesn't run the worker (use `node worker.js`)
+  'PGBOSS_SCHEMA',
+  'PGBOSS_POOL_MAX',
+  'PRISMA_POOL_MAX',
+  'SMTP_SECURE',
+  // Scheduled-job tuning (sensible defaults baked in; override only if needed).
+  'PAYMENT_RECONCILE_CRON',
+  'PAYMENT_RECONCILE_MIN_AGE_MIN',
+  'PAYMENT_RECONCILE_MAX_AGE_HOURS',
+  'PAYMENT_RECONCILE_BATCH',
+  'ORDER_EXPIRE_CRON',
+  'ORDER_EXPIRE_HOURS',
+  'LOW_STOCK_CRON',
+  'LOW_STOCK_THRESHOLD',
+  'CLEANUP_RESET_TOKENS_CRON',
+  'CLEANUP_REFRESH_TOKENS_CRON',
+  'REFRESH_TOKEN_RETAIN_DAYS',
+  'CART_ABANDONED_CRON',
+  'CART_ABANDON_DAYS',
+  'PROMO_ARCHIVE_CRON',
 ];
 
 function validateEnv() {

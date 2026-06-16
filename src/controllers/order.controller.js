@@ -165,6 +165,47 @@ async function initiatePayment(req, res, next) {
   }
 }
 
+// POST /orders/:id/payment-session — native Apple Pay step 1.
+// Returns a MyFatoorah sessionId for the mobile app to drive the native Apple Pay sheet.
+async function createPaymentSession(req, res, next) {
+  try {
+    const result = await orderService.createPaymentSession(req.params.id, req.userId);
+    if (result.error) {
+      const status = result.error === 'Order not found' ? 404 : 400;
+      return error(res, result.error, status);
+    }
+    return success(res, { sessionId: result.sessionId, countryCode: result.countryCode }, 'Payment session created');
+  } catch (err) {
+    if (err.code === 'PAYMENT_NOT_CONFIGURED') return error(res, 'Online payment is not enabled', 503);
+    if (err.code === 'PAYMENT_GATEWAY_ERROR') return error(res, err.message, 502);
+    next(err);
+  }
+}
+
+// POST /orders/:id/pay-session — native Apple Pay step 2.
+// Body: { sessionId }. Executes the charge server-side and places the order on success.
+async function executeApplePay(req, res, next) {
+  try {
+    const { sessionId } = req.body || {};
+    const result = await orderService.executeOrderPayment(req.params.id, req.userId, sessionId);
+    if (result.error) {
+      const status = result.error === 'Order not found' ? 404 : 400;
+      return error(res, result.error, status);
+    }
+    // result.isPaid true → order placed (CONFIRMED/PAID). false → not paid (e.g. declined);
+    // app should show failure / retry. paymentUrl is present only for non-direct methods.
+    return success(
+      res,
+      { isPaid: result.isPaid, orderId: result.orderId, status: result.status, paymentUrl: result.paymentUrl || null },
+      result.isPaid ? 'Payment successful' : 'Payment not completed'
+    );
+  } catch (err) {
+    if (err.code === 'PAYMENT_NOT_CONFIGURED') return error(res, 'Online payment is not enabled', 503);
+    if (err.code === 'PAYMENT_GATEWAY_ERROR') return error(res, err.message, 502);
+    next(err);
+  }
+}
+
 // Small self-contained HTML the browser/webview lands on after payment. The mobile
 // app typically intercepts the callback URL itself; this is the human-visible fallback.
 function paymentResultPage(ok, orderId) {
@@ -247,6 +288,8 @@ module.exports = {
   getOrderStatusOnly,
   updateOrderStatus,
   initiatePayment,
+  createPaymentSession,
+  executeApplePay,
   paymentCallback,
   paymentError,
   paymentWebhook,

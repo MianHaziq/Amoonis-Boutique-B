@@ -45,7 +45,10 @@ const regionRoutes = require('./src/routes/region.routes');
 const analyticsRoutes = require('./src/routes/analytics.routes');
 const promoCodeRoutes = require('./src/routes/promoCode.routes');
 const addressRoutes = require('./src/routes/address.routes');
+const notificationRoutes = require('./src/routes/notification.routes');
+const jobsRoutes = require('./src/routes/jobs.routes');
 const errorHandler = require('./src/middleware/errorHandler');
+const { startJobs, stopJobs } = require('./src/jobs');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -142,6 +145,8 @@ v1Router.use('/regions', regionRoutes);
 v1Router.use('/admin/analytics', analyticsRoutes);
 v1Router.use('/promo-codes', promoCodeRoutes);
 v1Router.use('/user/addresses', addressRoutes);
+v1Router.use('/notifications', notificationRoutes);
+v1Router.use('/admin/jobs', jobsRoutes);
 
 app.use('/api/v1', v1Router);
 
@@ -162,6 +167,8 @@ app.use('/api/regions', regionRoutes);
 app.use('/api/admin/analytics', analyticsRoutes);
 app.use('/api/promo-codes', promoCodeRoutes);
 app.use('/api/user/addresses', addressRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/admin/jobs', jobsRoutes);
 
 app.use(errorHandler);
 
@@ -178,3 +185,41 @@ server.on('error', (err) => {
   console.error('[SERVER] Failed to start:', err);
   process.exit(1);
 });
+
+// Background-job engine (pg-boss). Runs in-process by default so a single Railway
+// service handles both API and jobs; set JOBS_IN_PROCESS=false to run the worker
+// separately via `node worker.js`. start() never throws — a failure degrades to
+// inline execution and the API keeps serving.
+if (process.env.JOBS_IN_PROCESS !== 'false') {
+  startJobs().catch((err) => console.error('[SERVER] job engine start error:', err.message));
+}
+
+// Graceful shutdown: stop accepting new connections, drain in-flight HTTP requests
+// and jobs, then close the DB. We await each step (rather than exiting immediately)
+// so a deploy's SIGTERM doesn't sever active requests/jobs. A hard-exit backstop
+// guarantees the process dies even if something hangs.
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[SERVER] ${signal} received — shutting down gracefully...`);
+
+  // Backstop: if draining hangs, force-exit after 15s regardless.
+  const backstop = setTimeout(() => {
+    console.error('[SERVER] graceful shutdown timed out — forcing exit');
+    process.exit(1);
+  }, 15000);
+  backstop.unref();
+
+  try {
+    await new Promise((resolve) => server.close(resolve)); // stop HTTP, drain in-flight
+    console.log('[SERVER] HTTP server closed');
+    await stopJobs(); // pg-boss graceful drain
+    await prisma.$disconnect();
+  } catch (err) {
+    console.error('[SERVER] shutdown error:', err.message);
+  }
+  clearTimeout(backstop);
+  process.exit(0);
+}
+['SIGTERM', 'SIGINT'].forEach((sig) => process.on(sig, () => shutdown(sig)));

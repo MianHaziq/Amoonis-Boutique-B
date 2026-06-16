@@ -17,8 +17,13 @@ function createPrismaClient() {
   console.log('[DB] DATABASE_URL is set, creating adapter...');
 
   try {
-    const adapter = new PrismaPg({ connectionString });
-    console.log('[DB] Adapter created successfully');
+    // Cap the pool explicitly. The pg driver adapter defaults to max=10 and ignores
+    // ?connection_limit= in the URL, so without this each process could hold 10 Prisma
+    // connections + pg-boss's pool against one Railway Postgres. Budget: PRISMA_POOL_MAX
+    // + PGBOSS_POOL_MAX per process must stay under the DB's max_connections.
+    const max = Math.max(2, parseInt(process.env.PRISMA_POOL_MAX || '8', 10));
+    const adapter = new PrismaPg({ connectionString, max });
+    console.log(`[DB] Adapter created successfully (pool max=${max})`);
 
     const client = new PrismaClient({
       adapter,

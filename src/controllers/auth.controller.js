@@ -4,10 +4,10 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const { OAuth2Client } = require('google-auth-library');
-const nodemailer = require('nodemailer');
 const { verifyAppleToken } = require('../services/appleAuth.service');
 const refreshTokenService = require('../services/refreshToken.service');
 const regionService = require('../services/region.service');
+const notify = require('../notifications/notify');
 const { invalidateCachedUser } = require('../middleware/auth');
 const { success, error } = require('../utils/response');
 
@@ -81,26 +81,6 @@ function authSessionUserFields(user) {
   if (user.isEmailVerified != null) base.isEmailVerified = user.isEmailVerified;
   return base;
 }
-
-// Helper: Send email
-const sendEmail = async (to, subject, html) => {
-  const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: process.env.SMTP_PORT,
-    secure: false,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  });
-
-  await transporter.sendMail({
-    from: process.env.FROM_EMAIL,
-    to,
-    subject,
-    html,
-  });
-};
 
 // Signup
 const signup = async (req, res, next) => {
@@ -590,7 +570,9 @@ const forgotPassword = async (req, res, next) => {
 
     const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
 
-    await sendEmail(
+    // Queue the email (retried, off the request path). enqueue() falls back to sending
+    // inline if the job engine is down, so the reset link still goes out either way.
+    notify.email(
       email,
       'Password Reset Request',
       `

@@ -1,6 +1,6 @@
 const prisma = require('../config/db');
 const cartService = require('../services/cart.service');
-const pushNotificationService = require('../services/pushNotification.service');
+const notify = require('../notifications/notify');
 const promoCodeService = require('../services/promoCode.service');
 const paymentService = require('../services/payment.service');
 const regionService = require('../services/region.service');
@@ -469,15 +469,22 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
   // Heavy product-include read runs outside the transaction to minimize lock hold time
   const order = await prisma.order.findUnique({
     where: { id: createdOrderId },
-    include: { items: { include: { product: { include: orderProductInclude } } } },
+    include: {
+      items: { include: { product: { include: orderProductInclude } } },
+      user: { select: { email: true } },
+    },
   });
 
   const payload = toOrderResponsePayload(order);
 
-  // Online payment isn't placed yet — defer the "order placed" push to payment success.
+  // Online payment isn't placed yet — defer the "order placed" notifications to payment
+  // success. Both push and email go through the job queue (retried, off the request path).
   if (!isOnlinePayment) {
-    pushNotificationService.notifyOrderPlaced(userId, createdOrderId).catch((err) => {
-      console.error('[push] notifyOrderPlaced:', err.message);
+    notify.orderPlaced(userId, createdOrderId);
+    notify.orderConfirmationEmail({
+      id: createdOrderId,
+      userEmail: order.user?.email,
+      totalAmount: payload.totalAmount,
     });
   }
 
@@ -832,6 +839,14 @@ async function updateOrderStatus(orderId, status) {
   try {
     const result = await prisma.$transaction(
       async (tx) => {
+        // Lock the order row for the life of the transaction. Without this, two
+        // concurrent confirms (payment webhook + admin "Confirm", or callback +
+        // reconcile job) both read inventoryDeducted=false under Read Committed and
+        // each deducts stock — silently halving inventory. FOR UPDATE forces the second
+        // caller to block, then re-read inventoryDeducted=true so needCommit is false.
+        const locked = await tx.$queryRaw`SELECT id FROM "Order" WHERE id::text = ${orderId} FOR UPDATE`;
+        if (!Array.isArray(locked) || locked.length === 0) return { notFound: true };
+
         const prev = await tx.order.findUnique({
           where: { id: orderId },
           select: { status: true, userId: true, inventoryDeducted: true },
@@ -888,9 +903,7 @@ async function updateOrderStatus(orderId, status) {
 
     if (result.notFound) return null;
     if (result.notify && result.notifyUserId && result.notifyStatus) {
-      pushNotificationService
-        .notifyOrderStatusChange(result.notifyUserId, orderId, result.notifyStatus)
-        .catch((err) => console.error('[push] notifyOrderStatusChange:', err.message));
+      notify.orderStatusChange(result.notifyUserId, orderId, result.notifyStatus);
     }
     return result.payload;
   } catch (err) {
@@ -959,6 +972,72 @@ async function initiateOrderPayment(orderId, userId) {
  *
  * Returns { isPaid, orderId, status, ...flags }.
  */
+/**
+ * Native Apple Pay — step 1. Create a MyFatoorah session for an order the caller owns.
+ * Returns { sessionId, countryCode } for the mobile app, or { error } on a guard failure.
+ * Same payable-state guards as initiateOrderPayment.
+ */
+async function createPaymentSession(orderId, userId) {
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, userId },
+    select: { id: true, status: true, paymentStatus: true, paymentMethod: true, totalAmount: true },
+  });
+  if (!order) return { error: 'Order not found' };
+  if (order.paymentMethod !== 'MYFATOORAH') return { error: 'This order is not set up for online payment' };
+  if (order.paymentStatus === 'PAID') return { error: 'Order is already paid' };
+  if (order.status !== 'AWAITING_PAYMENT') return { error: 'Order can no longer be paid' };
+  if (Number(order.totalAmount) <= 0) return { error: 'Order total must be greater than zero' };
+
+  const session = await paymentService.initiateSession();
+  return { sessionId: session.sessionId, countryCode: session.countryCode };
+}
+
+/**
+ * Native Apple Pay — step 2. The app sends back the SessionId (now carrying the Apple
+ * Pay token). We execute the charge server-side, then re-verify via GetPaymentStatus and
+ * place the order through the same idempotent confirmOrderPayment path used by the
+ * callback/webhook. Returns { isPaid, orderId, status, ... } or { error }.
+ */
+async function executeOrderPayment(orderId, userId, sessionId) {
+  if (!sessionId) return { error: 'sessionId is required' };
+
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, userId },
+    select: {
+      id: true,
+      status: true,
+      paymentStatus: true,
+      paymentMethod: true,
+      totalAmount: true,
+      shippingFullName: true,
+      shippingPhone: true,
+      user: { select: { email: true } },
+    },
+  });
+  if (!order) return { error: 'Order not found' };
+  if (order.paymentMethod !== 'MYFATOORAH') return { error: 'This order is not set up for online payment' };
+  if (order.paymentStatus === 'PAID') return { isPaid: true, orderId, status: 'Paid', alreadyProcessed: true };
+  if (order.status !== 'AWAITING_PAYMENT') return { error: 'Order can no longer be paid' };
+
+  const exec = await paymentService.executePayment({
+    sessionId,
+    order,
+    customer: { name: order.shippingFullName, email: order.user?.email, phone: order.shippingPhone },
+  });
+
+  if (exec.invoiceId) {
+    await prisma.order.update({ where: { id: orderId }, data: { paymentInvoiceId: exec.invoiceId } });
+  } else {
+    return { isPaid: false, orderId, status: 'Failed', reason: 'No invoice returned by gateway' };
+  }
+
+  // Authoritative server-side confirmation (idempotent; deducts stock + places order on Paid).
+  const result = await confirmOrderPayment(exec.invoiceId, 'InvoiceId');
+  // paymentUrl is set for non-direct methods (e.g. a card needing 3-D Secure); for Apple
+  // Pay it is normally null because the charge settles directly.
+  return { ...result, paymentUrl: exec.paymentUrl || null, isDirectPayment: exec.isDirectPayment };
+}
+
 async function confirmOrderPayment(key, keyType = 'PaymentId') {
   const result = await paymentService.verifyPayment(key, keyType);
   const orderId = result.orderId;
@@ -969,7 +1048,14 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
 
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { id: true, userId: true, totalAmount: true, status: true, paymentStatus: true },
+    select: {
+      id: true,
+      userId: true,
+      totalAmount: true,
+      status: true,
+      paymentStatus: true,
+      user: { select: { email: true } },
+    },
   });
   if (!order) return { isPaid: false, orderId, status: result.status, reason: 'Order not found' };
 
@@ -988,13 +1074,35 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
     return { isPaid: false, orderId, status: result.status };
   }
 
-  // Amount sanity check. NON-FATAL: in the hosted flow we fix the amount server-side at
-  // SendPayment, so a customer can't tamper with it; a difference here is almost always
-  // currency conversion (e.g. AED order shown as KWD on a cross-currency account). We must
-  // never leave a genuinely-paid customer with an unconfirmed order, so we log and proceed.
+  // Amount verification.
+  //
+  // UNDERPAYMENT (fatal): if the gateway settled in the SAME currency we charged in and
+  // the paid value is materially LESS than the order total, do NOT confirm — that means
+  // a partial/tampered payment and must never deliver goods. We withhold confirmation and
+  // mark the order for manual review. We only enforce this when the currencies match, so a
+  // legitimate cross-currency payer (different numeric value) is never wrongly stranded.
+  const chargedCurrency = process.env.MYFATOORAH_CURRENCY || 'AED';
+  const sameCurrency = !!result.currency && result.currency === chargedCurrency;
+  if (
+    result.invoiceValue != null &&
+    sameCurrency &&
+    result.invoiceValue + 0.01 < Number(order.totalAmount)
+  ) {
+    console.error(
+      `[payment] order ${orderId} UNDERPAID: gateway ${result.invoiceValue} ${result.currency} vs order total ${order.totalAmount} — withholding confirmation for manual review`
+    );
+    await prisma.order.updateMany({
+      where: { id: orderId, paymentStatus: { in: ['UNPAID', 'FAILED'] } },
+      data: { paymentStatus: 'FAILED' },
+    });
+    return { isPaid: false, orderId, status: result.status, reason: 'amount_mismatch_underpaid' };
+  }
+
+  // OVERPAYMENT or cross-currency difference (non-fatal): the customer is not short-changed,
+  // so we log and proceed rather than strand a genuinely-paid order.
   if (result.invoiceValue != null && Math.abs(result.invoiceValue - Number(order.totalAmount)) > 0.01) {
     console.warn(
-      `[payment] amount/currency note for order ${orderId}: gateway value ${result.invoiceValue} vs order total ${order.totalAmount} (likely currency conversion)`
+      `[payment] amount/currency note for order ${orderId}: gateway value ${result.invoiceValue} ${result.currency || ''} vs order total ${order.totalAmount}`
     );
   }
 
@@ -1021,9 +1129,12 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
       console.error(`[payment] order ${orderId} paid but cart clear failed: ${err.message}`)
     );
     await prisma.cart.updateMany({ where: { userId: order.userId }, data: { orderMessage: null } }).catch(() => {});
-    pushNotificationService.notifyOrderPlaced(order.userId, orderId).catch((err) =>
-      console.error('[push] notifyOrderPlaced:', err.message)
-    );
+    notify.orderPlaced(order.userId, orderId);
+    notify.orderConfirmationEmail({
+      id: orderId,
+      userEmail: order.user?.email,
+      totalAmount: Number(order.totalAmount),
+    });
   }
 
   // Auto-confirm (transactional stock deduction + status push). Payment is already
@@ -1049,5 +1160,7 @@ module.exports = {
   getOrderStatusOnly,
   updateOrderStatus,
   initiateOrderPayment,
+  createPaymentSession,
+  executeOrderPayment,
   confirmOrderPayment,
 };

@@ -175,11 +175,19 @@ async function verifyPayment(key, keyType = 'PaymentId') {
   // Prefer the successful transaction's id when present.
   const paidTxn = txns.find((t) => t.TransactionStatus === 'Succss' || t.TransactionStatus === 'Success') || txns[0] || null;
 
+  // The currency `invoiceValue` is expressed in. We requested DisplayCurrencyIso=CURRENCY
+  // at SendPayment, so on a same-currency account this equals our charge currency and
+  // invoiceValue is directly comparable to order.totalAmount. On a cross-currency account
+  // MyFatoorah may settle/return a different currency — surfaced here so the order layer
+  // can avoid an invalid numeric comparison.
+  const currency = data.DisplayCurrencyIso || paidTxn?.Currency || paidTxn?.PaidCurrency || null;
+
   return {
     isPaid: status === 'Paid',
     status,
     invoiceId: data.InvoiceId != null ? String(data.InvoiceId) : null,
     invoiceValue: data.InvoiceValue != null ? Number(data.InvoiceValue) : null,
+    currency,
     orderId: data.CustomerReference || null, // we set this to order.id at creation
     transactionId: paidTxn?.TransactionId != null ? String(paidTxn.TransactionId) : null,
   };
@@ -205,9 +213,59 @@ function verifyWebhookSignature(rawBody, signature) {
   }
 }
 
+/**
+ * Native Apple Pay (and other in-app SDK) flow — step 1.
+ * Create a payment session. The SessionId is handed to the mobile app, which attaches
+ * the Apple Pay token to it (via the MyFatoorah SDK's UpdateSession) and shows the
+ * native Apple Pay sheet. Our secret API key never leaves the server.
+ * Returns { sessionId, countryCode }.
+ */
+async function initiateSession() {
+  const data = await callMyFatoorah('/v2/InitiateSession', {}, { retries: 1 });
+  return {
+    sessionId: data.SessionId,
+    countryCode: data.CountryCode || null,
+  };
+}
+
+/**
+ * Native Apple Pay flow — step 2.
+ * After the app's SDK has attached the Apple Pay token to the session, the app sends
+ * the SessionId back here and we execute the charge server-side (so the key stays on
+ * the server). For Apple Pay this settles directly (no redirect). Returns
+ * { invoiceId, paymentUrl, isDirectPayment }. The caller then re-verifies with
+ * GetPaymentStatus before trusting it as paid.
+ */
+async function executePayment({ sessionId, order, customer = {} }) {
+  if (!sessionId) {
+    const err = new Error('sessionId is required to execute payment');
+    err.code = 'PAYMENT_GATEWAY_ERROR';
+    throw err;
+  }
+  const body = {
+    SessionId: sessionId,
+    InvoiceValue: Number(order.totalAmount),
+    DisplayCurrencyIso: CURRENCY,
+    CustomerName: customer.name || order.shippingFullName || 'Customer',
+    CustomerReference: order.id, // ties the payment back to our order
+    CallBackUrl: CALLBACK_URL,
+    ErrorUrl: ERROR_URL || CALLBACK_URL,
+    ...(customer.email ? { CustomerEmail: customer.email } : {}),
+  };
+  // Do NOT retry: ExecutePayment is not idempotent (a retry could double-charge).
+  const data = await callMyFatoorah('/v2/ExecutePayment', body);
+  return {
+    invoiceId: data.InvoiceId != null ? String(data.InvoiceId) : null,
+    paymentUrl: data.PaymentURL || null,
+    isDirectPayment: data.IsDirectPayment === true,
+  };
+}
+
 module.exports = {
   isConfigured,
   createPaymentInvoice,
   verifyPayment,
   verifyWebhookSignature,
+  initiateSession,
+  executePayment,
 };

@@ -1,8 +1,11 @@
 /**
- * Email service using Resend API.
- * Requires RESEND_API_KEY and FROM_EMAIL (e.g. "LKnight LMS <noreply@yourdomain.com>") in .env.
+ * Email service. Primary transport is Resend (RESEND_API_KEY + FROM_EMAIL); if Resend
+ * isn't configured it falls back to SMTP (SMTP_HOST/PORT/USER/PASS). Sends are normally
+ * driven through the `email.send` background job (retries on transient failure), so a
+ * caller should rarely await delivery directly on the request path.
  */
 let resend = null;
+let smtpTransport = null;
 
 function getResend() {
   if (resend) return resend;
@@ -12,6 +15,25 @@ function getResend() {
     const { Resend } = require('resend');
     resend = new Resend(apiKey);
     return resend;
+  } catch (e) {
+    return null;
+  }
+}
+
+function getSmtp() {
+  if (smtpTransport) return smtpTransport;
+  if (!process.env.SMTP_HOST) return null;
+  try {
+    const nodemailer = require('nodemailer');
+    smtpTransport = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: parseInt(process.env.SMTP_PORT || '587', 10),
+      secure: String(process.env.SMTP_SECURE || 'false') === 'true',
+      auth: process.env.SMTP_USER
+        ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+        : undefined,
+    });
+    return smtpTransport;
   } catch (e) {
     return null;
   }
@@ -44,6 +66,52 @@ async function sendEmail(to, subject, html) {
     return { sent: false, error };
   }
   return { sent: true, id: data?.id };
+}
+
+/**
+ * Transport-agnostic delivery used by the email background job: try Resend, then SMTP.
+ * THROWS on failure so the job can retry — never swallow here (unlike the fire-and-forget
+ * helpers below). Returns { sent: true, transport }.
+ */
+async function deliver(to, subject, html) {
+  if (!to) throw new Error('email recipient (to) is required');
+
+  const resendClient = getResend();
+  if (resendClient) {
+    const from = process.env.FROM_EMAIL || process.env.RESEND_FROM || 'Amoon Bloom <onboarding@resend.dev>';
+    const { data, error } = await resendClient.emails.send({ from, to: [to], subject, html });
+    if (!error) return { sent: true, transport: 'resend', id: data?.id };
+    // Resend failed — try SMTP before giving up.
+    console.warn('[EMAIL] Resend failed, trying SMTP:', error.message || error);
+  }
+
+  const smtp = getSmtp();
+  if (smtp) {
+    const from = process.env.FROM_EMAIL || process.env.SMTP_USER;
+    await smtp.sendMail({ from, to, subject, html });
+    return { sent: true, transport: 'smtp' };
+  }
+
+  throw new Error('No email transport configured (set RESEND_API_KEY or SMTP_HOST)');
+}
+
+/** Simple branded order-confirmation email body. */
+function renderOrderConfirmation(order) {
+  const total = order.totalAmount != null ? `${order.totalAmount} ${order.currency || 'AED'}` : '';
+  return `
+<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+<body style="margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f5f5f5;padding:24px;">
+  <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
+    <div style="background:#111;padding:24px 32px;text-align:center;">
+      <h1 style="margin:0;color:#fff;font-size:22px;">Amoon Bloom</h1>
+    </div>
+    <div style="padding:32px;color:#1f2937;">
+      <h2 style="margin:0 0 12px;font-size:18px;">Thank you for your order!</h2>
+      <p style="margin:0 0 8px;color:#4b5563;">Your order <strong>#${order.orderNumber}</strong> has been received${total ? ` for <strong>${total}</strong>` : ''}.</p>
+      <p style="margin:0;color:#4b5563;">We'll notify you as it progresses. You can track it any time in the app.</p>
+    </div>
+  </div>
+</body></html>`;
 }
 
 /**
@@ -106,5 +174,7 @@ async function sendTeamInvitationEmail({ to, inviterName, acceptUrl, isExistingU
 
 module.exports = {
   sendEmail,
+  deliver,
+  renderOrderConfirmation,
   sendTeamInvitationEmail,
 };

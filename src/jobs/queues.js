@@ -1,0 +1,39 @@
+/**
+ * Canonical queue names + their default job policies.
+ *
+ * One place for every background-job identifier so producers (controllers/services)
+ * and the worker can never drift on a string. Changing a name here is a breaking
+ * change — pg-boss tracks jobs by queue name, so renaming orphans in-flight jobs.
+ */
+
+const QUEUES = {
+  // On-demand (enqueued from request handlers)
+  EMAIL_SEND: 'email.send',
+  PUSH_SEND: 'push.send',
+  PUSH_BROADCAST: 'push.broadcast',
+
+  // Scheduled (cron — registered in src/jobs/index.js)
+  PAYMENT_RECONCILE: 'payment.reconcile',
+  ORDER_EXPIRE_UNPAID: 'order.expire-unpaid',
+  INVENTORY_LOW_STOCK: 'inventory.low-stock',
+  CLEANUP_RESET_TOKENS: 'cleanup.reset-tokens',
+  CLEANUP_REFRESH_TOKENS: 'cleanup.refresh-tokens',
+  CART_ABANDONED: 'cart.abandoned',
+  PROMO_ARCHIVE: 'promo.archive-expired',
+};
+
+// Every scheduled queue, so the UI/status endpoint can report on each even before
+// its first run, and so we can de-duplicate stale schedules on boot.
+const SCHEDULED_QUEUES = [
+  QUEUES.PAYMENT_RECONCILE,
+  QUEUES.ORDER_EXPIRE_UNPAID,
+  QUEUES.INVENTORY_LOW_STOCK,
+  QUEUES.CLEANUP_RESET_TOKENS,
+  QUEUES.CLEANUP_REFRESH_TOKENS,
+  QUEUES.CART_ABANDONED,
+  QUEUES.PROMO_ARCHIVE,
+];
+
+const ALL_QUEUES = Object.values(QUEUES);
+
+module.exports = { QUEUES, SCHEDULED_QUEUES, ALL_QUEUES };

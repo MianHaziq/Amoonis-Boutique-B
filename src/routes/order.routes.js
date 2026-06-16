@@ -213,6 +213,72 @@ router.post(
 
 /**
  * @swagger
+ * /orders/{id}/payment-session:
+ *   post:
+ *     summary: Create a MyFatoorah session for native Apple Pay (step 1)
+ *     description: |
+ *       Native Apple Pay flow for the mobile app. Returns a one-time `sessionId` the
+ *       MyFatoorah SDK uses to show the **native Apple Pay sheet**. The secret API key
+ *       stays on the server. Order must be `AWAITING_PAYMENT` / unpaid / MYFATOORAH.
+ *     tags: [Orders]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: "{ sessionId, countryCode }" }
+ */
+router.post(
+  '/:id/payment-session',
+  verifyToken,
+  authLimiter,
+  idParam,
+  handleValidationErrors,
+  orderController.createPaymentSession
+);
+
+/**
+ * @swagger
+ * /orders/{id}/pay-session:
+ *   post:
+ *     summary: Execute a native Apple Pay payment and place the order (step 2)
+ *     description: |
+ *       The app sends back the `sessionId` (now carrying the Apple Pay token). The server
+ *       executes the charge, re-verifies it with MyFatoorah, and on success marks the order
+ *       PAID/CONFIRMED (deducting stock). Idempotent. `isPaid: true` = order placed.
+ *     tags: [Orders]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [sessionId]
+ *             properties:
+ *               sessionId: { type: string }
+ *     responses:
+ *       200: { description: "{ isPaid, orderId, status, paymentUrl }" }
+ */
+router.post(
+  '/:id/pay-session',
+  verifyToken,
+  authLimiter,
+  idParam,
+  [body('sessionId').isString().trim().notEmpty().withMessage('sessionId is required')],
+  handleValidationErrors,
+  orderController.executeApplePay
+);
+
+/**
+ * @swagger
  * /orders/payment/callback:
  *   get:
  *     summary: MyFatoorah payment callback (success/return URL)
