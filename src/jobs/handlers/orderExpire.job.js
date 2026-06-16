@@ -60,6 +60,25 @@ async function handle() {
             WHERE p.id = sub."productId"`;
         }
 
+        // Release any promo reservation this order held. Usage is reserved at placement
+        // (holding the global + per-user caps through the unpaid window); an abandoned
+        // online order must return it so the code is usable again. Delete the usage row(s)
+        // for this order, then decrement each affected promo's counter (floored at 0).
+        const promoUsages = await tx.$queryRaw`
+          SELECT "promoCodeId", COUNT(*)::int AS n
+          FROM "PromoCodeUsage"
+          WHERE "orderId"::text = ${id}
+          GROUP BY "promoCodeId"`;
+        if (Array.isArray(promoUsages) && promoUsages.length > 0) {
+          await tx.$executeRaw`DELETE FROM "PromoCodeUsage" WHERE "orderId"::text = ${id}`;
+          for (const row of promoUsages) {
+            await tx.$executeRaw`
+              UPDATE "PromoCode"
+              SET "usageCount" = GREATEST(0, "usageCount" - ${row.n}), "updatedAt" = NOW()
+              WHERE id::text = ${row.promoCodeId}`;
+          }
+        }
+
         await tx.order.update({
           where: { id },
           data: { status: 'CANCELLED', inventoryDeducted: false },

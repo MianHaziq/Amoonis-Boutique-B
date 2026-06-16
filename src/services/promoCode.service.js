@@ -26,6 +26,22 @@ function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
+// Fallback account-age window (days) for newUsersOnly codes whose newUserWithinDays is null.
+const NEW_USER_DEFAULT_WINDOW_DAYS = 30;
+
+/**
+ * Account-age eligibility for a `newUsersOnly` promo: the user qualifies when their account
+ * was created within `withinDays` days of now. Returns false for a missing createdAt so an
+ * unknown user is never treated as "new".
+ */
+function isWithinNewUserWindow(userCreatedAt, withinDays) {
+  if (!userCreatedAt) return false;
+  const days = withinDays != null ? Number(withinDays) : NEW_USER_DEFAULT_WINDOW_DAYS;
+  if (!Number.isFinite(days) || days <= 0) return false;
+  const ageDays = (Date.now() - new Date(userCreatedAt).getTime()) / 86_400_000;
+  return ageDays <= days;
+}
+
 function mapPromoCode(promo, { includeInternal = true } = {}) {
   if (!promo) return null;
   const {
@@ -154,6 +170,12 @@ function buildPromoCodeData(data, { isUpdate = false } = {}) {
     out.usageLimitPerUser = data.usageLimitPerUser === null ? null : Math.floor(Number(data.usageLimitPerUser));
   }
 
+  if (data.newUsersOnly !== undefined) out.newUsersOnly = Boolean(data.newUsersOnly);
+  if (data.newUserWithinDays !== undefined) {
+    out.newUserWithinDays =
+      data.newUserWithinDays === null ? null : Math.floor(Number(data.newUserWithinDays));
+  }
+
   if (data.isActive !== undefined) out.isActive = Boolean(data.isActive);
 
   if (!isUpdate) {
@@ -187,6 +209,20 @@ function buildPromoCodeData(data, { isUpdate = false } = {}) {
     Number(out.maxOrderAmount) < Number(out.minOrderAmount)
   ) {
     throw Object.assign(new Error('maxOrderAmount must be >= minOrderAmount'), { code: 'PROMO_INVALID_INPUT' });
+  }
+
+  if (out.newUserWithinDays != null && (!Number.isFinite(out.newUserWithinDays) || out.newUserWithinDays < 1)) {
+    throw Object.assign(new Error('newUserWithinDays must be a positive integer (days)'), {
+      code: 'PROMO_INVALID_INPUT',
+    });
+  }
+  // A new-users-only code needs an explicit window so the account-age check is unambiguous.
+  // On create require it; on update only enforce when the flag is being turned on without a
+  // window and none exists yet (the controller layer passes the merged view when needed).
+  if (out.newUsersOnly === true && !isUpdate && out.newUserWithinDays == null) {
+    throw Object.assign(new Error('newUserWithinDays is required when newUsersOnly is true'), {
+      code: 'PROMO_INVALID_INPUT',
+    });
   }
 
   return out;
@@ -387,22 +423,36 @@ async function listAvailablePromoCodes({ page = 1, limit = 20, userId = null } =
   );
 
   let perUserCounts = new Map();
+  let userCreatedAt = null;
   if (userId) {
-    const rows = await prisma.promoCodeUsage.groupBy({
-      by: ['promoCodeId'],
-      where: { userId, promoCodeId: { in: visible.map((v) => v.id) } },
-      _count: { _all: true },
-    });
+    const [rows, user] = await Promise.all([
+      prisma.promoCodeUsage.groupBy({
+        by: ['promoCodeId'],
+        where: { userId, promoCodeId: { in: visible.map((v) => v.id) } },
+        _count: { _all: true },
+      }),
+      prisma.user.findUnique({ where: { id: userId }, select: { createdAt: true } }),
+    ]);
     perUserCounts = new Map(rows.map((r) => [r.promoCodeId, r._count._all]));
+    userCreatedAt = user?.createdAt ?? null;
   }
 
-  // Filter out codes the user has already hit their per-user cap on
+  // Filter out codes the user has hit their per-user cap on, or new-users-only codes the
+  // user's account is too old to qualify for.
   const filtered = visible.filter((p) => {
-    if (p.usageLimitPerUser == null) return true;
-    const used = perUserCounts.get(p.id) ?? 0;
-    return used < p.usageLimitPerUser;
+    if (p.usageLimitPerUser != null) {
+      const used = perUserCounts.get(p.id) ?? 0;
+      if (used >= p.usageLimitPerUser) return false;
+    }
+    if (p.newUsersOnly && !isWithinNewUserWindow(userCreatedAt, p.newUserWithinDays)) {
+      return false;
+    }
+    return true;
   });
 
+  // NOTE: `total` is the pre-filter count (used/expired-for-this-user codes are removed in
+  // JS after paging), so it can slightly overstate the available set. Fully precise
+  // cross-page totals would require column-to-column SQL Prisma can't express.
   return {
     items: filtered.map((p) => mapPromoCode(p, { includeInternal: false })),
     total,
@@ -419,56 +469,18 @@ async function getUsageCountForUser(promoCodeId, userId) {
 }
 
 /**
- * Compute the discount for a given promo code against a cart-like payload without writing
- * anything. Throws a tagged error when the code is not usable.
+ * Pure discount calculation against a cart-like payload. Does NO eligibility/window/usage
+ * checks — those belong to validateAndCalculate. Shared by the preview endpoint and the
+ * order-commit transaction so the discount is computed identically in both places
+ * (recomputed against live prices at commit, never trusting a stale preview amount).
  *
- * @param {string} code     The raw user-entered code
- * @param {string} userId   Authenticated user id
+ * @param {object} promo  A promo row with discountType, discountValue, maxDiscountAmount,
+ *                        appliesTo, minOrderAmount, maxOrderAmount, and either
+ *                        products:[{productId}] / categories:[{categoryId}].
  * @param {Array<{productId:string, quantity:number, price:number, categoryId?:string|null}>} items
+ * @returns {{cartSubtotal:number, eligibleSubtotal:number, discountAmount:number, total:number, eligibleProductIds:string[]}}
  */
-async function validateAndCalculate(code, userId, items) {
-  const normalized = normalizeCode(code);
-  if (!normalized) {
-    throw Object.assign(new Error('Promo code is required'), { code: 'PROMO_INVALID_INPUT' });
-  }
-
-  const promo = await prisma.promoCode.findUnique({
-    where: { code: normalized },
-    include: {
-      products: { select: { productId: true } },
-      categories: { select: { categoryId: true } },
-    },
-  });
-  if (!promo) {
-    throw Object.assign(new Error('Promo code not found'), { code: 'PROMO_NOT_FOUND' });
-  }
-  if (!promo.isActive) {
-    throw Object.assign(new Error('This promo code is not active'), { code: 'PROMO_INACTIVE' });
-  }
-
-  const now = new Date();
-  if (promo.startsAt && promo.startsAt > now) {
-    throw Object.assign(new Error('This promo code is not yet available'), { code: 'PROMO_NOT_STARTED' });
-  }
-  if (promo.expiresAt && promo.expiresAt <= now) {
-    throw Object.assign(new Error('This promo code has expired'), { code: 'PROMO_EXPIRED' });
-  }
-
-  if (promo.usageLimit != null && promo.usageCount >= promo.usageLimit) {
-    throw Object.assign(new Error('This promo code has reached its usage limit'), {
-      code: 'PROMO_LIMIT_REACHED',
-    });
-  }
-
-  if (promo.usageLimitPerUser != null && userId) {
-    const mine = await getUsageCountForUser(promo.id, userId);
-    if (mine >= promo.usageLimitPerUser) {
-      throw Object.assign(new Error('You have already used this promo code the maximum number of times'), {
-        code: 'PROMO_USER_LIMIT_REACHED',
-      });
-    }
-  }
-
+function computeDiscount(promo, items) {
   const list = Array.isArray(items) ? items : [];
   if (list.length === 0) {
     throw Object.assign(new Error('Cart is empty'), { code: 'PROMO_EMPTY_CART' });
@@ -494,10 +506,10 @@ async function validateAndCalculate(code, userId, items) {
   // Eligible items (those the discount applies to)
   let eligibleItems = list;
   if (promo.appliesTo === 'SPECIFIC_PRODUCTS') {
-    const allowed = new Set(promo.products.map((p) => p.productId));
+    const allowed = new Set((promo.products || []).map((p) => p.productId));
     eligibleItems = list.filter((it) => allowed.has(it.productId));
   } else if (promo.appliesTo === 'SPECIFIC_CATEGORIES') {
-    const allowed = new Set(promo.categories.map((c) => c.categoryId));
+    const allowed = new Set((promo.categories || []).map((c) => c.categoryId));
     eligibleItems = list.filter((it) => it.categoryId && allowed.has(it.categoryId));
   }
 
@@ -530,6 +542,91 @@ async function validateAndCalculate(code, userId, items) {
   const total = round2(Math.max(0, cartSubtotal - discount));
 
   return {
+    cartSubtotal: round2(cartSubtotal),
+    eligibleSubtotal: round2(eligibleSubtotal),
+    discountAmount: discount,
+    total,
+    eligibleProductIds: eligibleItems.map((i) => i.productId),
+  };
+}
+
+/**
+ * Assert non-amount eligibility for a promo: active, within window, global + per-user caps,
+ * and the new-users-only (account-age) rule. Throws a tagged error on the first failure.
+ * Reused by validateAndCalculate (preview) and the order-commit transaction. Pass the
+ * already-counted per-user usage and the user's createdAt to avoid extra round-trips.
+ */
+function assertPromoUsable(promo, { now = new Date(), userPriorUsage = 0, userCreatedAt = null } = {}) {
+  if (!promo.isActive) {
+    throw Object.assign(new Error('This promo code is not active'), { code: 'PROMO_INACTIVE' });
+  }
+  if (promo.startsAt && promo.startsAt > now) {
+    throw Object.assign(new Error('This promo code is not yet available'), { code: 'PROMO_NOT_STARTED' });
+  }
+  if (promo.expiresAt && promo.expiresAt <= now) {
+    throw Object.assign(new Error('This promo code has expired'), { code: 'PROMO_EXPIRED' });
+  }
+  if (promo.usageLimit != null && promo.usageCount != null && promo.usageCount >= promo.usageLimit) {
+    throw Object.assign(new Error('This promo code has reached its usage limit'), {
+      code: 'PROMO_LIMIT_REACHED',
+    });
+  }
+  if (promo.usageLimitPerUser != null && userPriorUsage >= promo.usageLimitPerUser) {
+    throw Object.assign(new Error('You have already used this promo code the maximum number of times'), {
+      code: 'PROMO_USER_LIMIT_REACHED',
+    });
+  }
+  if (promo.newUsersOnly && !isWithinNewUserWindow(userCreatedAt, promo.newUserWithinDays)) {
+    throw Object.assign(new Error('This promo code is only available to new customers'), {
+      code: 'PROMO_NEW_USERS_ONLY',
+    });
+  }
+}
+
+/**
+ * Compute the discount for a given promo code against a cart-like payload without writing
+ * anything. Throws a tagged error when the code is not usable.
+ *
+ * @param {string} code     The raw user-entered code
+ * @param {string} userId   Authenticated user id
+ * @param {Array<{productId:string, quantity:number, price:number, categoryId?:string|null}>} items
+ */
+async function validateAndCalculate(code, userId, items) {
+  const normalized = normalizeCode(code);
+  if (!normalized) {
+    throw Object.assign(new Error('Promo code is required'), { code: 'PROMO_INVALID_INPUT' });
+  }
+
+  const promo = await prisma.promoCode.findUnique({
+    where: { code: normalized },
+    include: {
+      products: { select: { productId: true } },
+      categories: { select: { categoryId: true } },
+    },
+  });
+  if (!promo) {
+    throw Object.assign(new Error('Promo code not found'), { code: 'PROMO_NOT_FOUND' });
+  }
+
+  // Per-user usage + account age are only meaningful for an authenticated user; the route
+  // requires a JWT so userId is always present here, but stay defensive.
+  let userPriorUsage = 0;
+  let userCreatedAt = null;
+  if (userId) {
+    if (promo.usageLimitPerUser != null) {
+      userPriorUsage = await getUsageCountForUser(promo.id, userId);
+    }
+    if (promo.newUsersOnly) {
+      const u = await prisma.user.findUnique({ where: { id: userId }, select: { createdAt: true } });
+      userCreatedAt = u?.createdAt ?? null;
+    }
+  }
+
+  assertPromoUsable(promo, { userPriorUsage, userCreatedAt });
+
+  const calc = computeDiscount(promo, items);
+
+  return {
     promoCode: {
       id: promo.id,
       code: promo.code,
@@ -537,12 +634,14 @@ async function validateAndCalculate(code, userId, items) {
       discountType: promo.discountType,
       discountValue: decimalToNumber(promo.discountValue),
       appliesTo: promo.appliesTo,
+      newUsersOnly: promo.newUsersOnly,
+      newUserWithinDays: promo.newUserWithinDays,
     },
-    cartSubtotal: round2(cartSubtotal),
-    eligibleSubtotal: round2(eligibleSubtotal),
-    discountAmount: discount,
-    total,
-    eligibleProductIds: eligibleItems.map((i) => i.productId),
+    cartSubtotal: calc.cartSubtotal,
+    eligibleSubtotal: calc.eligibleSubtotal,
+    discountAmount: calc.discountAmount,
+    total: calc.total,
+    eligibleProductIds: calc.eligibleProductIds,
   };
 }
 
@@ -573,5 +672,8 @@ module.exports = {
   listPromoCodes,
   listAvailablePromoCodes,
   validateAndCalculate,
+  computeDiscount,
+  assertPromoUsable,
+  isWithinNewUserWindow,
   recordUsage,
 };
