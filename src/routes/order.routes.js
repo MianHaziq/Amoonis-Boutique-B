@@ -168,6 +168,58 @@ router.post(
 
 /**
  * @swagger
+ * /orders/buy-now:
+ *   post:
+ *     summary: Buy a single product directly (Buy Now — does NOT use the cart)
+ *     description: |
+ *       Places an order for ONE product without touching the user's cart. Use this for the
+ *       "Buy with Apple Pay" / "Buy Now" button on a product page. Same options as checkout
+ *       (paymentMethod, address, promoCode). For `MYFATOORAH` the order is `AWAITING_PAYMENT`
+ *       — then call `POST /orders/{id}/payment-session` + `POST /orders/{id}/pay-session` (native
+ *       Apple Pay) or `POST /orders/{id}/pay` (hosted page). The cart is left exactly as it was.
+ *     tags: [Orders]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [productId]
+ *             properties:
+ *               productId: { type: string, format: uuid }
+ *               quantity: { type: integer, minimum: 1, default: 1 }
+ *               paymentMethod: { type: string, enum: [COD, MYFATOORAH] }
+ *               addressId: { type: string, format: uuid }
+ *               shippingAddress: { type: object }
+ *               promoCode: { type: string }
+ *               message: { type: string }
+ *     responses:
+ *       201: { description: Order placed (or AWAITING_PAYMENT for online) }
+ *       400: { description: Validation / availability error }
+ */
+const buyNowBody = [
+  body('productId').isUUID().withMessage('Valid productId is required'),
+  body('quantity').optional().isInt({ min: 1 }).withMessage('quantity must be a positive integer'),
+  body('paymentMethod').optional().isIn(['COD', 'MYFATOORAH']).withMessage('paymentMethod must be COD or MYFATOORAH'),
+  body('addressId').optional().isUUID().withMessage('addressId must be a valid UUID'),
+  body('shippingAddress').optional().isObject().withMessage('shippingAddress must be an object'),
+  body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
+  body('message').optional().trim(),
+];
+router.post(
+  '/buy-now',
+  verifyToken,
+  authLimiter,
+  buyNowBody,
+  handleValidationErrors,
+  orderController.buyNow
+);
+
+/**
+ * @swagger
  * /orders/{id}/pay:
  *   post:
  *     summary: Start online payment (MyFatoorah — Apple Pay / cards)

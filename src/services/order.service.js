@@ -137,8 +137,34 @@ function trimOrNullStr(v) {
   return s ? s : null;
 }
 
-async function createOrder(userId, checkoutInput = {}, opts = {}) {
-  const { addressId, shippingAddress, paymentMethod = 'COD', promoCode } = checkoutInput;
+/**
+ * Shared order-creation core used by BOTH cart checkout and "Buy Now". It takes a
+ * normalized list of line items so the pricing / promo / region / address / stock /
+ * transaction logic lives in exactly one place (no drift between the two flows).
+ *
+ * params:
+ *   lineItems    [{ productId, quantity, message? }]  — what to order
+ *   orderMessage string|null                          — order-level note
+ *   addressId | shippingAddress                       — where to ship
+ *   paymentMethod 'COD' | 'MYFATOORAH'
+ *   promoCode    string|null
+ *   clearCart    boolean  — clear the user's cart when the order is placed (true for cart
+ *                           checkout, false for Buy Now so the cart is left untouched)
+ */
+async function createOrderCore(userId, params = {}, opts = {}) {
+  const {
+    lineItems,
+    orderMessage = null,
+    addressId,
+    shippingAddress,
+    paymentMethod = 'COD',
+    promoCode,
+    clearCart = true,
+  } = params;
+
+  if (!Array.isArray(lineItems) || lineItems.length === 0) {
+    return { order: null, error: 'No items to order' };
+  }
 
   if (!VALID_PAYMENT_METHODS.includes(paymentMethod)) {
     return { order: null, error: `Invalid paymentMethod. Supported: ${VALID_PAYMENT_METHODS.join(', ')}` };
@@ -174,15 +200,11 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
     orderRegionId = def?.id || null;
   }
 
-  // Resolve address and fetch cart in parallel when addressId is provided
+  // Resolve the shipping address: a saved addressId or an inline shippingAddress.
   let resolvedAddress = null;
-  let cartData;
 
   if (addressId) {
-    const [saved, cart] = await Promise.all([
-      prisma.address.findFirst({ where: { id: addressId, userId } }),
-      cartService.getCart(userId),
-    ]);
+    const saved = await prisma.address.findFirst({ where: { id: addressId, userId } });
     if (!saved) return { order: null, error: 'Address not found' };
     resolvedAddress = {
       addressId: saved.id,
@@ -195,7 +217,6 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
       postalCode: saved.postalCode ?? null,
       country: saved.country ?? null,
     };
-    cartData = cart;
   } else if (shippingAddress) {
     const addrError = validateShippingAddress(shippingAddress);
     if (addrError) return { order: null, error: addrError };
@@ -210,16 +231,11 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
       postalCode: trimOrNullStr(shippingAddress.postalCode),
       country: trimOrNullStr(shippingAddress.country),
     };
-    cartData = await cartService.getCart(userId);
   } else {
     return { order: null, error: 'A shipping address is required. Provide addressId or shippingAddress.' };
   }
 
-  if (!cartData.items || cartData.items.length === 0) {
-    return { order: null, error: 'Cart is empty' };
-  }
-
-  const productIds = cartData.items.map((it) => it.productId);
+  const productIds = lineItems.map((it) => it.productId);
   const productRows = await prisma.product.findMany({
     where: { id: { in: productIds } },
     select: {
@@ -238,10 +254,10 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
   // mobile app can show a friendly message instead of completing checkout for unavailable
   // items. Final atomic enforcement still happens at PENDING→CONFIRMED.
   const outOfStock = [];
-  for (const it of cartData.items) {
+  for (const it of lineItems) {
     const p = productById.get(it.productId);
     if (!p) {
-      return { order: null, error: 'A product in your cart is no longer available' };
+      return { order: null, error: 'A product in your order is no longer available' };
     }
     if (p.quantity < it.quantity) {
       outOfStock.push({
@@ -268,7 +284,7 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
   }
   const livePriceById = new Map(productRows.map((p) => [p.id, livePrice(p)]));
 
-  const promoItems = cartData.items.map((item) => ({
+  const promoItems = lineItems.map((item) => ({
     productId: item.productId,
     quantity: item.quantity,
     price: livePriceById.get(item.productId) ?? 0,
@@ -311,7 +327,7 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
     // Recompute line totals and order subtotal from live prices.
     let txSubtotal = 0;
     const itemPriceById = new Map();
-    for (const item of cartData.items) {
+    for (const item of lineItems) {
       const livePriceVal = txPriceById.get(item.productId) ?? livePriceById.get(item.productId) ?? 0;
       itemPriceById.set(item.productId, livePriceVal);
       txSubtotal += livePriceVal * item.quantity;
@@ -330,7 +346,8 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
     const orderRecord = await tx.order.create({
       data: {
         userId,
-        orderMessage: cartData.orderMessage ?? null,
+        orderMessage: orderMessage ?? null,
+        clearCartOnPayment: clearCart,
         totalAmount: finalTotal,
         discountAmount: finalDiscount,
         appliedPromoCode: promoResult?.promoCode.code ?? null,
@@ -433,7 +450,7 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
     // server-trusted total above.
     await Promise.all([
       tx.orderItem.createMany({
-        data: cartData.items.map((item) => ({
+        data: lineItems.map((item) => ({
           orderId: orderRecord.id,
           productId: item.productId,
           productTitle: productById.get(item.productId)?.title ?? null,
@@ -443,14 +460,15 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
           price: itemPriceById.get(item.productId) ?? 0,
         })),
       }),
-      // Keep the cart for online payment until it's actually paid (so an abandoned /
-      // failed payment doesn't lose the customer's items). Cleared in confirmOrderPayment.
-      ...(isOnlinePayment
-        ? []
-        : [
+      // Clear the cart only for a cart checkout (clearCart) paid up front (COD). Online
+      // orders keep the cart until paid (cleared in confirmOrderPayment, also gated on
+      // clearCartOnPayment). Buy Now (clearCart=false) never touches the cart.
+      ...(!isOnlinePayment && clearCart
+        ? [
             tx.cartItem.deleteMany({ where: { cart: { userId } } }),
             tx.cart.updateMany({ where: { userId }, data: { orderMessage: null } }),
-          ]),
+          ]
+        : []),
     ]);
   }, { maxWait: 5000, timeout: 15000 });
   } catch (err) {
@@ -489,6 +507,74 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
   }
 
   return { order: payload, error: null };
+}
+
+/**
+ * Cart checkout: turn the user's whole cart into one order (clears the cart on placement).
+ * Thin wrapper over createOrderCore.
+ */
+async function createOrder(userId, checkoutInput = {}, opts = {}) {
+  const { addressId, shippingAddress, paymentMethod = 'COD', promoCode } = checkoutInput;
+
+  const cartData = await cartService.getCart(userId);
+  if (!cartData.items || cartData.items.length === 0) {
+    return { order: null, error: 'Cart is empty' };
+  }
+
+  const lineItems = cartData.items.map((it) => ({
+    productId: it.productId,
+    quantity: it.quantity,
+    message: it.message ?? null,
+  }));
+
+  return createOrderCore(
+    userId,
+    { lineItems, orderMessage: cartData.orderMessage ?? null, addressId, shippingAddress, paymentMethod, promoCode, clearCart: true },
+    opts
+  );
+}
+
+/**
+ * Buy Now: order a SINGLE product directly from the product page WITHOUT touching the cart.
+ * The product must exist and be PUBLISHED (the client sends an arbitrary productId, so we
+ * never let a draft/archived item be bought directly). Everything else — pricing, promo,
+ * region, address, stock, the AWAITING_PAYMENT/COD split — is identical to cart checkout
+ * because it runs through the same createOrderCore.
+ */
+async function buyNow(userId, input = {}, opts = {}) {
+  const { productId, quantity = 1, addressId, shippingAddress, paymentMethod = 'COD', promoCode, message } = input;
+
+  if (!productId || typeof productId !== 'string') {
+    return { order: null, error: 'productId is required' };
+  }
+  const qty = Number(quantity);
+  if (!Number.isInteger(qty) || qty < 1) {
+    return { order: null, error: 'quantity must be a positive integer' };
+  }
+
+  // Guard: only a published product can be bought directly (cart items were already visible;
+  // a Buy Now productId comes straight from the client and must be validated).
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+    select: { id: true, status: true },
+  });
+  if (!product || product.status !== 'PUBLISHED') {
+    return { order: null, error: 'Product is not available for purchase' };
+  }
+
+  return createOrderCore(
+    userId,
+    {
+      lineItems: [{ productId, quantity: qty, message: message ?? null }],
+      orderMessage: null,
+      addressId,
+      shippingAddress,
+      paymentMethod,
+      promoCode,
+      clearCart: false, // never touch the user's cart for a direct purchase
+    },
+    opts
+  );
 }
 
 async function getOrderById(orderId, userId = null) {
@@ -1054,6 +1140,7 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
       totalAmount: true,
       status: true,
       paymentStatus: true,
+      clearCartOnPayment: true,
       user: { select: { email: true } },
     },
   });
@@ -1124,11 +1211,14 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
   }
 
   // Now placed: clear the cart (kept until now) and fire the "order placed" push.
+  // Buy Now orders (clearCartOnPayment=false) must NOT wipe the user's real cart.
   if (order.status === 'AWAITING_PAYMENT') {
-    await prisma.cartItem.deleteMany({ where: { cart: { userId: order.userId } } }).catch((err) =>
-      console.error(`[payment] order ${orderId} paid but cart clear failed: ${err.message}`)
-    );
-    await prisma.cart.updateMany({ where: { userId: order.userId }, data: { orderMessage: null } }).catch(() => {});
+    if (order.clearCartOnPayment !== false) {
+      await prisma.cartItem.deleteMany({ where: { cart: { userId: order.userId } } }).catch((err) =>
+        console.error(`[payment] order ${orderId} paid but cart clear failed: ${err.message}`)
+      );
+      await prisma.cart.updateMany({ where: { userId: order.userId }, data: { orderMessage: null } }).catch(() => {});
+    }
     notify.orderPlaced(order.userId, orderId);
     notify.orderConfirmationEmail({
       id: orderId,
@@ -1153,6 +1243,7 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
 
 module.exports = {
   createOrder,
+  buyNow,
   getOrderById,
   getAllOrdersAdmin,
   getMyOrderHistory,

@@ -65,7 +65,7 @@ router.get('/', publicLimiter, attachStaffIfPresent, regionController.listRegion
  * /regions:
  *   post:
  *     summary: Create a region (admin/manager)
- *     description: Add a new storefront region at runtime — no migration needed. Requires the SETTINGS manager permission (admins bypass).
+ *     description: Add a new storefront region at runtime — no migration needed. Requires the REGIONS manager permission (admins bypass).
  *     tags: [Regions]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -90,7 +90,7 @@ router.get('/', publicLimiter, attachStaffIfPresent, regionController.listRegion
 router.post(
   '/',
   verifyAdminOrManager,
-  requireManagerPermission('SETTINGS'),
+  requireManagerPermission('REGIONS'),
   createValidation,
   handleValidationErrors,
   regionController.createRegion
@@ -131,7 +131,7 @@ router.post(
 router.put(
   '/:id',
   verifyAdminOrManager,
-  requireManagerPermission('SETTINGS'),
+  requireManagerPermission('REGIONS'),
   updateValidation,
   handleValidationErrors,
   regionController.updateRegion
@@ -158,7 +158,7 @@ router.put(
 router.delete(
   '/:id',
   verifyAdminOrManager,
-  requireManagerPermission('SETTINGS'),
+  requireManagerPermission('REGIONS'),
   idParam,
   handleValidationErrors,
   regionController.deleteRegion
