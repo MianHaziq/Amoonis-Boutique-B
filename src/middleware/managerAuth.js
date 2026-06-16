@@ -100,7 +100,7 @@ const attachOrderStaffAccess = async (req, res, next) => {
     if (user.role === 'ADMIN') {
       req.isAdmin = true;
     }
-    if (user.role === 'MANAGER' && user.managerPermissions.includes('ORDERS')) {
+    if (user.role === 'MANAGER' && (user.managerPermissions || []).includes('ORDERS')) {
       req.canViewAllOrders = true;
     }
 

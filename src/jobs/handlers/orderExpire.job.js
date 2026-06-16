@@ -1,12 +1,13 @@
 /**
  * order.expire-unpaid — cancel online orders that were never paid.
  *
- * An online (MyFatoorah) order sits in AWAITING_PAYMENT until payment succeeds; it has
- * NOT deducted stock and is hidden from the customer's history. If it's still unpaid
- * after ORDER_EXPIRE_HOURS we cancel it so it stops being reconciled and stops holding
- * a payment invoice. The updateMany guard (status + paymentStatus) makes this race-safe:
- * an order that just got paid no longer matches, so we never cancel a paid order. No push
- * is sent — the customer never completed checkout, so a "cancelled" notice would confuse.
+ * An online (MyFatoorah) order sits in AWAITING_PAYMENT until payment succeeds. As of the
+ * stock-reservation change (H1) it HAS reserved (deducted) stock at placement, so cancelling
+ * it must RESTORE that stock. If it's still unpaid after ORDER_EXPIRE_HOURS we cancel it so it
+ * stops being reconciled and stops holding both stock and a payment invoice. Each order is
+ * cancelled in its own row-locked transaction (SELECT ... FOR UPDATE re-checks status +
+ * paymentStatus) so an order that just got paid is never cancelled. No push is sent — the
+ * customer never completed checkout, so a "cancelled" notice would confuse.
  */
 
 const prisma = require('../../config/db');
@@ -22,17 +23,57 @@ async function handle() {
   const hours = Math.max(configured, reconcileMaxAge + 6);
   const cutoff = new Date(Date.now() - hours * 3_600_000);
 
-  const res = await prisma.order.updateMany({
+  const candidates = await prisma.order.findMany({
     where: {
       status: 'AWAITING_PAYMENT',
       paymentStatus: { in: ['UNPAID', 'FAILED'] },
       createdAt: { lt: cutoff },
     },
-    data: { status: 'CANCELLED' },
+    select: { id: true },
   });
 
-  if (res.count > 0) console.log(`[jobs] order.expire-unpaid cancelled=${res.count}`);
-  return { cancelled: res.count };
+  let cancelled = 0;
+  for (const { id } of candidates) {
+    try {
+      const done = await prisma.$transaction(async (tx) => {
+        // Lock + re-check inside the tx: an order that just got paid (status/paymentStatus
+        // changed) no longer matches and is skipped — we never cancel a paid order.
+        const locked = await tx.$queryRaw`
+          SELECT id, "inventoryDeducted" FROM "Order"
+          WHERE id::text = ${id}
+            AND status = 'AWAITING_PAYMENT'
+            AND "paymentStatus" IN ('UNPAID', 'FAILED')
+          FOR UPDATE`;
+        if (!Array.isArray(locked) || locked.length === 0) return false;
+
+        // Restore the stock reserved at placement (H1) before cancelling.
+        if (locked[0].inventoryDeducted) {
+          await tx.$executeRaw`
+            UPDATE "Product" AS p
+            SET quantity = p.quantity + sub.sum_qty
+            FROM (
+              SELECT "productId", SUM(quantity)::int AS sum_qty
+              FROM "OrderItem"
+              WHERE "orderId"::text = ${id}
+              GROUP BY "productId"
+            ) AS sub
+            WHERE p.id = sub."productId"`;
+        }
+
+        await tx.order.update({
+          where: { id },
+          data: { status: 'CANCELLED', inventoryDeducted: false },
+        });
+        return true;
+      });
+      if (done) cancelled += 1;
+    } catch (err) {
+      console.error(`[jobs] order.expire-unpaid failed to cancel order ${id}: ${err.message}`);
+    }
+  }
+
+  if (cancelled > 0) console.log(`[jobs] order.expire-unpaid cancelled=${cancelled}`);
+  return { cancelled };
 }
 
 module.exports = {

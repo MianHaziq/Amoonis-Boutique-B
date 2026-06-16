@@ -278,9 +278,13 @@ async function createOrderCore(userId, params = {}, opts = {}) {
 
   // Compute server-trusted line prices from the live Product row instead of the cart's
   // snapshot. Closes the price-edit drift window between cart load and order commit.
+  // Mirrors cart.service.effectivePrice EXACTLY (discounted only when it's actually lower
+  // than the base price) so the order never charges more than the cart displayed (M2).
   function livePrice(productRow) {
-    const p = productRow?.discountedPrice ?? productRow?.price;
-    return p == null ? 0 : Number(p);
+    if (!productRow) return 0;
+    const discounted = productRow.discountedPrice != null ? Number(productRow.discountedPrice) : null;
+    const price = productRow.price != null ? Number(productRow.price) : 0;
+    return discounted != null && discounted < price ? discounted : price;
   }
   const livePriceById = new Map(productRows.map((p) => [p.id, livePrice(p)]));
 
@@ -320,8 +324,13 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       where: { id: { in: productIds } },
       select: { id: true, price: true, discountedPrice: true },
     });
+    // Same effective-price rule as cart/livePrice (M2): discounted only when lower.
     const txPriceById = new Map(
-      livePriceRows.map((p) => [p.id, p.discountedPrice != null ? Number(p.discountedPrice) : Number(p.price)])
+      livePriceRows.map((p) => {
+        const discounted = p.discountedPrice != null ? Number(p.discountedPrice) : null;
+        const base = p.price != null ? Number(p.price) : 0;
+        return [p.id, discounted != null && discounted < base ? discounted : base];
+      })
     );
 
     // Recompute line totals and order subtotal from live prices.
@@ -364,6 +373,10 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         shippingCountry: resolvedAddress.country,
         regionId: orderRegionId,
         status: initialStatus,
+        // Stock is reserved (deducted) below inside this same transaction (H1), so the
+        // order is created already flagged as having deducted inventory. If the deduction
+        // throws (concurrent order took the last unit) the whole transaction rolls back.
+        inventoryDeducted: true,
       },
     });
 
@@ -470,6 +483,14 @@ async function createOrderCore(userId, params = {}, opts = {}) {
           ]
         : []),
     ]);
+
+    // Reserve stock at placement (H1). One atomic conditional UPDATE per product (same
+    // helper used at confirm). If a concurrent order already took the last unit this
+    // throws INSUFFICIENT_STOCK and the whole order transaction rolls back — closing the
+    // oversell window where many orders could be placed against the same last unit and
+    // only fail later at confirm. Online (AWAITING_PAYMENT) orders therefore hold their
+    // stock until paid; abandoned ones are released by the order.expire-unpaid job.
+    await deductInventoryForOrder(tx, orderRecord.id);
   }, { maxWait: 5000, timeout: 15000 });
   } catch (err) {
     // Convert known business-rule errors thrown from inside the tx into the same
@@ -480,6 +501,18 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     ]);
     if (userFacingPromoCodes.has(err.code)) {
       return { order: null, error: err.message };
+    }
+    // Stock reservation (H1) failed inside the tx — surface the same friendly shape the
+    // pre-flight OUT_OF_STOCK check uses so the controller returns a 400, not a 500.
+    if (err.code === 'INSUFFICIENT_STOCK') {
+      const first = Array.isArray(err.details) ? err.details[0] : null;
+      const msg = first
+        ? `${first.title || 'An item'}: only ${first.available} in stock (you requested ${first.requested})`
+        : 'Insufficient stock to place this order';
+      return { order: null, error: msg };
+    }
+    if (err.code === 'PRODUCT_MISSING') {
+      return { order: null, error: 'A product in your order is no longer available' };
     }
     throw err;
   }
@@ -1105,23 +1138,110 @@ async function executeOrderPayment(orderId, userId, sessionId) {
   if (order.paymentStatus === 'PAID') return { isPaid: true, orderId, status: 'Paid', alreadyProcessed: true };
   if (order.status !== 'AWAITING_PAYMENT') return { error: 'Order can no longer be paid' };
 
-  const exec = await paymentService.executePayment({
-    sessionId,
-    order,
-    customer: { name: order.shippingFullName, email: order.user?.email, phone: order.shippingPhone },
+  // Double-charge guard (H5). ExecutePayment is NOT idempotent — a double-tap (or retry
+  // while the first charge is still in flight) could charge the card twice. Atomically
+  // claim an in-flight execution by writing a transient marker into paymentTransactionId
+  // (which is otherwise null until a payment is confirmed PAID). The single-statement
+  // conditional UPDATE means only ONE concurrent caller wins the `IS NULL` claim; the
+  // others bail without charging. The marker is always cleared below unless the order ends
+  // up PAID, so a genuine retry after a failed charge is never blocked.
+  const EXEC_MARKER = 'EXECUTING';
+  const claim = await prisma.order.updateMany({
+    where: { id: orderId, paymentStatus: { not: 'PAID' }, paymentTransactionId: null },
+    data: { paymentTransactionId: EXEC_MARKER },
   });
-
-  if (exec.invoiceId) {
-    await prisma.order.update({ where: { id: orderId }, data: { paymentInvoiceId: exec.invoiceId } });
-  } else {
-    return { isPaid: false, orderId, status: 'Failed', reason: 'No invoice returned by gateway' };
+  if (claim.count === 0) {
+    // Either it was just paid, or another execute is already in flight for this order.
+    const cur = await prisma.order.findUnique({ where: { id: orderId }, select: { paymentStatus: true } });
+    if (cur?.paymentStatus === 'PAID') return { isPaid: true, orderId, status: 'Paid', alreadyProcessed: true };
+    return { isPaid: false, orderId, status: 'Processing', reason: 'payment_already_in_progress' };
   }
 
-  // Authoritative server-side confirmation (idempotent; deducts stock + places order on Paid).
-  const result = await confirmOrderPayment(exec.invoiceId, 'InvoiceId');
-  // paymentUrl is set for non-direct methods (e.g. a card needing 3-D Secure); for Apple
-  // Pay it is normally null because the charge settles directly.
-  return { ...result, paymentUrl: exec.paymentUrl || null, isDirectPayment: exec.isDirectPayment };
+  try {
+    const exec = await paymentService.executePayment({
+      sessionId,
+      order,
+      customer: { name: order.shippingFullName, email: order.user?.email, phone: order.shippingPhone },
+    });
+
+    if (!exec.invoiceId) {
+      // The gateway may still have charged the card but returned no InvoiceId, so we cannot
+      // verify or reconcile it automatically. Escalate loudly with the order reference.
+      console.error(
+        `[payment] order ${orderId} ExecutePayment returned NO InvoiceId — the card may have been charged; manual reconciliation required (CustomerReference=${orderId})`
+      );
+      return { isPaid: false, orderId, status: 'Failed', reason: 'No invoice returned by gateway' };
+    }
+
+    await prisma.order.update({ where: { id: orderId }, data: { paymentInvoiceId: exec.invoiceId } });
+
+    // Authoritative server-side confirmation (idempotent; places order + advances status on Paid).
+    const result = await confirmOrderPayment(exec.invoiceId, 'InvoiceId');
+    // paymentUrl is set for non-direct methods (e.g. a card needing 3-D Secure); for Apple
+    // Pay it is normally null because the charge settles directly.
+    return { ...result, paymentUrl: exec.paymentUrl || null, isDirectPayment: exec.isDirectPayment };
+  } finally {
+    // Release the in-flight marker unless the order is now PAID (in which case confirmOrderPayment
+    // already overwrote paymentTransactionId with the real gateway transaction id). This lets a
+    // failed/unconfirmed attempt be retried, and never clobbers a real transaction id.
+    await prisma.order
+      .updateMany({
+        where: { id: orderId, paymentTransactionId: EXEC_MARKER, paymentStatus: { not: 'PAID' } },
+        data: { paymentTransactionId: null },
+      })
+      .catch(() => {});
+  }
+}
+
+/**
+ * Place a now-PAID order: clear the cart (unless a Buy Now order), fire the "order placed"
+ * notifications, and auto-confirm (AWAITING_PAYMENT/PENDING → CONFIRMED). Idempotent and
+ * safe to call again on a stranded-but-PAID order (recovery): cart clear is a no-op on an
+ * empty cart, updateOrderStatus won't re-deduct already-reserved stock, and notifications
+ * are only sent on the first placement. Payment is already captured, so a confirm failure
+ * must never throw — the order stays PAID for staff/reconcile to resolve.
+ *
+ * @param {object} order  the order row (status/userId/clearCartOnPayment/email)
+ * @param {{ firstPlacement: boolean }} opts  send "order placed" notifications only when true
+ */
+async function finalizePaidOrder(order, { firstPlacement } = {}) {
+  const orderId = order.id;
+
+  // Paid, but already CANCELLED (e.g. admin cancelled before payment landed). Do NOT
+  // confirm/deduct — flag loudly for a manual refund.
+  if (order.status === 'CANCELLED') {
+    console.error(`[payment] order ${orderId} PAID but already CANCELLED — manual refund required`);
+    return;
+  }
+
+  // Clear the cart (kept until now) for a normal online checkout. Buy Now orders
+  // (clearCartOnPayment=false) must NOT wipe the user's real cart.
+  if (order.status === 'AWAITING_PAYMENT') {
+    if (order.clearCartOnPayment !== false) {
+      await prisma.cartItem.deleteMany({ where: { cart: { userId: order.userId } } }).catch((err) =>
+        console.error(`[payment] order ${orderId} paid but cart clear failed: ${err.message}`)
+      );
+      await prisma.cart.updateMany({ where: { userId: order.userId }, data: { orderMessage: null } }).catch(() => {});
+    }
+    if (firstPlacement) {
+      notify.orderPlaced(order.userId, orderId);
+      notify.orderConfirmationEmail({
+        id: orderId,
+        userEmail: order.user?.email,
+        totalAmount: Number(order.totalAmount),
+      });
+    }
+  }
+
+  // Auto-confirm. Stock was already reserved at placement (H1), so this only moves the
+  // status forward (no re-deduction). A failure here must not propagate.
+  if (order.status === 'AWAITING_PAYMENT' || order.status === 'PENDING') {
+    try {
+      await updateOrderStatus(orderId, 'CONFIRMED');
+    } catch (err) {
+      console.error(`[payment] order ${orderId} paid but could not auto-confirm: ${err.message}`);
+    }
+  }
 }
 
 async function confirmOrderPayment(key, keyType = 'PaymentId') {
@@ -1141,13 +1261,22 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
       status: true,
       paymentStatus: true,
       clearCartOnPayment: true,
+      inventoryDeducted: true,
       user: { select: { email: true } },
     },
   });
   if (!order) return { isPaid: false, orderId, status: result.status, reason: 'Order not found' };
 
-  // Already settled — don't double-process (callback + webhook can both fire).
+  // Already settled — don't double-process (callback + webhook can both fire). BUT a prior
+  // attempt may have flipped the order PAID and then crashed/failed before it was actually
+  // placed (the PAID flip and the CONFIRMED transition are separate steps). If the order is
+  // PAID yet still sitting in AWAITING_PAYMENT/PENDING, re-drive placement idempotently so it
+  // can never be stranded "PAID but never confirmed" (C1). Stock was already reserved at
+  // placement (H1), so this only advances the status; it does not re-deduct.
   if (order.paymentStatus === 'PAID') {
+    if (order.status === 'AWAITING_PAYMENT' || order.status === 'PENDING') {
+      await finalizePaidOrder(order, { firstPlacement: false });
+    }
     return { isPaid: true, orderId, status: 'Paid', alreadyProcessed: true };
   }
 
@@ -1169,12 +1298,15 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
   // mark the order for manual review. We only enforce this when the currencies match, so a
   // legitimate cross-currency payer (different numeric value) is never wrongly stranded.
   const chargedCurrency = process.env.MYFATOORAH_CURRENCY || 'AED';
-  const sameCurrency = !!result.currency && result.currency === chargedCurrency;
-  if (
-    result.invoiceValue != null &&
-    sameCurrency &&
-    result.invoiceValue + 0.01 < Number(order.totalAmount)
-  ) {
+  const currencyKnown = !!result.currency;
+  const sameCurrency = currencyKnown && result.currency === chargedCurrency;
+  const underpaid =
+    result.invoiceValue != null && result.invoiceValue + 0.01 < Number(order.totalAmount);
+  // Fail CLOSED (C2): reject a short payment whenever the currency is the SAME as charged
+  // OR the gateway did not report a currency at all. Only a *known, different* currency
+  // (a genuine cross-currency settlement whose numeric value legitimately differs) is
+  // allowed to pass. A missing/unknown currency must never let an underpayment through.
+  if (underpaid && (sameCurrency || !currencyKnown)) {
     console.error(
       `[payment] order ${orderId} UNDERPAID: gateway ${result.invoiceValue} ${result.currency} vs order total ${order.totalAmount} — withholding confirmation for manual review`
     );
@@ -1203,39 +1335,13 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
     return { isPaid: true, orderId, status: 'Paid', alreadyProcessed: true };
   }
 
+  // Won the claim — place the order (cart clear + "order placed" notifications + auto-confirm).
+  await finalizePaidOrder(order, { firstPlacement: true });
+
   // Paid, but the order was already CANCELLED (e.g. admin cancelled before the payment
-  // landed). Do NOT confirm/deduct stock — flag loudly for a manual refund.
+  // landed). finalizePaidOrder flagged it for manual refund and did not confirm/deduct.
   if (order.status === 'CANCELLED') {
-    console.error(`[payment] order ${orderId} PAID but already CANCELLED — manual refund required`);
     return { isPaid: true, orderId, status: 'Paid', warning: 'order_cancelled_needs_refund' };
-  }
-
-  // Now placed: clear the cart (kept until now) and fire the "order placed" push.
-  // Buy Now orders (clearCartOnPayment=false) must NOT wipe the user's real cart.
-  if (order.status === 'AWAITING_PAYMENT') {
-    if (order.clearCartOnPayment !== false) {
-      await prisma.cartItem.deleteMany({ where: { cart: { userId: order.userId } } }).catch((err) =>
-        console.error(`[payment] order ${orderId} paid but cart clear failed: ${err.message}`)
-      );
-      await prisma.cart.updateMany({ where: { userId: order.userId }, data: { orderMessage: null } }).catch(() => {});
-    }
-    notify.orderPlaced(order.userId, orderId);
-    notify.orderConfirmationEmail({
-      id: orderId,
-      userEmail: order.user?.email,
-      totalAmount: Number(order.totalAmount),
-    });
-  }
-
-  // Auto-confirm (transactional stock deduction + status push). Payment is already
-  // captured, so a stock shortfall here must not fail — the order stays PAID for staff
-  // to resolve manually.
-  if (order.status === 'AWAITING_PAYMENT' || order.status === 'PENDING') {
-    try {
-      await updateOrderStatus(orderId, 'CONFIRMED');
-    } catch (err) {
-      console.error(`[payment] order ${orderId} paid but could not auto-confirm: ${err.message}`);
-    }
   }
 
   return { isPaid: true, orderId, status: 'Paid' };

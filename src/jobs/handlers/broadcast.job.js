@@ -9,8 +9,11 @@
  */
 
 const prisma = require('../../config/db');
-const { enqueue } = require('../queue');
+const { enqueueMany } = require('../queue');
 const { QUEUES } = require('../queues');
+
+// How many push.send jobs to write per pg-boss batch insert.
+const ENQUEUE_BATCH_SIZE = 200;
 
 async function handle(data) {
   const { kind = 'announcement', title, body, data: payload = {}, regionId } = data;
@@ -37,13 +40,15 @@ async function handle(data) {
     });
     if (users.length === 0) break;
 
-    for (const u of users) {
-      await enqueue(
-        QUEUES.PUSH_SEND,
-        { userId: u.id, prefKey, type, title, body, data: { type, ...payload } },
-        { allowInlineFallback: false }
-      );
-      enqueued += 1;
+    // Batch the per-user push.send jobs into a few multi-row inserts rather than one
+    // serial enqueue (one DB insert) per user. The data enqueued per user is
+    // unchanged; we only change how it's written.
+    for (let i = 0; i < users.length; i += ENQUEUE_BATCH_SIZE) {
+      const slice = users.slice(i, i + ENQUEUE_BATCH_SIZE);
+      const jobs = slice.map((u) => ({
+        data: { userId: u.id, prefKey, type, title, body, data: { type, ...payload } },
+      }));
+      enqueued += await enqueueMany(QUEUES.PUSH_SEND, jobs, { allowInlineFallback: false });
     }
 
     if (users.length < pageSize) break;

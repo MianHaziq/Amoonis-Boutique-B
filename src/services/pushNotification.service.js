@@ -4,6 +4,18 @@ const notificationPreferencesService = require('./notificationPreferences.servic
 
 const BRAND = 'Amoon Bloom';
 
+// firebase-admin rejects any sendEachForMulticast call with more than 500 tokens,
+// so multicast sends must be chunked.
+const FCM_MULTICAST_MAX = 500;
+
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) {
+    out.push(arr.slice(i, i + size));
+  }
+  return out;
+}
+
 /**
  * In-app copy for order lifecycle pushes (FCM notification + data payload for deep links).
  */
@@ -38,8 +50,7 @@ async function sendToUser(userId, prefKey, title, body, data = {}) {
     Object.entries({ brand: BRAND, ...data }).map(([k, v]) => [k, v == null ? '' : String(v)])
   );
 
-  const res = await messaging.sendEachForMulticast({
-    tokens,
+  const messageBase = {
     notification: { title, body },
     data: dataStrings,
     android: { priority: 'high' },
@@ -50,23 +61,46 @@ async function sendToUser(userId, prefKey, title, body, data = {}) {
         },
       },
     },
-  });
+  };
 
+  // FCM multicast is capped at 500 tokens per call. Chunk the tokens and aggregate
+  // results so invalid-token cleanup runs across every batch. A batch that throws
+  // must not abort the others or skip cleanup for the batches that succeeded.
+  const batches = chunk(tokens, FCM_MULTICAST_MAX);
+  let successCount = 0;
+  let failureCount = 0;
   const invalid = [];
-  res.responses.forEach((r, i) => {
-    if (!r.success && r.error) {
-      const c = r.error.code;
-      if (
-        c === 'messaging/invalid-registration-token' ||
-        c === 'messaging/registration-token-not-registered'
-      ) {
-        invalid.push(tokens[i]);
-      }
+
+  for (const batchTokens of batches) {
+    try {
+      const res = await messaging.sendEachForMulticast({
+        tokens: batchTokens,
+        ...messageBase,
+      });
+      successCount += res.successCount;
+      failureCount += res.failureCount;
+      res.responses.forEach((r, i) => {
+        if (!r.success && r.error) {
+          const c = r.error.code;
+          if (
+            c === 'messaging/invalid-registration-token' ||
+            c === 'messaging/registration-token-not-registered'
+          ) {
+            invalid.push(batchTokens[i]);
+          }
+        }
+      });
+    } catch (err) {
+      // One bad batch shouldn't sink the rest. Count it as failed and keep going so
+      // remaining batches still send and their invalid tokens still get pruned.
+      failureCount += batchTokens.length;
+      console.error('[push] multicast batch failed:', err.message);
     }
-  });
+  }
+
   await Promise.all(invalid.map((t) => pushDeviceService.deleteInvalidToken(t)));
 
-  return { sent: res.successCount, failed: res.failureCount };
+  return { sent: successCount, failed: failureCount };
 }
 
 /** After checkout — respects orderStatus preference. */

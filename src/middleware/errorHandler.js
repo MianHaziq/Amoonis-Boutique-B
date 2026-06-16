@@ -23,7 +23,13 @@ function errorHandler(err, req, res, next) {
     console.error('[ERROR]', err.message);
   }
 
-  return error(res, err.message || 'Internal Server Error', status, err.errors);
+  // In production, never leak internal error details for 5xx responses. The JSON
+  // structure stays identical — only the message string is genericized for 5xx in prod.
+  const message = isProd && status >= 500
+    ? 'Internal server error'
+    : err.message || 'Internal Server Error';
+
+  return error(res, message, status, err.errors);
 }
 
 module.exports = errorHandler;

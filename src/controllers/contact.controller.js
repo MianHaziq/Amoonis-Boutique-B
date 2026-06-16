@@ -53,8 +53,14 @@ const createUserContact = async (req, res, next) => {
 const getAllUserContacts = async (req, res, next) => {
   try {
     const { page = 1, limit = 10, search, status } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const take = parseInt(limit);
+    // Clamp pagination: default page to 1 when NaN/<1, default limit to 10 when
+    // NaN, and cap limit at 100 to avoid unbounded scans. Mirrors product.service.
+    const parsedPage = parseInt(page);
+    const parsedLimit = parseInt(limit);
+    const safePage = Number.isNaN(parsedPage) || parsedPage < 1 ? 1 : parsedPage;
+    const safeLimit = Math.min(100, Math.max(1, Number.isNaN(parsedLimit) ? 10 : parsedLimit));
+    const skip = (safePage - 1) * safeLimit;
+    const take = safeLimit;
 
     const where = {};
     if (status) {
@@ -93,12 +99,12 @@ const getAllUserContacts = async (req, res, next) => {
 
     const totalPages = Math.ceil(total / take);
     const pagination = {
-      page: parseInt(page),
+      page: safePage,
       limit: take,
       total,
       totalPages,
-      hasNext: parseInt(page) < totalPages,
-      hasPrev: parseInt(page) > 1,
+      hasNext: safePage < totalPages,
+      hasPrev: safePage > 1,
     };
 
     return success(res, contacts, 'Contacts fetched successfully', 200, { pagination });

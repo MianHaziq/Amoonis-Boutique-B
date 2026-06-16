@@ -204,17 +204,22 @@ async function shutdown(signal) {
   shuttingDown = true;
   console.log(`[SERVER] ${signal} received — shutting down gracefully...`);
 
-  // Backstop: if draining hangs, force-exit after 15s regardless.
+  // Backstop: if draining hangs, force-exit regardless. Must be comfortably longer
+  // than the graceful drain so it never preempts it: stopJobs() runs pg-boss's
+  // graceful stop (timeout: 8000 — see src/jobs/queue.js) and server.close() must
+  // also finish first. 30s leaves ample headroom for both before the hard exit.
   const backstop = setTimeout(() => {
     console.error('[SERVER] graceful shutdown timed out — forcing exit');
     process.exit(1);
-  }, 15000);
+  }, 30000);
   backstop.unref();
 
   try {
     await new Promise((resolve) => server.close(resolve)); // stop HTTP, drain in-flight
     console.log('[SERVER] HTTP server closed');
-    await stopJobs(); // pg-boss graceful drain
+    // Drain pg-boss FIRST and wait for it to fully resolve — only then disconnect
+    // Prisma, so in-flight jobs keep their shared DB connection through the drain.
+    await stopJobs(); // pg-boss graceful drain (up to 8s)
     await prisma.$disconnect();
   } catch (err) {
     console.error('[SERVER] shutdown error:', err.message);

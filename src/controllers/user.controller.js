@@ -1,6 +1,13 @@
 const prisma = require('../config/db');
 const bcrypt = require('bcryptjs');
 const { success, error } = require('../utils/response');
+const { invalidateCachedUser } = require('../middleware/auth');
+
+// Sentinel id that can never match a real region row — used so an unknown region
+// filter returns an empty set instead of injecting an arbitrary string as a UUID
+// filter (which would error or match nothing unpredictably). Mirrors the pattern
+// in utils/visibilityFromReq.js and services/analytics.service.js.
+const NO_MATCH_REGION_ID = '00000000-0000-0000-0000-000000000000';
 const {
   normalizeManagerPermissions,
   MANAGER_PERMISSION_CATALOG,
@@ -132,8 +139,15 @@ const getAllUsers = async (req, res, next) => {
       order = 'desc',
     } = req.query;
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const take = parseInt(limit);
+    // Clamp pagination: default page to 1 when NaN/<1, default limit to 10 when
+    // NaN, and cap limit at 100 to avoid unbounded scans. Mirrors product.service.
+    const parsedPage = parseInt(page);
+    const parsedLimit = parseInt(limit);
+    const safePage = Number.isNaN(parsedPage) || parsedPage < 1 ? 1 : parsedPage;
+    const safeLimit = Math.min(100, Math.max(1, Number.isNaN(parsedLimit) ? 10 : parsedLimit));
+
+    const skip = (safePage - 1) * safeLimit;
+    const take = safeLimit;
 
     // Build where clause
     const where = {};
@@ -157,7 +171,7 @@ const getAllUsers = async (req, res, next) => {
     if (region) {
       const regionService = require('../services/region.service');
       const matched = await regionService.getRegionByCode(region);
-      where.regionId = matched ? matched.id : String(region);
+      where.regionId = matched ? matched.id : NO_MATCH_REGION_ID;
     }
 
     // Build orderBy
@@ -177,12 +191,12 @@ const getAllUsers = async (req, res, next) => {
     ]);
 
     const pagination = {
-      page: parseInt(page),
+      page: safePage,
       limit: take,
       total,
       totalPages: Math.ceil(total / take),
       hasNext: skip + take < total,
-      hasPrev: parseInt(page) > 1,
+      hasPrev: safePage > 1,
     };
     return success(res, users.map(transformUser), 'Users fetched successfully', 200, { pagination });
   } catch (err) {
@@ -313,6 +327,10 @@ const updateUser = async (req, res, next) => {
       data: updateData,
     });
 
+    // Privilege-relevant fields (role/status/managerPermissions) may have changed —
+    // drop the cached auth entry so the change takes effect without the 30s TTL.
+    invalidateCachedUser(id);
+
     return success(res, transformUser(user), 'User updated successfully', 200);
   } catch (err) {
     next(err);
@@ -379,6 +397,9 @@ const toggleUserStatus = async (req, res, next) => {
       data: { status: newStatus },
     });
 
+    // Status changed — drop the cached auth entry so it takes effect immediately.
+    invalidateCachedUser(id);
+
     return success(res, transformUser(updatedUser), `User ${newStatus.toLowerCase()} successfully`, 200);
   } catch (err) {
     next(err);
@@ -435,6 +456,10 @@ const changeUserRole = async (req, res, next) => {
       where: { id },
       data,
     });
+
+    // Role/managerPermissions changed — drop the cached auth entry so it takes
+    // effect immediately rather than after the 30s TTL.
+    invalidateCachedUser(id);
 
     return success(res, transformUser(updatedUser), `User role changed to ${upper}`, 200);
   } catch (err) {
