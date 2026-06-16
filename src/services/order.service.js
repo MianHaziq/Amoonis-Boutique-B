@@ -2,6 +2,7 @@ const prisma = require('../config/db');
 const cartService = require('../services/cart.service');
 const pushNotificationService = require('../services/pushNotification.service');
 const promoCodeService = require('../services/promoCode.service');
+const paymentService = require('../services/payment.service');
 const regionService = require('../services/region.service');
 
 function decimalToNumber(v) {
@@ -84,6 +85,7 @@ function toOrderResponsePayload(order) {
     discountAmount: decimalToNumber(order.discountAmount),
     appliedPromoCode: order.appliedPromoCode ?? null,
     paymentMethod: order.paymentMethod ?? 'COD',
+    paymentStatus: order.paymentStatus ?? 'UNPAID',
     status: order.status,
     shippingAddress:
       order.shippingFullName
@@ -109,7 +111,16 @@ function toOrderResponsePayload(order) {
   };
 }
 
-const VALID_PAYMENT_METHODS = ['COD'];
+const VALID_PAYMENT_METHODS = ['COD', 'MYFATOORAH'];
+
+// AWAITING_PAYMENT orders are unpaid online checkouts that aren't "placed" yet — they
+// must not appear in customer history, admin lists, or analytics. This builds the
+// status filter for list queries: honor an explicit status filter, otherwise exclude
+// AWAITING_PAYMENT.
+function listStatusFilter(status) {
+  if (status) return { status };
+  return { status: { not: 'AWAITING_PAYMENT' } };
+}
 
 // At checkout we no longer require name/phone in the address payload — they're
 // pulled from the user profile (collected at signup / Google / Apple). The
@@ -132,6 +143,13 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
   if (!VALID_PAYMENT_METHODS.includes(paymentMethod)) {
     return { order: null, error: `Invalid paymentMethod. Supported: ${VALID_PAYMENT_METHODS.join(', ')}` };
   }
+
+  // Online payment: the order is NOT "placed" yet — it starts AWAITING_PAYMENT (hidden
+  // from order history / admin / analytics), the cart is kept, and no "order placed"
+  // push fires. confirmOrderPayment turns it into a real CONFIRMED order once paid.
+  // COD: placed instantly as PENDING, cart cleared, push sent (unchanged).
+  const isOnlinePayment = paymentMethod === 'MYFATOORAH';
+  const initialStatus = isOnlinePayment ? 'AWAITING_PAYMENT' : 'PENDING';
 
   // Recipient identity (fullName + phone) is sourced from the user profile so the
   // checkout payload doesn't need to re-collect what we already have from signup.
@@ -328,7 +346,7 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
         shippingPostalCode: resolvedAddress.postalCode,
         shippingCountry: resolvedAddress.country,
         regionId: orderRegionId,
-        status: 'PENDING',
+        status: initialStatus,
       },
     });
 
@@ -425,8 +443,14 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
           price: itemPriceById.get(item.productId) ?? 0,
         })),
       }),
-      tx.cartItem.deleteMany({ where: { cart: { userId } } }),
-      tx.cart.updateMany({ where: { userId }, data: { orderMessage: null } }),
+      // Keep the cart for online payment until it's actually paid (so an abandoned /
+      // failed payment doesn't lose the customer's items). Cleared in confirmOrderPayment.
+      ...(isOnlinePayment
+        ? []
+        : [
+            tx.cartItem.deleteMany({ where: { cart: { userId } } }),
+            tx.cart.updateMany({ where: { userId }, data: { orderMessage: null } }),
+          ]),
     ]);
   }, { maxWait: 5000, timeout: 15000 });
   } catch (err) {
@@ -450,9 +474,12 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
 
   const payload = toOrderResponsePayload(order);
 
-  pushNotificationService.notifyOrderPlaced(userId, createdOrderId).catch((err) => {
-    console.error('[push] notifyOrderPlaced:', err.message);
-  });
+  // Online payment isn't placed yet — defer the "order placed" push to payment success.
+  if (!isOnlinePayment) {
+    pushNotificationService.notifyOrderPlaced(userId, createdOrderId).catch((err) => {
+      console.error('[push] notifyOrderPlaced:', err.message);
+    });
+  }
 
   return { order: payload, error: null };
 }
@@ -477,7 +504,7 @@ async function getOrderById(orderId, userId = null) {
 async function getAllOrdersAdmin(page = 1, limit = 10, status = null) {
   const skip = (Math.max(1, page) - 1) * Math.min(100, Math.max(1, limit));
   const take = Math.min(100, Math.max(1, limit));
-  const where = status ? { status } : {};
+  const where = listStatusFilter(status);
 
   const [orders, total] = await Promise.all([
     prisma.order.findMany({
@@ -563,7 +590,7 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
 async function getMyOrderHistory(userId, page = 1, limit = 10, status = null) {
   const skip = (Math.max(1, page) - 1) * Math.min(100, Math.max(1, limit));
   const take = Math.min(100, Math.max(1, limit));
-  const where = { userId, ...(status ? { status } : {}) };
+  const where = { userId, ...listStatusFilter(status) };
 
   const [orders, total] = await Promise.all([
     prisma.order.findMany({
@@ -595,9 +622,8 @@ async function getMyOrderHistory(userId, page = 1, limit = 10, status = null) {
 async function getAdminOrderHistory(page = 1, limit = 10, filters = {}) {
   const skip = (Math.max(1, page) - 1) * Math.min(100, Math.max(1, limit));
   const take = Math.min(100, Math.max(1, limit));
-  const where = {};
+  const where = listStatusFilter(filters.status);
 
-  if (filters.status) where.status = filters.status;
   if (filters.userId) where.userId = filters.userId;
   if (filters.dateFrom || filters.dateTo) {
     where.createdAt = {};
@@ -769,6 +795,7 @@ async function getOrderStatusOnly(orderId, userId = null) {
       id: true,
       userId: true,
       status: true,
+      paymentStatus: true,
       totalAmount: true,
       createdAt: true,
       updatedAt: true,
@@ -785,6 +812,7 @@ async function getOrderStatusOnly(orderId, userId = null) {
   return {
     id: order.id,
     status: order.status,
+    paymentStatus: order.paymentStatus,
     totalAmount: decimalToNumber(order.totalAmount),
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
@@ -821,7 +849,12 @@ async function updateOrderStatus(orderId, status) {
           return { payload: toOrderResponsePayload(full), notify: false };
         }
 
-        const needCommit = !prev.inventoryDeducted && prev.status === 'PENDING' && status === 'CONFIRMED';
+        // Deduct stock on first confirm — both COD (PENDING→CONFIRMED) and online
+        // payment (AWAITING_PAYMENT→CONFIRMED, driven by confirmOrderPayment).
+        const needCommit =
+          !prev.inventoryDeducted &&
+          (prev.status === 'PENDING' || prev.status === 'AWAITING_PAYMENT') &&
+          status === 'CONFIRMED';
         // CANCELLED: always restore if stock was deducted (any prior status). PENDING: restore only when reverting from fulfilment.
         const needRelease =
           prev.inventoryDeducted &&
@@ -866,6 +899,147 @@ async function updateOrderStatus(orderId, status) {
   }
 }
 
+/**
+ * Start an online payment for an existing order. Loads the order, asks MyFatoorah
+ * to create a payment, stores the InvoiceId on the order, and returns the hosted
+ * payment URL for the app to open. Caller must own the order.
+ *
+ * Returns { error } on a guard failure (wrong owner / state / method), otherwise
+ * { paymentUrl, invoiceId }.
+ */
+async function initiateOrderPayment(orderId, userId) {
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, userId },
+    select: {
+      id: true,
+      totalAmount: true,
+      status: true,
+      paymentStatus: true,
+      paymentMethod: true,
+      shippingFullName: true,
+      shippingPhone: true,
+      user: { select: { email: true } },
+    },
+  });
+
+  if (!order) return { error: 'Order not found' };
+  if (order.paymentMethod !== 'MYFATOORAH') {
+    return { error: 'This order is not set up for online payment' };
+  }
+  if (order.paymentStatus === 'PAID') return { error: 'Order is already paid' };
+  // Payable only while awaiting payment (covers first attempt and retry after a failed one).
+  if (order.status !== 'AWAITING_PAYMENT') return { error: 'Order can no longer be paid' };
+  if (Number(order.totalAmount) <= 0) return { error: 'Order total must be greater than zero' };
+
+  const { invoiceId, paymentUrl } = await paymentService.createPaymentInvoice(order, {
+    name: order.shippingFullName,
+    phone: order.shippingPhone,
+    email: order.user?.email,
+  });
+
+  // Store the new invoice id and reset paymentStatus to UNPAID so a retry after a
+  // previous FAILED attempt starts clean.
+  await prisma.order.update({
+    where: { id: order.id },
+    data: { paymentInvoiceId: invoiceId, paymentStatus: 'UNPAID' },
+  });
+
+  return { paymentUrl, invoiceId };
+}
+
+/**
+ * Verify a MyFatoorah payment (authoritative server-side check) and, if genuinely paid,
+ * place the order: atomically mark it PAID, clear the cart, fire the "order placed" push,
+ * and move AWAITING_PAYMENT → CONFIRMED (reusing updateOrderStatus, which deducts stock +
+ * notifies). `key` is the PaymentId from the callback or InvoiceId from a webhook;
+ * `keyType` selects which.
+ *
+ * Idempotent and race-safe: the PAID flip is a single conditional UPDATE, so only one of
+ * N concurrent callers (callback + webhook + retries) ever places the order.
+ *
+ * Returns { isPaid, orderId, status, ...flags }.
+ */
+async function confirmOrderPayment(key, keyType = 'PaymentId') {
+  const result = await paymentService.verifyPayment(key, keyType);
+  const orderId = result.orderId;
+
+  if (!orderId) {
+    return { isPaid: false, orderId: null, status: result.status, reason: 'No order reference on payment' };
+  }
+
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { id: true, userId: true, totalAmount: true, status: true, paymentStatus: true },
+  });
+  if (!order) return { isPaid: false, orderId, status: result.status, reason: 'Order not found' };
+
+  // Already settled — don't double-process (callback + webhook can both fire).
+  if (order.paymentStatus === 'PAID') {
+    return { isPaid: true, orderId, status: 'Paid', alreadyProcessed: true };
+  }
+
+  if (!result.isPaid) {
+    // Mark FAILED only while still unpaid; never clobber a PAID order (race) or a
+    // status set elsewhere. A later retry can still succeed (initiate resets to UNPAID).
+    await prisma.order.updateMany({
+      where: { id: orderId, paymentStatus: { in: ['UNPAID', 'FAILED'] } },
+      data: { paymentStatus: 'FAILED' },
+    });
+    return { isPaid: false, orderId, status: result.status };
+  }
+
+  // Amount sanity check. NON-FATAL: in the hosted flow we fix the amount server-side at
+  // SendPayment, so a customer can't tamper with it; a difference here is almost always
+  // currency conversion (e.g. AED order shown as KWD on a cross-currency account). We must
+  // never leave a genuinely-paid customer with an unconfirmed order, so we log and proceed.
+  if (result.invoiceValue != null && Math.abs(result.invoiceValue - Number(order.totalAmount)) > 0.01) {
+    console.warn(
+      `[payment] amount/currency note for order ${orderId}: gateway value ${result.invoiceValue} vs order total ${order.totalAmount} (likely currency conversion)`
+    );
+  }
+
+  // Atomic claim: only the caller that flips a non-PAID order to PAID proceeds to place it.
+  const claim = await prisma.order.updateMany({
+    where: { id: orderId, paymentStatus: { not: 'PAID' } },
+    data: { paymentStatus: 'PAID', paymentTransactionId: result.transactionId },
+  });
+  if (claim.count === 0) {
+    // Lost the race — another caller already placed it. Idempotent success.
+    return { isPaid: true, orderId, status: 'Paid', alreadyProcessed: true };
+  }
+
+  // Paid, but the order was already CANCELLED (e.g. admin cancelled before the payment
+  // landed). Do NOT confirm/deduct stock — flag loudly for a manual refund.
+  if (order.status === 'CANCELLED') {
+    console.error(`[payment] order ${orderId} PAID but already CANCELLED — manual refund required`);
+    return { isPaid: true, orderId, status: 'Paid', warning: 'order_cancelled_needs_refund' };
+  }
+
+  // Now placed: clear the cart (kept until now) and fire the "order placed" push.
+  if (order.status === 'AWAITING_PAYMENT') {
+    await prisma.cartItem.deleteMany({ where: { cart: { userId: order.userId } } }).catch((err) =>
+      console.error(`[payment] order ${orderId} paid but cart clear failed: ${err.message}`)
+    );
+    await prisma.cart.updateMany({ where: { userId: order.userId }, data: { orderMessage: null } }).catch(() => {});
+    pushNotificationService.notifyOrderPlaced(order.userId, orderId).catch((err) =>
+      console.error('[push] notifyOrderPlaced:', err.message)
+    );
+  }
+
+  // Auto-confirm (transactional stock deduction + status push). Payment is already
+  // captured, so a stock shortfall here must not fail — the order stays PAID for staff
+  // to resolve manually.
+  if (order.status === 'AWAITING_PAYMENT' || order.status === 'PENDING') {
+    try {
+      await updateOrderStatus(orderId, 'CONFIRMED');
+    } catch (err) {
+      console.error(`[payment] order ${orderId} paid but could not auto-confirm: ${err.message}`);
+    }
+  }
+
+  return { isPaid: true, orderId, status: 'Paid' };
+}
+
 module.exports = {
   createOrder,
   getOrderById,
@@ -874,4 +1048,6 @@ module.exports = {
   getAdminOrderHistory,
   getOrderStatusOnly,
   updateOrderStatus,
+  initiateOrderPayment,
+  confirmOrderPayment,
 };

@@ -443,6 +443,12 @@ model Order {
   appliedPromoCodeId    String?
   paymentMethod         PaymentMethod @default(COD)
   status                OrderStatus   @default(PENDING)
+  /// Online-payment state. COD orders stay UNPAID until delivered/collected; MyFatoorah orders flip to PAID once GetPaymentStatus confirms it.
+  paymentStatus         PaymentStatus @default(UNPAID)
+  /// MyFatoorah InvoiceId returned by SendPayment (the payment we created for this order). Null for COD.
+  paymentInvoiceId      String?
+  /// MyFatoorah transaction/payment id captured at confirmation (from GetPaymentStatus). Null for COD.
+  paymentTransactionId  String?
   /// Soft ref to the saved Address used at checkout (may be null for legacy orders or if address was deleted).
   addressId             String?
   /// Address snapshot — copied from the saved or inline address at checkout time so order history stays accurate.
@@ -671,6 +677,9 @@ enum UserStatus {
 }
 
 enum OrderStatus {
+  // Online-payment order created but not yet paid. Hidden from order history / admin
+  // lists / analytics until payment succeeds, at which point it becomes CONFIRMED.
+  AWAITING_PAYMENT
   PENDING
   CONFIRMED
   PROCESSING
@@ -681,4 +690,11 @@ enum OrderStatus {
 
 enum PaymentMethod {
   COD
+  MYFATOORAH
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  FAILED
 }

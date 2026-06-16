@@ -44,6 +44,15 @@ const optional = [
   'TRANSLATION_TIMEOUT_MS',
   'TRANSLATION_RETRY_ATTEMPTS',
   'TRANSLATION_CACHE_MAX',
+  // MyFatoorah payments (Apple Pay + cards via hosted page). Payment endpoints
+  // are disabled if MYFATOORAH_API_KEY is unset; COD checkout still works.
+  'MYFATOORAH_API_KEY',
+  'MYFATOORAH_BASE_URL',
+  'MYFATOORAH_CALLBACK_URL',
+  'MYFATOORAH_ERROR_URL',
+  'MYFATOORAH_CURRENCY',
+  'MYFATOORAH_TIMEOUT_MS',
+  'MYFATOORAH_WEBHOOK_SECRET',
 ];
 
 function validateEnv() {

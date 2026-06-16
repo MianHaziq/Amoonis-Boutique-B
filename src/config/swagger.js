@@ -871,7 +871,21 @@ const options = {
             userId: { type: 'string', format: 'uuid' },
             orderMessage: { type: 'string', nullable: true },
             totalAmount: { type: 'number', example: 99.97 },
-            status: { type: 'string', enum: ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'] },
+            paymentMethod: {
+              type: 'string',
+              enum: ['COD', 'MYFATOORAH'],
+              description: 'COD = cash on delivery. MYFATOORAH = pay online (Apple Pay / cards) via POST /orders/{id}/pay.',
+            },
+            paymentStatus: {
+              type: 'string',
+              enum: ['UNPAID', 'PAID', 'FAILED'],
+              description: 'Online-payment state. COD stays UNPAID. MYFATOORAH flips to PAID once the payment is verified, FAILED if declined/cancelled.',
+            },
+            status: {
+              type: 'string',
+              enum: ['AWAITING_PAYMENT', 'PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
+              description: 'AWAITING_PAYMENT = online order created but not yet paid (hidden from lists until paid). On payment it becomes CONFIRMED.',
+            },
             inventoryDeducted: {
               type: 'boolean',
               description: 'True after a successful **CONFIRMED** transition deducted catalog stock for this order',
@@ -912,7 +926,12 @@ const options = {
             id: { type: 'string', format: 'uuid' },
             status: {
               type: 'string',
-              enum: ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
+              enum: ['AWAITING_PAYMENT', 'PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
+            },
+            paymentStatus: {
+              type: 'string',
+              enum: ['UNPAID', 'PAID', 'FAILED'],
+              description: 'Poll this after an online payment to see when it becomes PAID.',
             },
             totalAmount: { type: 'number' },
             createdAt: { type: 'string', format: 'date-time' },

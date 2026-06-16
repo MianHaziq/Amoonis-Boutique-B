@@ -37,7 +37,9 @@ const statusBody = [
  *
  *       **Recipient name & phone** — **do not send them**. The server reads `fullName` and `phone` from the user profile (collected at signup / Google / Apple) and stamps them onto the order's `shippingAddress` snapshot automatically.
  *
- *       **Payment** — only `COD` (Cash on Delivery) is supported. Field is optional and defaults to `COD`.
+ *       **Payment** — `paymentMethod` is optional and defaults to `COD` (Cash on Delivery), which places the order instantly as `PENDING`.
+ *
+ *       Pass `MYFATOORAH` to pay online (Apple Pay / cards). The order is **not placed yet**: it's created as `status: AWAITING_PAYMENT` / `paymentStatus: UNPAID`, the cart is **kept**, and it's hidden from order history until paid. Next, call **POST /orders/{id}/pay** to get the payment URL. Once payment succeeds the order becomes `CONFIRMED` / `PAID` and the cart is cleared.
  *
  *       **Promo code** — optional. Pass the code string to apply a discount. Returns `400` with a descriptive message if invalid.
  *
@@ -74,9 +76,9 @@ const statusBody = [
  *                   phone: { type: string, nullable: true, description: "Optional / ignored — sourced from user profile" }
  *               paymentMethod:
  *                 type: string
- *                 enum: [COD]
+ *                 enum: [COD, MYFATOORAH]
  *                 default: COD
- *                 description: Payment method. Currently only Cash on Delivery.
+ *                 description: "COD = Cash on Delivery. MYFATOORAH = pay online (Apple Pay / cards) — then call POST /orders/{id}/pay."
  *               promoCode:
  *                 type: string
  *                 nullable: true
@@ -104,6 +106,13 @@ const statusBody = [
  *                   city: "Dubai"
  *                   country: "United Arab Emirates"
  *                 paymentMethod: COD
+ *             online_payment_myfatoorah:
+ *               summary: Online payment (Apple Pay / cards) — then call POST /orders/{id}/pay
+ *               value:
+ *                 shippingAddress:
+ *                   streetAddress: "Villa 14, Al Wasl Road"
+ *                   city: "Dubai"
+ *                 paymentMethod: MYFATOORAH
  *     responses:
  *       201:
  *         description: Order placed successfully
@@ -132,7 +141,10 @@ const statusBody = [
  */
 const checkoutBody = [
   body('addressId').optional().isUUID().withMessage('addressId must be a valid UUID'),
-  body('paymentMethod').optional().isIn(['COD']).withMessage('paymentMethod must be COD'),
+  body('paymentMethod')
+    .optional()
+    .isIn(['COD', 'MYFATOORAH'])
+    .withMessage('paymentMethod must be COD or MYFATOORAH'),
   body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
   body('shippingAddress').optional().isObject().withMessage('shippingAddress must be an object'),
   body('shippingAddress.fullName').optional().trim(),
@@ -153,6 +165,104 @@ router.post(
   handleValidationErrors,
   orderController.createOrder
 );
+
+/**
+ * @swagger
+ * /orders/{id}/pay:
+ *   post:
+ *     summary: Start online payment (MyFatoorah — Apple Pay / cards)
+ *     description: |
+ *       Creates a MyFatoorah payment for a PENDING order whose `paymentMethod` is `MYFATOORAH`
+ *       and returns a hosted **paymentUrl**. Open it in a webview/browser; Apple Pay appears on
+ *       iPhones, card entry elsewhere. The order is only marked paid after MyFatoorah's redirect
+ *       hits the callback and the server re-verifies the payment. Requires user JWT.
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: Payment created — open paymentUrl
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               message: Payment created
+ *               data: { paymentUrl: "https://apitest.myfatoorah.com/...", invoiceId: "1234567" }
+ *       400:
+ *         description: Order not payable (wrong method/state, zero total, or already paid)
+ *       404:
+ *         description: Order not found
+ *       502:
+ *         description: Payment gateway error
+ *       503:
+ *         description: Online payment not enabled (MyFatoorah not configured)
+ */
+router.post(
+  '/:id/pay',
+  verifyToken,
+  authLimiter,
+  idParam,
+  handleValidationErrors,
+  orderController.initiatePayment
+);
+
+/**
+ * @swagger
+ * /orders/payment/callback:
+ *   get:
+ *     summary: MyFatoorah payment callback (success/return URL)
+ *     description: |
+ *       MyFatoorah redirects the customer's browser here after payment, appending `paymentId`.
+ *       The server calls GetPaymentStatus to confirm the payment, marks the order PAID and
+ *       CONFIRMED on success, and returns a small result page. **Public** (no JWT) — MyFatoorah
+ *       calls it. Never trust this redirect alone; the server re-verifies before confirming.
+ *     tags: [Orders]
+ *     parameters:
+ *       - in: query
+ *         name: paymentId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: HTML result page
+ */
+router.get('/payment/callback', orderController.paymentCallback);
+
+/**
+ * @swagger
+ * /orders/payment/error:
+ *   get:
+ *     summary: MyFatoorah payment error/cancel URL
+ *     description: Landing page for failed or cancelled payments. **Public** (no JWT).
+ *     tags: [Orders]
+ *     responses:
+ *       200:
+ *         description: HTML result page
+ */
+router.get('/payment/error', orderController.paymentError);
+
+/**
+ * @swagger
+ * /orders/payment/webhook:
+ *   post:
+ *     summary: MyFatoorah webhook (server-to-server payment notification)
+ *     description: |
+ *       Reliable async confirmation from MyFatoorah, used when the customer's browser never
+ *       returns (app closed, connection lost). Every event is re-verified via GetPaymentStatus,
+ *       so a forged request cannot mark an order paid. Configure this URL in the MyFatoorah
+ *       dashboard. **Public** (no JWT); optional HMAC signature via `MYFATOORAH_WEBHOOK_SECRET`.
+ *     tags: [Orders]
+ *     responses:
+ *       200:
+ *         description: Event received (always 200 for handled/ignored events)
+ *       401:
+ *         description: Signature verification failed (only when a webhook secret is set)
+ */
+router.post('/payment/webhook', orderController.paymentWebhook);
 
 /**
  * @swagger
