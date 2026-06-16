@@ -96,6 +96,20 @@ async function addToCart(userId, { productId, quantity = 1, message = null }) {
     },
   });
 
+  // Validate the resulting cart quantity against available stock (M11) so the user gets
+  // early feedback instead of only failing at checkout. addToCart is additive, so the
+  // check is against the existing line quantity plus the amount being added.
+  const desiredQty = (existing ? existing.quantity : 0) + qty;
+  if (product.quantity != null && desiredQty > product.quantity) {
+    return {
+      cart: null,
+      error:
+        product.quantity > 0
+          ? `Only ${product.quantity} in stock`
+          : 'This product is out of stock',
+    };
+  }
+
   if (existing) {
     await prisma.cartItem.update({
       where: { id: existing.id },
@@ -135,6 +149,21 @@ async function updateQuantity(userId, { productId, quantity }) {
       },
     });
     if (!item) return { cart: null, error: 'Product not in cart' };
+    // Validate the new absolute quantity against available stock (M11).
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { quantity: true },
+    });
+    if (!product) return { cart: null, error: 'Product not found' };
+    if (product.quantity != null && qty > product.quantity) {
+      return {
+        cart: null,
+        error:
+          product.quantity > 0
+            ? `Only ${product.quantity} in stock`
+            : 'This product is out of stock',
+      };
+    }
     await prisma.cartItem.update({
       where: { id: item.id },
       data: { quantity: qty },

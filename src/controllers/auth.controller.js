@@ -85,7 +85,8 @@ function authSessionUserFields(user) {
 // Signup
 const signup = async (req, res, next) => {
   try {
-    const { fullName, email, password } = req.body;
+    const { fullName, password } = req.body;
+    const email = (req.body.email || '').trim().toLowerCase();
     const trimmedFullName = (fullName || '').trim();
 
     if (!trimmedFullName || !email || !password) {
@@ -136,7 +137,8 @@ const signup = async (req, res, next) => {
 // Signin
 const signin = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const { password } = req.body;
+    const email = (req.body.email || '').trim().toLowerCase();
 
     if (!email || !password) {
       return error(res, 'Email and password are required', 400);
@@ -547,7 +549,7 @@ const changePassword = async (req, res, next) => {
 // Forgot Password
 const forgotPassword = async (req, res, next) => {
   try {
-    const { email } = req.body;
+    const email = (req.body.email || '').trim().toLowerCase();
 
     if (!email) {
       return error(res, 'Email is required', 400);
@@ -810,7 +812,8 @@ const updateProfile = async (req, res, next) => {
     if (req.userId && req.userId !== userId) {
       return error(res, 'Forbidden', 403);
     }
-    const { fullName, email } = req.body;
+    const { fullName } = req.body;
+    const email = req.body.email != null ? String(req.body.email).trim().toLowerCase() : undefined;
 
     const existingUser = await prisma.user.findUnique({
       where: { id: userId },

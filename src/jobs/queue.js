@@ -124,11 +124,15 @@ async function start() {
 
 /**
  * Enqueue a job. If the engine is up it's persisted and processed by a worker with
- * retries. If the engine is unavailable, the work runs INLINE (awaited) so nothing
- * is lost — at the cost of blocking the caller for that one job. Callers that don't
- * want to block on the fallback can pass { allowInlineFallback: false }.
+ * retries. If the engine is unavailable, the work runs INLINE so nothing is lost.
+ * The inline fallback is fire-and-forget (NOT awaited): it runs in the background
+ * with a .catch logger so a queue outage never couples HTTP request latency to slow
+ * FCM/SMTP calls. Callers that don't want any inline fallback can pass
+ * { allowInlineFallback: false }.
  *
- * Returns the job id (queued), 'inline' (ran inline), or null (dropped/failed).
+ * Returns the job id (queued), 'inline' (scheduled to run inline), or null
+ * (dropped/failed). The 'inline' return resolves immediately — it does not wait for
+ * the handler to finish.
  */
 async function enqueue(queueName, data = {}, options = {}) {
   const { allowInlineFallback = true, ...sendOptions } = options;
@@ -151,17 +155,56 @@ async function enqueue(queueName, data = {}, options = {}) {
   }
 
   if (allowInlineFallback && entry) {
-    try {
-      await entry.handler(data, { id: 'inline', data });
-      return 'inline';
-    } catch (err) {
-      console.error(`[jobs] inline "${queueName}" failed:`, err.message);
-      return null;
-    }
+    // Fire-and-forget: run the handler in the background so the caller's request is
+    // not blocked on FCM/SMTP during a queue outage. Errors are logged, never thrown.
+    Promise.resolve()
+      .then(() => entry.handler(data, { id: 'inline', data }))
+      .catch((err) => console.error(`[jobs] inline "${queueName}" failed:`, err.message));
+    return 'inline';
   }
 
   if (!entry) console.error(`[jobs] enqueue for unknown queue "${queueName}"`);
   return null;
+}
+
+/**
+ * Enqueue many jobs for a single queue in one durable batch insert (pg-boss v10
+ * `insert`), instead of one `send` per job. Used by high-fan-out producers like the
+ * broadcast handler so we issue a handful of multi-row inserts rather than thousands
+ * of single-row ones.
+ *
+ * Per-job options default to the queue's registered retry settings; `jobs` may
+ * override per item. If the engine isn't ready it falls back to enqueue() per job so
+ * the inline path still applies. Returns the number of jobs inserted/enqueued.
+ */
+async function enqueueMany(queueName, jobs = [], options = {}) {
+  if (!Array.isArray(jobs) || jobs.length === 0) return 0;
+  const entry = registry.get(queueName);
+  const defaults = entry ? entry.options : {};
+
+  if (ready && boss) {
+    try {
+      const rows = jobs.map((j) => ({
+        name: queueName,
+        data: j.data ?? {},
+        retryLimit: j.retryLimit ?? options.retryLimit ?? defaults.retryLimit ?? 5,
+        retryDelay: j.retryDelay ?? options.retryDelay ?? defaults.retryDelay ?? 30,
+        retryBackoff: j.retryBackoff ?? options.retryBackoff ?? defaults.retryBackoff ?? true,
+      }));
+      await boss.insert(rows);
+      return rows.length;
+    } catch (err) {
+      console.error(`[jobs] enqueueMany "${queueName}" failed:`, err.message);
+      // fall through to per-job enqueue (which itself handles inline fallback)
+    }
+  }
+
+  let count = 0;
+  for (const j of jobs) {
+    const id = await enqueue(queueName, j.data ?? {}, options);
+    if (id) count += 1;
+  }
+  return count;
 }
 
 async function stop() {
@@ -182,6 +225,7 @@ module.exports = {
   start,
   stop,
   enqueue,
+  enqueueMany,
   isEnabled,
   isReady,
   getBoss,

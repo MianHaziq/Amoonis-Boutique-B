@@ -61,7 +61,11 @@ async function cartCount(userId) {
       const ord = await prisma.order.findUnique({ where: { id: order.id }, select: { status: true, paymentStatus: true } });
       const prod = await prisma.product.findUnique({ where: { id: prodBuy.id }, select: { quantity: true } });
       check('2: payment placed the order (CONFIRMED/PAID)', res.isPaid === true && ord.status === 'CONFIRMED' && ord.paymentStatus === 'PAID');
-      check('2: stock deducted for buy-now item (10→9)', prod.quantity === 9, `quantity=${prod.quantity}`);
+      // Stock is now RESERVED at placement (H1): the COD buy-now above (qty 2) deducted 2 at
+      // placement, and this online buy-now (qty 1) deducted 1 at placement (payment confirm
+      // does NOT re-deduct). So 10 - 2 - 1 = 7. (Previously placement reserved nothing and
+      // deduction only happened at confirm, which is the oversell window H1 closes.)
+      check('2: stock reserved at placement for buy-now item (10-2-1=7)', prod.quantity === 7, `quantity=${prod.quantity}`);
       check('2: ⭐ cart STILL intact after online buy-now payment', (await cartCount(user.id)) === 1);
       paymentService.verifyPayment = origVerify;
     }

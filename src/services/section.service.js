@@ -49,6 +49,10 @@ function sectionInclude(visibility = {}) {
   return {
     products: {
       orderBy: { sortOrder: 'asc' },
+      // Bound the nested product fetch so a section with thousands of products can't
+      // blow up the response / DB load. orderBy(sortOrder asc) keeps the first N
+      // deterministic (the intended leading products).
+      take: 50,
       ...(hasFilter ? { where: { product: contentWhere } } : {}),
       include: {
         product: {

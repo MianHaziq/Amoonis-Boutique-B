@@ -307,7 +307,7 @@ model Product {
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
-  category          Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  category          Category?            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   images            ProductImage[]
   descriptions      ProductDescription[]
   productOptions    ProductOption[]
@@ -479,6 +479,7 @@ model Order {
   items        OrderItem[]
 
   @@index([userId])
+  @@index([userId, createdAt])
   @@index([status])
   @@index([createdAt])
   @@index([createdAt, status])

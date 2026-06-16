@@ -1,6 +1,7 @@
 const prisma = require('../config/db');
 const { autoTranslate, fillBilingualGapsFromTwin } = require('../utils/bilingual');
 const regionService = require('./region.service');
+const productService = require('./product.service');
 const { buildVisibilityWhere } = require('../utils/regionVisibility');
 
 const CATEGORY_BILINGUAL = [
@@ -89,6 +90,12 @@ async function updateCategory(id, data) {
     ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
     : null;
 
+  // Fetch existing status so a malformed status string falls back to the current
+  // value instead of silently resetting the category to DRAFT.
+  const existing = data.status !== undefined
+    ? await prisma.category.findUnique({ where: { id }, select: { status: true } })
+    : null;
+
   await prisma.$transaction(async (tx) => {
     await tx.category.update({
       where: { id },
@@ -98,7 +105,7 @@ async function updateCategory(id, data) {
         ...(draft.description !== undefined && { description: draft.description }),
         ...(draft.description_ar !== undefined && { description_ar: draft.description_ar ?? null }),
         ...(data.image !== undefined && { image: data.image }),
-        ...(data.status !== undefined && { status: normalizeStatus(data.status) }),
+        ...(data.status !== undefined && { status: normalizeStatus(data.status, existing?.status) }),
       },
     });
     if (newRegionIds !== null) {
@@ -139,10 +146,29 @@ async function getAllCategories(visibility = {}) {
 }
 
 async function getCategoryById(id, includeProducts = false, visibility = {}) {
+  // Apply the same region + status visibility filter to nested products that
+  // section.service.js uses, so non-staff only see PUBLISHED + in-region products
+  // and a DRAFT / other-region product never leaks into the storefront.
+  const contentWhere = buildVisibilityWhere(visibility);
+  const hasFilter = Object.keys(contentWhere).length > 0;
+  const isStaff = !!visibility.isStaff;
   const include = {
     ...(visibility.isStaff ? REGION_INCLUDE : {}),
     _count: { select: { products: true } },
-    ...(includeProducts ? { products: true } : {}),
+    ...(includeProducts
+      ? {
+          products: {
+            ...(hasFilter ? { where: contentWhere } : {}),
+            include: {
+              category: { select: { id: true, title: true } },
+              images: { orderBy: { sortOrder: 'asc' } },
+              descriptions: { orderBy: { sortOrder: 'asc' } },
+              productOptions: { orderBy: { sortOrder: 'asc' } },
+              ...(isStaff ? REGION_INCLUDE : {}),
+            },
+          },
+        }
+      : {}),
   };
   const category = await prisma.category.findFirst({
     where: { id, ...buildVisibilityWhere(visibility) },
@@ -151,7 +177,7 @@ async function getCategoryById(id, includeProducts = false, visibility = {}) {
   if (!category) return null;
   const { products, ...rest } = category;
   const mapped = mapCategory(rest);
-  if (products) mapped.products = products;
+  if (products) mapped.products = products.map(productService.mapProduct);
   return mapped;
 }
 

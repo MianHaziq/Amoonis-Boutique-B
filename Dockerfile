@@ -1,7 +1,7 @@
 # Production Dockerfile for Express + Prisma 7
 # Based on Prisma official Docker documentation
 
-FROM node:22-slim
+FROM node:20-slim
 
 # Install OpenSSL (required by Prisma on Debian-based images)
 RUN apt-get update -y && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
