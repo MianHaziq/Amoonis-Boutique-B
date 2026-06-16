@@ -21,6 +21,8 @@ function handlePromoError(err, res, next) {
     case 'PROMO_MIN_ORDER_NOT_MET':
     case 'PROMO_MAX_ORDER_EXCEEDED':
     case 'PROMO_NO_ELIGIBLE_ITEMS':
+    case 'PROMO_NEW_USERS_ONLY':
+    case 'PROMO_ZERO_TOTAL_ONLINE':
       return error(res, err.message, 400);
     default:
       return next(err);

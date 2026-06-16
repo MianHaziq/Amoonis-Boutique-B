@@ -183,7 +183,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // name/phone populated and we don't want to wipe that on their orders).
   const userRow = await prisma.user.findUnique({
     where: { id: userId },
-    select: { fullName: true, phone: true, regionId: true },
+    select: { fullName: true, phone: true, regionId: true, createdAt: true },
   });
   const profileFullName = (userRow?.fullName && userRow.fullName.trim()) || null;
   const profilePhone = userRow?.phone || null;
@@ -305,13 +305,12 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         'PROMO_NOT_FOUND', 'PROMO_INACTIVE', 'PROMO_EXPIRED', 'PROMO_NOT_STARTED',
         'PROMO_LIMIT_REACHED', 'PROMO_USER_LIMIT_REACHED', 'PROMO_MIN_ORDER_NOT_MET',
         'PROMO_MAX_ORDER_EXCEEDED', 'PROMO_NO_ELIGIBLE_ITEMS', 'PROMO_INVALID_INPUT',
+        'PROMO_NEW_USERS_ONLY',
       ]);
       if (promoErrors.has(err.code)) return { order: null, error: err.message };
       throw err;
     }
   }
-
-  const provisionalDiscount = promoResult ? promoResult.discountAmount : null;
 
   let createdOrderId;
   try {
@@ -343,14 +342,77 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     }
     txSubtotal = Math.round(txSubtotal * 100) / 100;
 
-    // Promo discount stays as previewed unless the discount exceeds the (possibly lower)
-    // recomputed subtotal, in which case we cap it. Avoids negative totals on price drops.
-    let finalDiscount = provisionalDiscount;
-    if (finalDiscount != null) {
-      finalDiscount = Math.min(Number(finalDiscount), txSubtotal);
-      finalDiscount = Math.round(finalDiscount * 100) / 100;
+    // Re-validate the promo and RECOMPUTE the discount against the live tx prices — never
+    // trust the preview amount. This catches price edits, active/window toggles, cap
+    // exhaustion, min/max-order drift, and account-age (new-users-only) changes between
+    // preview and commit. Any failure throws a tagged PROMO_* error the outer catch maps
+    // to a friendly 400 and rolls the whole order back.
+    let finalDiscount = null;
+    if (promoResult) {
+      const promoId = promoResult.promoCode.id;
+      const livePromo = await tx.promoCode.findUnique({
+        where: { id: promoId },
+        select: {
+          isActive: true,
+          startsAt: true,
+          expiresAt: true,
+          usageLimit: true,
+          usageCount: true,
+          usageLimitPerUser: true,
+          newUsersOnly: true,
+          newUserWithinDays: true,
+          discountType: true,
+          discountValue: true,
+          maxDiscountAmount: true,
+          appliesTo: true,
+          minOrderAmount: true,
+          maxOrderAmount: true,
+          products: { select: { productId: true } },
+          categories: { select: { categoryId: true } },
+        },
+      });
+      if (!livePromo) {
+        const err = new Error('Promo code not found');
+        err.code = 'PROMO_NOT_FOUND';
+        throw err;
+      }
+
+      // Per-user cap — count existing usages inside the tx, then assert all non-amount
+      // rules (active/window/global cap/per-user cap/new-users-only) in one place. Race
+      // window on the per-user cap is narrowed but not fully closed without a unique index;
+      // the global cap is closed by the atomic conditional UPDATE below.
+      const userPriorUsage =
+        livePromo.usageLimitPerUser != null
+          ? await tx.promoCodeUsage.count({ where: { promoCodeId: promoId, userId } })
+          : 0;
+      promoCodeService.assertPromoUsable(livePromo, {
+        userPriorUsage,
+        userCreatedAt: userRow?.createdAt ?? null,
+      });
+
+      // Recompute the discount on the live tx prices. computeDiscount re-checks
+      // min/maxOrderAmount and item eligibility, so a price drift that breaks those throws
+      // here rather than silently applying a stale discount.
+      const txItems = lineItems.map((item) => ({
+        productId: item.productId,
+        quantity: item.quantity,
+        price: itemPriceById.get(item.productId) ?? 0,
+        categoryId: productById.get(item.productId)?.categoryId ?? null,
+      }));
+      finalDiscount = promoCodeService.computeDiscount(livePromo, txItems).discountAmount;
+      // Belt-and-suspenders: never exceed the recomputed subtotal.
+      finalDiscount = Math.round(Math.min(Number(finalDiscount), txSubtotal) * 100) / 100;
     }
+
     const finalTotal = Math.round(Math.max(0, txSubtotal - (finalDiscount ?? 0)) * 100) / 100;
+
+    // Online payment cannot charge a 0 (or negative) amount — MyFatoorah rejects it. If a
+    // promo wipes the entire total, the customer must use Cash on Delivery instead.
+    if (isOnlinePayment && finalTotal <= 0) {
+      const err = new Error('This order total is 0 after the discount; please choose Cash on Delivery.');
+      err.code = 'PROMO_ZERO_TOTAL_ONLINE';
+      throw err;
+    }
 
     const orderRecord = await tx.order.create({
       data: {
@@ -382,58 +444,14 @@ async function createOrderCore(userId, params = {}, opts = {}) {
 
     createdOrderId = orderRecord.id;
 
-    // Atomic promo usage: an `UPDATE ... WHERE usageLimit IS NULL OR usageCount < usageLimit`
-    // returning the affected-row count gives us race-safe global cap enforcement. Per-user
-    // cap is checked by counting existing usages for this user inside the same tx.
+    // Reserve the promo: atomic global-cap increment + a usage row linked to this order.
+    // Eligibility (active/window/caps/new-user) and the discount amount were already
+    // re-validated above against live data; the conditional UPDATE here closes the race on
+    // the global counter (only succeeds if usageLimit still allows it). The usage row is
+    // released again if this order is later cancelled unpaid (see releasePromoUsageForOrder).
     if (promoResult) {
       const promoId = promoResult.promoCode.id;
 
-      // Re-read the promo inside the tx to catch toggles / window changes after pre-validation.
-      const livePromo = await tx.promoCode.findUnique({
-        where: { id: promoId },
-        select: {
-          isActive: true,
-          startsAt: true,
-          expiresAt: true,
-          usageLimit: true,
-          usageLimitPerUser: true,
-        },
-      });
-      if (!livePromo) {
-        const err = new Error('Promo code not found');
-        err.code = 'PROMO_NOT_FOUND';
-        throw err;
-      }
-      if (!livePromo.isActive) {
-        const err = new Error('This promo code is not active');
-        err.code = 'PROMO_INACTIVE';
-        throw err;
-      }
-      const now = new Date();
-      if (livePromo.startsAt && livePromo.startsAt > now) {
-        const err = new Error('This promo code is not yet available');
-        err.code = 'PROMO_NOT_STARTED';
-        throw err;
-      }
-      if (livePromo.expiresAt && livePromo.expiresAt <= now) {
-        const err = new Error('This promo code has expired');
-        err.code = 'PROMO_EXPIRED';
-        throw err;
-      }
-
-      // Per-user cap — count existing usages then assert. Race window narrowed but not
-      // fully closed without a unique index; for stricter guarantees consider a unique
-      // composite (promoCodeId, userId, orderId) and rely on the create call to fail.
-      if (livePromo.usageLimitPerUser != null) {
-        const mine = await tx.promoCodeUsage.count({ where: { promoCodeId: promoId, userId } });
-        if (mine >= livePromo.usageLimitPerUser) {
-          const err = new Error('You have already used this promo code the maximum number of times');
-          err.code = 'PROMO_USER_LIMIT_REACHED';
-          throw err;
-        }
-      }
-
-      // Atomic global-cap increment: only succeeds if usageLimit allows it.
       // Cast the column to text on the WHERE side to match how Prisma binds the param
       // — matches the pattern used elsewhere in this service for raw queries.
       const affected = await tx.$executeRaw`
@@ -453,7 +471,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
           promoCodeId: promoId,
           userId,
           orderId: orderRecord.id,
-          discountAmount: promoResult.discountAmount,
+          discountAmount: finalDiscount ?? 0,
         },
       });
     }
@@ -497,7 +515,9 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // `{ order: null, error: msg }` shape the controller already maps to a 400.
     const userFacingPromoCodes = new Set([
       'PROMO_NOT_FOUND', 'PROMO_INACTIVE', 'PROMO_EXPIRED', 'PROMO_NOT_STARTED',
-      'PROMO_LIMIT_REACHED', 'PROMO_USER_LIMIT_REACHED',
+      'PROMO_LIMIT_REACHED', 'PROMO_USER_LIMIT_REACHED', 'PROMO_MIN_ORDER_NOT_MET',
+      'PROMO_MAX_ORDER_EXCEEDED', 'PROMO_NO_ELIGIBLE_ITEMS', 'PROMO_EMPTY_CART',
+      'PROMO_NEW_USERS_ONLY', 'PROMO_ZERO_TOTAL_ONLINE',
     ]);
     if (userFacingPromoCodes.has(err.code)) {
       return { order: null, error: err.message };
@@ -909,6 +929,38 @@ async function restoreInventoryForOrder(tx, orderId) {
 }
 
 /**
+ * Release the promo reservation held by an order that is being cancelled. Promo usage is
+ * reserved at placement (so the global/per-user caps hold the slot through the
+ * AWAITING_PAYMENT window), mirroring how stock is reserved at placement. When the order is
+ * cancelled — unpaid-expiry, admin cancel, or a failed online payment — that reservation
+ * must be returned: delete the usage row(s) for this order and decrement each affected
+ * promo's usageCount (floored at 0). Idempotent: a no-promo order or an already-released
+ * order deletes nothing and decrements nothing. Must run inside the same transaction that
+ * flips the order to CANCELLED so the two can't diverge.
+ */
+async function releasePromoUsageForOrder(tx, orderId) {
+  const usages = await tx.promoCodeUsage.findMany({
+    where: { orderId },
+    select: { promoCodeId: true },
+  });
+  if (usages.length === 0) return;
+
+  await tx.promoCodeUsage.deleteMany({ where: { orderId } });
+
+  const countByPromo = new Map();
+  for (const u of usages) {
+    countByPromo.set(u.promoCodeId, (countByPromo.get(u.promoCodeId) || 0) + 1);
+  }
+  for (const [promoCodeId, n] of countByPromo) {
+    await tx.$executeRaw`
+      UPDATE "PromoCode"
+      SET "usageCount" = GREATEST(0, "usageCount" - ${n}), "updatedAt" = NOW()
+      WHERE id::text = ${promoCodeId}
+    `;
+  }
+}
+
+/**
  * Lightweight status payload for post-checkout polling (customer or staff).
  */
 async function getOrderStatusOnly(orderId, userId = null) {
@@ -997,6 +1049,13 @@ async function updateOrderStatus(orderId, status) {
 
         if (needCommit) await deductInventoryForOrder(tx, orderId);
         if (needRelease) await restoreInventoryForOrder(tx, orderId);
+
+        // Cancelling returns any promo reservation this order held (independent of stock —
+        // a code can be released even on an order whose inventory wasn't deducted). The
+        // helper is a no-op for orders without a promo or already released.
+        if (status === 'CANCELLED' && prev.status !== 'CANCELLED') {
+          await releasePromoUsageForOrder(tx, orderId);
+        }
 
         const updated = await tx.order.update({
           where: { id: orderId },

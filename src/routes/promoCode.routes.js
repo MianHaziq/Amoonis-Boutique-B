@@ -32,6 +32,9 @@ const { publicLimiter, authLimiter } = require('../middleware/rateLimit');
  *     - `startsAt` / `expiresAt` — availability window (ISO datetime, UTC).
  *     - `usageLimit` — total uses across all customers.
  *     - `usageLimitPerUser` — per-customer cap.
+ *     - `newUsersOnly` — when true, only customers whose account was created within
+ *       `newUserWithinDays` days may redeem the code (account-age based).
+ *     - `newUserWithinDays` — the account-age window in days (required when `newUsersOnly`).
  *
  *     ### User
  *     - `GET /promo-codes/available` — codes currently usable (hides internal counters).
@@ -66,6 +69,9 @@ const createValidation = [
   body('expiresAt').optional({ nullable: true }).isISO8601(),
   body('usageLimit').optional({ nullable: true }).isInt({ min: 1 }),
   body('usageLimitPerUser').optional({ nullable: true }).isInt({ min: 1 }),
+  body('newUsersOnly').optional().isBoolean(),
+  body('newUserWithinDays').optional({ nullable: true }).isInt({ min: 1 })
+    .withMessage('newUserWithinDays must be a positive integer (days)'),
   body('isActive').optional().isBoolean(),
 ];
 
@@ -91,6 +97,9 @@ const updateValidation = [
   body('expiresAt').optional({ nullable: true }).isISO8601(),
   body('usageLimit').optional({ nullable: true }).isInt({ min: 1 }),
   body('usageLimitPerUser').optional({ nullable: true }).isInt({ min: 1 }),
+  body('newUsersOnly').optional().isBoolean(),
+  body('newUserWithinDays').optional({ nullable: true }).isInt({ min: 1 })
+    .withMessage('newUserWithinDays must be a positive integer (days)'),
   body('isActive').optional().isBoolean(),
 ];
 

@@ -588,6 +588,14 @@ model PromoCode {
   usageLimitPerUser Int?
   usageCount        Int  @default(0)
 
+  /// When true, only "new" customers may redeem this code — a user whose account
+  /// was created within the last `newUserWithinDays` days. Account-age based (not
+  /// first-order), so the window is configurable per code.
+  newUsersOnly      Boolean @default(false)
+  /// Account-age window in days for `newUsersOnly`. Eligible when
+  /// (now - user.createdAt) <= this many days. Null falls back to a server default.
+  newUserWithinDays Int?
+
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
