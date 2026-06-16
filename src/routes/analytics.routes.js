@@ -2,7 +2,7 @@ const express = require('express');
 const { query } = require('express-validator');
 const router = express.Router();
 const analyticsController = require('../controllers/analytics.controller');
-const { verifyAdminOrManager, requireAnyManagerPermission } = require('../middleware/managerAuth');
+const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors } = require('../middleware/validate');
 const analyticsService = require('../services/analytics.service');
 
@@ -11,7 +11,7 @@ const analyticsService = require('../services/analytics.service');
  * tags:
  *   name: Admin analytics
  *   description: |
- *     Revenue and order metrics for the admin dashboard (charts). **Admin** or **manager with ORDERS** (or **SETTINGS**).
+ *     Revenue and order metrics for the admin dashboard (charts). **Admin** or **manager with ANALYTICS**.
  *     All ranges are **UTC**; map to store-local in the client if needed.
  *     **Revenue** (time series) sums `Order.totalAmount` for rows where `status <> CANCELLED`. **GET …/kpi** totals. **GET …/revenue/by-category** ranks categories. **GET …/sales/by-day** = per-calendar-day net sales (gap-filled). Preset **all_time** uses monthly buckets on revenue and sales-by-day routes.
  */
@@ -34,7 +34,7 @@ const presetValues = analyticsService.PRESETS;
 router.get(
   '/presets',
   verifyAdminOrManager,
-  requireAnyManagerPermission(['ORDERS', 'SETTINGS']),
+  requireManagerPermission('ANALYTICS'),
   analyticsController.listPresets
 );
 
@@ -83,7 +83,7 @@ router.get(
 router.get(
   '/revenue',
   verifyAdminOrManager,
-  requireAnyManagerPermission(['ORDERS', 'SETTINGS']),
+  requireManagerPermission('ANALYTICS'),
   [
     query('preset').optional().isIn(presetValues),
     query('from').optional().trim().isString(),
@@ -136,7 +136,7 @@ router.get(
 router.get(
   '/kpi',
   verifyAdminOrManager,
-  requireAnyManagerPermission(['ORDERS', 'SETTINGS']),
+  requireManagerPermission('ANALYTICS'),
   [
     query('preset').optional().isIn(presetValues),
     query('from').optional().trim().isString(),
@@ -188,7 +188,7 @@ router.get(
 router.get(
   '/revenue/by-category',
   verifyAdminOrManager,
-  requireAnyManagerPermission(['ORDERS', 'SETTINGS']),
+  requireManagerPermission('ANALYTICS'),
   [
     query('preset').optional().isIn(presetValues),
     query('from').optional().trim().isString(),
@@ -242,7 +242,7 @@ router.get(
 router.get(
   '/sales/by-day',
   verifyAdminOrManager,
-  requireAnyManagerPermission(['ORDERS', 'SETTINGS']),
+  requireManagerPermission('ANALYTICS'),
   [
     query('preset').optional().isIn(presetValues),
     query('from').optional().trim().isString(),

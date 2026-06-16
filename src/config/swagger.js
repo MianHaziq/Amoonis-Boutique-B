@@ -45,7 +45,7 @@ const options = {
           '',
           '### Permission keys (JSON strings, uppercase)',
           '',
-          'PRODUCTS · ORDERS · CATEGORIES · SECTIONS · BANNERS · CONTACT · SETTINGS',
+          'PRODUCTS · ORDERS · CATEGORIES · SECTIONS · BANNERS · CONTACT · SETTINGS · PROMO_CODES · ANALYTICS · REGIONS',
           '',
           'You can assign several at once (for example orders **and** products).',
           '',
@@ -174,7 +174,7 @@ const options = {
         },
         ManagerPermissionKey: {
           type: 'string',
-          enum: ['PRODUCTS', 'ORDERS', 'CATEGORIES', 'SECTIONS', 'BANNERS', 'CONTACT', 'SETTINGS', 'PROMO_CODES'],
+          enum: ['PRODUCTS', 'ORDERS', 'CATEGORIES', 'SECTIONS', 'BANNERS', 'CONTACT', 'SETTINGS', 'PROMO_CODES', 'ANALYTICS', 'REGIONS'],
           description:
             'Area of the admin API this manager may access. Send these exact uppercase values in `managerPermissions` arrays. Admins bypass checks.',
         },

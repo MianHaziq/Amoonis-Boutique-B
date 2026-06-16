@@ -15,6 +15,20 @@ async function createOrder(req, res, next) {
   }
 }
 
+// POST /orders/buy-now — order a single product directly (Apple Pay / COD) without using the cart.
+async function buyNow(req, res, next) {
+  try {
+    const userId = req.userId;
+    const { order, error: errMsg } = await orderService.buyNow(userId, req.body, {
+      regionCode: req.headers['x-region'],
+    });
+    if (errMsg) return error(res, errMsg, 400);
+    return success(res, order, 'Order placed successfully', 201);
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getOrderById(req, res, next) {
   try {
     const { id } = req.params;
@@ -281,6 +295,7 @@ async function paymentWebhook(req, res) {
 
 module.exports = {
   createOrder,
+  buyNow,
   getOrderById,
   getAllOrdersAdmin,
   getMyOrderHistory,

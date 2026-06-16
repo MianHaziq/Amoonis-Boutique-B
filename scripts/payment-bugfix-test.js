@@ -96,8 +96,11 @@ async function mkOrder(userId, productId, { status, qty, total, paymentMethod })
       const p = await mkProduct(10); ids.products.push(p.id);
       const o = await mkOrder(u.id, p.id, { status: 'AWAITING_PAYMENT', qty: 1, total: 100, paymentMethod: 'MYFATOORAH' }); ids.orders.push(o.id);
 
+      // Use a currency genuinely different from what we charged in, so this is a real
+      // cross-currency case (not a same-currency underpayment).
+      const OTHER = CCY === 'USD' ? 'EUR' : 'USD';
       paymentService.verifyPayment = async () => ({
-        isPaid: true, status: 'Paid', invoiceId: 'inv3', invoiceValue: 30, currency: 'KWD', orderId: o.id, transactionId: 't3',
+        isPaid: true, status: 'Paid', invoiceId: 'inv3', invoiceValue: 30, currency: OTHER, orderId: o.id, transactionId: 't3',
       });
       const res = await orderService.confirmOrderPayment('inv3', 'InvoiceId');
       await sleep(400);

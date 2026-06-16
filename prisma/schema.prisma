@@ -463,6 +463,9 @@ model Order {
   shippingCountry       String?
   /// When true, Product.quantity has been reduced for this order’s line items (set on PENDING→CONFIRMED; cleared on cancel/revert).
   inventoryDeducted     Boolean       @default(false)
+  /// Whether placing this order should clear the user's cart. True for normal cart checkout;
+  /// false for "Buy Now" (single-product direct purchase) so the cart is left untouched.
+  clearCartOnPayment    Boolean       @default(true)
   /// Region the order was placed in (captured from X-Region / the user's region at checkout).
   /// Drives region-scoped analytics. Nullable for legacy orders (backfilled to default region).
   regionId              String?
@@ -680,6 +683,8 @@ enum ManagerPermission {
   CONTACT
   SETTINGS
   PROMO_CODES
+  ANALYTICS
+  REGIONS
 }
 
 enum DiscountType {
