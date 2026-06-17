@@ -53,7 +53,7 @@ async function sendEmail(to, subject, html) {
     return { sent: false, error: { message: 'Email not configured' } };
   }
 
-  const from = process.env.FROM_EMAIL || process.env.RESEND_FROM || 'LKnight LMS <onboarding@resend.dev>';
+  const from = process.env.FROM_EMAIL || process.env.RESEND_FROM || 'Amoon Bloom <onboarding@resend.dev>';
   const { data, error } = await client.emails.send({
     from,
     to: [to],

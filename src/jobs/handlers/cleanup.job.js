@@ -41,6 +41,29 @@ async function cleanupAbandonedCarts() {
   return { deleted: res.count };
 }
 
+// Prune the in-app notification inbox so it doesn't grow without bound. Read
+// notifications are deleted after NOTIFICATION_RETAIN_DAYS; unread ones are kept much
+// longer (NOTIFICATION_UNREAD_RETAIN_DAYS) so a user who hasn't opened the app still
+// sees them, but are eventually purged too. Deletes in capped batches to avoid a single
+// huge statement locking the table.
+async function cleanupNotifications() {
+  const readDays = Math.max(1, parseInt(process.env.NOTIFICATION_RETAIN_DAYS || '90', 10));
+  const unreadDays = Math.max(readDays, parseInt(process.env.NOTIFICATION_UNREAD_RETAIN_DAYS || '180', 10));
+  const readCutoff = new Date(Date.now() - readDays * 86_400_000);
+  const unreadCutoff = new Date(Date.now() - unreadDays * 86_400_000);
+
+  const res = await prisma.notification.deleteMany({
+    where: {
+      OR: [
+        { readAt: { not: null }, createdAt: { lt: readCutoff } },
+        { createdAt: { lt: unreadCutoff } },
+      ],
+    },
+  });
+  if (res.count > 0) console.log(`[jobs] cleanup.notifications deleted=${res.count}`);
+  return { deleted: res.count };
+}
+
 // Deactivate promo codes whose expiry has passed so they drop out of active lookups.
 async function archiveExpiredPromos() {
   const res = await prisma.promoCode.updateMany({
@@ -68,6 +91,12 @@ module.exports = [
     queue: QUEUES.CART_ABANDONED,
     handler: cleanupAbandonedCarts,
     cron: process.env.CART_ABANDONED_CRON || '30 3 * * *', // daily 03:30 UTC
+    options: { retryLimit: 0 },
+  },
+  {
+    queue: QUEUES.CLEANUP_NOTIFICATIONS,
+    handler: cleanupNotifications,
+    cron: process.env.CLEANUP_NOTIFICATIONS_CRON || '50 3 * * *', // daily 03:50 UTC
     options: { retryLimit: 0 },
   },
   {
