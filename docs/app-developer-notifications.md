@@ -1,76 +1,125 @@
-# Push Notifications — App Developer Integration Guide
+# Notifications — App Developer Integration Guide
 
-Hi 👋 — here's everything you need to wire push notifications into the mobile app. The backend is **ready and live** for the order-lifecycle flow; promotions/announcements have backend functions in place but no admin trigger UI yet (out of scope for the app integration).
-
----
-
-## TL;DR
-
-- **Provider:** Firebase Cloud Messaging (FCM HTTP v1). No OneSignal, no Expo, no APNs-direct — just Firebase.
-- **Backend status:** ✅ Ready. Firebase service account is already configured on the server.
-- **What you do:**
-  1. Get the FCM token from the Firebase SDK on the device.
-  2. After login, `POST` it to `/api/v1/user/push/token`.
-  3. On logout, `DELETE` it from the same endpoint.
-  4. Listen for incoming FCM messages and deep-link based on the `data.type` field.
-  5. (Optional) Build a settings screen using `/api/v1/user/notifications/preferences`.
-
----
-
-## 1. Provider & Setup
-
-We use **Firebase Cloud Messaging (FCM)** via the Firebase Admin SDK on the server. You'll need:
-
-- The **Firebase project** credentials (google-services.json for Android, GoogleService-Info.plist for iOS) — I'll share these separately. They must come from the **same Firebase project** the backend uses, otherwise tokens won't be deliverable.
-- For iOS: APNs auth key uploaded to the Firebase Console (Project Settings → Cloud Messaging → Apple app configuration).
-- For Android: nothing extra — google-services.json is enough.
-
-The data payload uses string values only (FCM constraint), so parse accordingly on the client.
+> ## 📣 Read this first (summary)
+>
+> The notification **backend is fully built, tested, and live**. Nothing is integrated on the app side yet — this doc is your full handoff.
+>
+> **What the backend does:**
+> - **Push (FCM)** — order lifecycle (placed → confirmed → processing → shipped → delivered → cancelled), automatic **"new promo code is live"** notifications, and admin announcements. Sent asynchronously via a durable job queue (retries, never blocks requests).
+> - **In-app inbox** — every push is also saved as a record, so users see history + unread badges even if offline. Auto-pruned over time.
+> - **Per-user preferences** — users enable/disable each channel (order updates / promotions / announcements), enforced server-side.
+> - **Localized** push copy (EN/AR) — you do **not** translate notification text on the client.
+>
+> **What you need to do:**
+> 1. Add Firebase using the **same project as us: `amoonbloom`** (we'll share `google-services.json` / `GoogleService-Info.plist`; iOS also needs the APNs key in Firebase).
+> 2. **Save the FCM token** → `POST /api/v1/user/push/token` (body `{ "fcmToken": "...", "platform": "IOS|ANDROID|WEB" }`, with the user's `Bearer` JWT) — after login and on every token refresh. `DELETE` it on logout **before** clearing the JWT.
+> 3. Handle pushes in foreground/background/killed and **deep-link on `data.type`**.
+> 4. Build **two screens**: a **Notification Preferences page** (`/user/notifications/preferences`) and an **In-app Inbox** with unread badge (`/notifications`).
+>
+> ⚠️ Follow the **professional-standards checklist (§9)** — it covers what usually breaks (permission UX, token refresh, badge sync, deep-link fallbacks, RTL/i18n, logout token cleanup). Full flow + all 8 endpoints are below.
 
 ---
 
-## 2. API Endpoints
+Hi 👋 — this is the **complete** guide for integrating notifications into the mobile app. The backend notification module is **fully built, tested (34/34 automated checks passing), and live**. Nothing on the app side is integrated yet — this document tells you exactly what to build and how.
 
-All endpoints require a JWT bearer token from the existing auth flow.
+Please follow the **professional-standards checklist in §9** — it's not optional, it's how we avoid the classic notification bugs (duplicate tokens, missing permission prompts, badges that never clear, deep links that don't route).
 
-**Base URL:** `https://<your-host>/api/v1` (production) or `http://<lan-ip>:5000/api/v1` (local).
-A legacy `/api` prefix (without `/v1`) also works for backward compatibility, but prefer `/api/v1`.
+---
 
-### 2.1 Register device token
+## 0. TL;DR — what you need to do
+
+1. Add Firebase to the app (same Firebase project as the backend — **`amoonbloom`**).
+2. Request OS notification permission (iOS always; Android 13+).
+3. Get the FCM token and **`POST /api/v1/user/push/token`** after login + on every token refresh.
+4. **`DELETE`** that token on logout (before clearing the JWT).
+5. Handle incoming pushes in all 3 app states (foreground / background / killed) and **deep-link on `data.type`**.
+6. Build **two screens**:
+   - **Notification Preferences page** (settings) → uses `/user/notifications/preferences`.
+   - **In-app Notification Inbox** (list + unread badge) → uses `/notifications`.
+
+Everything you call is listed in §3 with exact request/response.
+
+---
+
+## 1. How the whole module works (architecture)
+
+We send notifications through **3 layers**, all handled by the backend automatically:
+
+```
+ An event happens (order placed, status change, promo goes live)
+        │
+        ▼
+ Notification dispatcher  ──enqueues──►  Background job queue (pg-boss, durable, retries)
+                                                │
+                                                ▼
+                                   Push worker resolves localized text, then:
+                                                │
+                        ┌───────────────────────┼───────────────────────┐
+                        ▼                        ▼                        ▼
+              1) FCM push to device   2) Writes In-App Inbox    3) Respects user preference
+                 (if channel on)         record (always*)          (orderStatus/promotions/announcements)
+```
+
+Key properties you should rely on:
+
+- **Asynchronous & reliable.** Sends go through a durable queue (pg-boss on Postgres) with automatic retries. A push is never lost because of a transient FCM hiccup, and placing an order never blocks on push delivery.
+- **In-app inbox is the source of truth for history.** Every push is also persisted to a `Notification` record, so a user who was offline (or had push disabled) still sees it in the inbox. **This is why you must build the inbox screen** — push alone is lossy.
+- **Per-user preferences are enforced server-side.** If a user turns off a channel, we don't send that push. (Order-status records are still written to the inbox even if the push is off, because they're transactional — see §5.)
+- **Localized.** Push text is rendered in the user's `preferredLanguage` (English/Arabic) automatically. You don't translate notification copy on the client.
+
+\* Order-status notifications are always written to the inbox even if push is off; promotional/announcement notifications are skipped entirely when the user opted out.
+
+---
+
+## 2. Provider & Firebase setup
+
+We use **Firebase Cloud Messaging (FCM HTTP v1)**. No OneSignal, no Expo, no direct APNs.
+
+You'll need, from the **same Firebase project the backend uses (`amoonbloom`)**:
+
+- **Android:** `google-services.json`.
+- **iOS:** `GoogleService-Info.plist` **and** an APNs Auth Key uploaded to Firebase Console → Project Settings → Cloud Messaging → Apple app configuration. Without the APNs key, iOS pushes silently fail.
+
+⚠️ The #1 cause of "API returns 200 but no push arrives" is the client using a **different Firebase project** than the server. They must match. I'll share these config files with you directly.
+
+**FCM data payload values are always strings** (FCM constraint) — parse/cast on the client accordingly.
+
+---
+
+## 3. API Reference
+
+**Base URL:** `https://<host>/api/v1` (a legacy `/api` prefix without `/v1` also works, but use `/api/v1`).
+**Auth:** every endpoint requires `Authorization: Bearer <JWT>` from the existing auth flow.
+**Response envelope (all endpoints):**
+```json
+{ "success": true, "message": "…", "data": { … }, "meta": { … } }
+```
+Errors: `{ "success": false, "message": "…", "errors": [ … ] }`.
+
+### 3.1 Register device token — `POST /user/push/token`
 
 ```http
 POST /api/v1/user/push/token
 Authorization: Bearer <JWT>
 Content-Type: application/json
 
-{
-  "fcmToken": "<token from Firebase SDK>",
-  "platform": "ANDROID"   // "IOS" | "ANDROID" | "WEB" — defaults to ANDROID
-}
+{ "fcmToken": "<token from Firebase SDK>", "platform": "ANDROID" }
 ```
+- `platform`: `"IOS" | "ANDROID" | "WEB"` (optional, defaults to `ANDROID`).
 
-**Response 200:**
+**200:**
 ```json
 {
   "success": true,
   "message": "Device registered for push notifications",
-  "data": {
-    "id": "uuid",
-    "platform": "ANDROID",
-    "updatedAt": "2026-05-10T12:34:56.000Z"
-  }
+  "data": { "id": "uuid", "platform": "ANDROID", "updatedAt": "2026-06-17T12:34:56.000Z" }
 }
 ```
+- **Idempotent** — same token just refreshes it.
+- If the token was registered to another user (someone else logged in on this device), it's **automatically transferred** to the current user.
+- A user can have **multiple devices** — each registers its own token.
 
-**Notes:**
-- Idempotent — calling it again with the same token just refreshes `updatedAt`.
-- If the same token was previously registered to another user (e.g. someone else logged in on this device), the backend automatically transfers it to the current user.
-- One user can have **multiple tokens** (phone + tablet, etc.) — each device registers its own.
-- Call this once after login and again whenever the SDK reports a token refresh (`onTokenRefresh` / `onNewToken`).
-
-Source: [src/controllers/pushNotification.controller.js:5-24](../src/controllers/pushNotification.controller.js#L5-L24)
-
-### 2.2 Unregister device token (on logout)
+### 3.2 Unregister token (on logout) — `DELETE /user/push/token`
 
 ```http
 DELETE /api/v1/user/push/token
@@ -79,90 +128,91 @@ Content-Type: application/json
 
 { "fcmToken": "<same token>" }
 ```
+- **200:** `{ "success": true, "message": "Device unregistered" }`
+- **404:** token not found for this user.
+- ⚠️ Call this **before** you clear the JWT, or it will 401.
 
-**Response 200:** `{ "success": true, "message": "Device unregistered" }`
-**Response 404:** Token not found for this user.
+### 3.3 Get preferences — `GET /user/notifications/preferences`
 
-Important: do this **before** clearing the JWT on logout, otherwise the request will 401.
-
-Source: [src/controllers/pushNotification.controller.js:26-37](../src/controllers/pushNotification.controller.js#L26-L37)
-
-### 2.3 Get notification preferences
-
-```http
-GET /api/v1/user/notifications/preferences
-Authorization: Bearer <JWT>
-```
-
-**Response 200:**
 ```json
 {
   "success": true,
   "message": "Notification preferences",
-  "data": {
-    "orderStatus": true,
-    "promotions": true,
-    "announcements": true,
-    "updatedAt": "2026-05-10T12:34:56.000Z"
-  }
+  "data": { "orderStatus": true, "promotions": true, "announcements": true, "updatedAt": "…" }
 }
 ```
+First read auto-creates the row with all channels `true`.
 
-If the user has never set preferences, the row is created on first read with all three set to `true`.
-
-### 2.4 Update notification preferences
+### 3.4 Update preferences — `PATCH /user/notifications/preferences`
 
 ```http
 PATCH /api/v1/user/notifications/preferences
-Authorization: Bearer <JWT>
 Content-Type: application/json
 
-{
-  "orderStatus": true,
-  "promotions": false,
-  "announcements": true
-}
+{ "promotions": false }
 ```
+- All three fields (`orderStatus`, `promotions`, `announcements`) are optional **individually**, but send **at least one** boolean (else `400`). Omitted fields are unchanged.
+- Returns the full updated preferences object.
 
-All three fields are optional individually, but at least one must be present (returns 400 otherwise). Returns the updated preferences object.
+### 3.5 List inbox — `GET /notifications`
 
-Source: [src/controllers/pushNotification.controller.js:39-67](../src/controllers/pushNotification.controller.js#L39-L67)
+```http
+GET /api/v1/notifications?page=1&limit=20&unreadOnly=false
+```
+| Query | Default | Notes |
+|---|---|---|
+| `page` | 1 | |
+| `limit` | 20 | max 50 |
+| `unreadOnly` | false | `true`/`1` → only unread |
 
----
-
-## 3. What the backend sends
-
-Today, **two events** trigger pushes:
-
-### 3.1 Order placed (right after checkout)
-
-Triggered automatically inside `createOrder()`. Sent to all of that user's registered devices, gated by the `orderStatus` preference.
-
+**200:**
 ```json
 {
-  "notification": {
-    "title": "Order placed",
-    "body": "Thank you! Your Amoon Bloom order was received."
-  },
-  "data": {
-    "brand": "Amoon Bloom",
-    "type": "ORDER_PLACED",
-    "orderId": "<uuid>",
-    "status": "PENDING"
+  "success": true,
+  "message": "Notifications fetched",
+  "data": [
+    {
+      "id": "uuid",
+      "type": "ORDER_STATUS",
+      "title": "On the way",
+      "body": "Your order has shipped.",
+      "data": { "type": "ORDER_STATUS", "orderId": "uuid", "status": "SHIPPED" },
+      "readAt": null,
+      "createdAt": "2026-06-17T12:34:56.000Z"
+    }
+  ],
+  "meta": {
+    "pagination": { "page": 1, "limit": 20, "total": 42, "totalPages": 3 },
+    "unreadCount": 5
   }
 }
 ```
+Newest first. `readAt: null` = unread.
 
-### 3.2 Order status change (admin updates the order)
+### 3.6 Unread count (for the badge) — `GET /notifications/unread-count`
+```json
+{ "success": true, "message": "Unread count fetched", "data": { "unreadCount": 5 } }
+```
 
-Triggered when admin/manager changes order status. `PENDING` is skipped (already covered above).
+### 3.7 Mark one read — `PATCH /notifications/:id/read`
+- `:id` must be a UUID.
+- **200:** `{ "success": true, "message": "Notification marked read" }`
+- **404:** not found / not yours / already read.
+
+### 3.8 Mark all read — `POST /notifications/read-all`
+```json
+{ "success": true, "message": "All notifications marked read", "data": { "updated": 5 } }
+```
+
+---
+
+## 4. The push payload (what arrives on the device)
+
+Every push has a `notification` block (for the OS tray) and a `data` block (for routing). **Always branch on `data.type`, never on the title/body text** (copy is localized and will change).
 
 ```json
 {
-  "notification": {
-    "title": "On the way",
-    "body": "Your order has shipped."
-  },
+  "notification": { "title": "On the way", "body": "Your order has shipped." },
   "data": {
     "brand": "Amoon Bloom",
     "type": "ORDER_STATUS",
@@ -172,86 +222,128 @@ Triggered when admin/manager changes order status. `PENDING` is skipped (already
 }
 ```
 
-Status → title/body mapping (server-side, [src/services/pushNotification.service.js:10-16](../src/services/pushNotification.service.js#L10-L16)):
-
-| Status | Title | Body |
-|---|---|---|
-| `CONFIRMED` | Order confirmed | Your Amoon Bloom order is confirmed. |
-| `PROCESSING` | Preparing your order | We're getting your items ready. |
-| `SHIPPED` | On the way | Your order has shipped. |
-| `DELIVERED` | Delivered | Your order was delivered. Enjoy! |
-| `CANCELLED` | Order cancelled | Your order has been cancelled. |
-
-### 3.3 Future channels (backend functions exist, not wired yet)
-
-- `type: "PROMOTION"` — gated by `promotions` preference
-- `type: "ANNOUNCEMENT"` — gated by `announcements` preference
-
-These will arrive in the same shape (notification + data with a `type` field) once we add the admin trigger. Build the client-side handler now so it's ready.
-
-### 3.4 Platform-specific options the server already sets
-
-- **Android:** `priority: high` — wakes the device for foreground delivery.
-- **iOS:** `apns.payload.aps.sound = "default"` — plays the default sound.
-
-You don't need to set anything else on the client to get sound/priority — it's done.
+Server already sets: **Android** `priority: high`; **iOS** `aps.sound = "default"`. You don't configure sound/priority on the client.
 
 ---
 
-## 4. Client-side handling
+## 5. Events that trigger notifications
 
-**Always branch on `data.type`** (not on the `notification` text — copy will change). Suggested deep links:
+| Event | `data.type` | Extra `data` fields | Preference channel | Audience |
+|---|---|---|---|---|
+| Order placed (after checkout / payment) | `ORDER_PLACED` | `orderId`, `status: "PENDING"` | `orderStatus`* | the buyer |
+| Order confirmed | `ORDER_STATUS` | `orderId`, `status: "CONFIRMED"` | `orderStatus`* | the buyer |
+| Order processing | `ORDER_STATUS` | `orderId`, `status: "PROCESSING"` | `orderStatus`* | the buyer |
+| Order shipped | `ORDER_STATUS` | `orderId`, `status: "SHIPPED"` | `orderStatus`* | the buyer |
+| Order delivered | `ORDER_STATUS` | `orderId`, `status: "DELIVERED"` | `orderStatus`* | the buyer |
+| Order cancelled | `ORDER_STATUS` | `orderId`, `status: "CANCELLED"` | `orderStatus`* | the buyer |
+| **New promo code goes live** 🆕 | `PROMOTION` | `promoCode`, `promoCodeId` | `promotions` | **all users**, or **new users only** if the code is new-user-only |
+| Admin announcement | `ANNOUNCEMENT` | (campaign-specific) | `announcements` | broadcast |
 
-| `data.type` | Action |
+\* **Order-status pushes are transactional**: even if `orderStatus` push is OFF, the notification is still written to the in-app inbox (the push just isn't delivered). Promotions/announcements are skipped entirely when their channel is off.
+
+### About the new "promo code goes live" feature 🆕
+When an admin creates a discount code with a future start date (e.g. *active from the 1st*), the backend automatically notifies users **on the day it becomes active** — once per code:
+- A **normal** code → broadcast to **all** users.
+- A code flagged **new-users-only** → sent **only to eligible new users** (so people aren't told about a code they can't redeem).
+
+On the client this arrives as `data.type = "PROMOTION"` with `data.promoCode` (the code string) and `data.promoCodeId`. Route it to your deals/promo screen and you can pre-fill or highlight the code.
+
+---
+
+## 6. Client-side handling (all 3 states)
+
+Branch on `data.type` and deep-link:
+
+| `data.type` | Suggested action |
 |---|---|
-| `ORDER_PLACED` | Navigate to order detail screen, `orderId` from data |
-| `ORDER_STATUS` | Same — order detail screen, optionally show toast with new `status` |
-| `PROMOTION` | Navigate to promo/deals screen (when implemented) |
-| `ANNOUNCEMENT` | Navigate to news/announcements screen (when implemented) |
+| `ORDER_PLACED` / `ORDER_STATUS` | Open order detail (`orderId`); optionally toast the new `status` |
+| `PROMOTION` | Open deals/promo screen; highlight `promoCode` |
+| `ANNOUNCEMENT` | Open news/announcements screen |
 
-Handle three states:
-1. **Foreground** — Firebase fires `onMessage`/`onMessageReceived`. You'll need to render an in-app banner manually; the system tray won't show it.
-2. **Background** — System tray notification. Tap navigates via your `onNotificationOpenedApp` handler.
-3. **Killed/Quit** — Tap launches the app; read `getInitialNotification()` on startup and route from there.
+Handle each app state:
+1. **Foreground** — Firebase fires `onMessage` / `onMessageReceived`; the OS tray does **not** show it, so render an in-app banner yourself (and refresh the inbox badge).
+2. **Background** — OS tray notification; tap → `onNotificationOpenedApp` → route.
+3. **Killed/Quit** — tap launches the app; read `getInitialNotification()` on startup and route from there.
 
----
-
-## 5. Token lifecycle — please get this right
-
-This is where most integrations break:
-
-1. **On every app start (when logged in):** Get the current FCM token and POST it. The endpoint is idempotent.
-2. **On token refresh** (`onTokenRefresh` / `onNewToken`): POST the new token. Old token gets cleaned up automatically by FCM rejecting it server-side.
-3. **On logout:** DELETE the token first, *then* clear the JWT.
-4. **On login as a different user on the same device:** Just POST the token with the new JWT. The backend handles the transfer.
-
-If a token becomes invalid (uninstall, etc.), FCM returns `messaging/registration-token-not-registered` and the backend automatically purges it ([src/services/pushNotification.service.js:55-67](../src/services/pushNotification.service.js#L55-L67)) — you don't need to do anything.
+After handling any push, **refresh the unread count** (§3.6) so the badge stays in sync.
 
 ---
 
-## 6. Testing
+## 7. Token lifecycle — get this right
 
-Once you've got the token registration working, the simplest end-to-end test:
+Most integration bugs live here:
 
-1. Log in on the device, register the token.
-2. Place an order through the app → you should get the "Order placed" push within seconds.
-3. Have me (or admin) update the order status → you should get the matching status push.
-4. Toggle `orderStatus: false` via PATCH → place another order → no push should arrive.
+1. **On app start (logged in):** get the current FCM token → `POST` it (idempotent).
+2. **On token refresh** (`onTokenRefresh` / `onNewToken`): `POST` the new token immediately.
+3. **On logout:** `DELETE` the token **first**, then clear the JWT.
+4. **Different user logs in on same device:** just `POST` with the new JWT — backend transfers it.
 
-If pushes don't arrive but the API calls return 200, check:
-- Token is correct (log it on the client, compare to DB).
-- Firebase project on the client matches the one on the server (most common cause of silent failures).
-- iOS: APNs key is uploaded to Firebase Console.
-- Server logs — push errors are logged but don't block the request.
+Invalid tokens (uninstall etc.) are detected and **purged automatically** server-side when FCM rejects them — you do nothing.
 
 ---
 
-## 7. Questions / open items
+## 8. Screens you must build
 
-- **In-app notification history (a "Notifications" inbox screen with read/unread state)** isn't built yet. If the design needs it, let me know and I'll add a `Notification` model + endpoints (`GET /notifications`, `PATCH /notifications/:id/read`, unread count). It's ~half a day of backend work.
-- **Rich media (image in push)** isn't sent today, but FCM supports it. If the design needs hero images in pushes, ping me and I'll add an `imageUrl` to the payload.
-- **Deep link URLs** — currently I'm sending `orderId` and you build the route on the client. If you'd rather have a full `deepLink` string in the data payload, easy to add.
+### 8.1 Notification Preferences page (Settings)
+- On open: `GET /user/notifications/preferences` → render 3 toggles:
+  - **Order updates** → `orderStatus`
+  - **Promotions & offers** → `promotions`
+  - **Announcements** → `announcements`
+- On toggle: `PATCH` the single changed field (optimistic UI, revert on error).
+- **Also surface OS-level permission state.** If the user denied system notification permission, show a banner ("Notifications are turned off in system settings") with a deep link to OS settings — toggling our in-app prefs can't override a denied OS permission.
 
-Anything else, just ping me.
+### 8.2 In-app Notification Inbox
+- A list screen: `GET /notifications?page=…&limit=20` (infinite scroll / pagination via `meta.pagination`).
+- Show unread vs read styling (`readAt == null` = unread).
+- **Badge:** drive the app icon / tab badge from `GET /notifications/unread-count`.
+- On tap: `PATCH /notifications/:id/read`, then deep-link using the row's `data` (same `type` routing as §6).
+- "Mark all read" action: `POST /notifications/read-all`.
+- Pull-to-refresh re-fetches page 1 + unread count.
+- Empty state when `total === 0`.
+
+> Note: old notifications are auto-pruned server-side (read after ~90 days, anything after ~180), so the inbox stays bounded — don't cache forever on the client.
+
+---
+
+## 9. Professional-standards checklist ✅
+
+Please tick all of these — this is the bar for "done":
+
+- [ ] **Permission UX:** request notification permission at a sensible moment (not cold on first launch); handle "denied" gracefully with a settings deep link.
+- [ ] **Token registration is reliable:** posted on login, on every refresh, and re-posted on app start. Never assume one post is enough.
+- [ ] **Logout order:** `DELETE` token → then clear JWT. (Don't orphan tokens — they cause pushes to ex-users' devices.)
+- [ ] **Deep-link on `data.type`**, never on copy text. Unknown `type` → open the inbox (safe fallback), don't crash.
+- [ ] **All 3 app states** handled (foreground/background/killed) and verified on **both** iOS and Android.
+- [ ] **Badge stays in sync** with `unread-count` after every push and every inbox interaction.
+- [ ] **Inbox + push are reconciled:** opening the inbox and tapping marks read; don't show counts that disagree.
+- [ ] **i18n:** you don't translate notification copy (server does), but your own UI chrome (buttons, empty states) must respect the app language and RTL for Arabic.
+- [ ] **Resilience:** network failures on token POST / inbox fetch are retried/queued, not silently dropped.
+- [ ] **Security:** never log full FCM tokens or JWTs in production builds.
+- [ ] **No duplicate banners:** in foreground, show your in-app banner once (FCM `onMessage` can fire alongside your own logic).
+
+---
+
+## 10. How to test end-to-end
+
+1. Log in → confirm token row exists (I can check the DB, or you log the token and compare).
+2. Place an order → expect an **Order placed** push within seconds + a new inbox row + unread badge +1.
+3. Ask me/admin to change the order status → expect the matching status push + inbox row.
+4. Toggle **Order updates** OFF → place another order → **no push**, but the inbox **still** gets the record (transactional). Toggle promotions OFF → you should get **no** promo pushes at all.
+5. Open inbox, tap a notification → it marks read, badge decrements, app deep-links correctly.
+6. (Promo) When a scheduled promo code goes live, expect a `PROMOTION` push to the right audience.
+
+If API returns 200 but no push arrives, check: token correctness, **client Firebase project == server (`amoonbloom`)**, iOS APNs key uploaded, and server logs.
+
+---
+
+## 11. What changed on the backend recently (changelog)
+
+- ✅ **In-app inbox is now fully built** (`Notification` model + the 4 inbox endpoints in §3.5–3.8). Earlier versions of this doc said it wasn't — it is now.
+- ✅ **Automatic "promo code goes live" notifications** with all-users vs new-users-only audience targeting.
+- ✅ **Durable background-job delivery** (pg-boss) with retries; pushes/emails never block requests and survive transient outages.
+- ✅ **Concurrency-safe preferences** and **automatic inbox retention/cleanup**.
+- ✅ Order emails now go out via **Resend** (transactional) — unrelated to push, FYI.
+
+Anything unclear, ping me and I'll clarify or add examples.
 
 — Backend

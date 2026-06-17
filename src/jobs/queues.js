@@ -18,8 +18,10 @@ const QUEUES = {
   INVENTORY_LOW_STOCK: 'inventory.low-stock',
   CLEANUP_RESET_TOKENS: 'cleanup.reset-tokens',
   CLEANUP_REFRESH_TOKENS: 'cleanup.refresh-tokens',
+  CLEANUP_NOTIFICATIONS: 'cleanup.notifications',
   CART_ABANDONED: 'cart.abandoned',
   PROMO_ARCHIVE: 'promo.archive-expired',
+  PROMO_ANNOUNCE: 'promo.announce-active',
 };
 
 // Every scheduled queue, so the UI/status endpoint can report on each even before
@@ -30,8 +32,10 @@ const SCHEDULED_QUEUES = [
   QUEUES.INVENTORY_LOW_STOCK,
   QUEUES.CLEANUP_RESET_TOKENS,
   QUEUES.CLEANUP_REFRESH_TOKENS,
+  QUEUES.CLEANUP_NOTIFICATIONS,
   QUEUES.CART_ABANDONED,
   QUEUES.PROMO_ARCHIVE,
+  QUEUES.PROMO_ANNOUNCE,
 ];
 
 const ALL_QUEUES = Object.values(QUEUES);

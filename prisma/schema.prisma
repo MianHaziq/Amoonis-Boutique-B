@@ -598,6 +598,11 @@ model PromoCode {
 
   isActive Boolean @default(true)
 
+  /// Set once the "new promo is now active" notification has been broadcast to users,
+  /// so the daily announce job never notifies the same code twice. Null = not yet
+  /// announced (a freshly created, not-yet-started code).
+  announcedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

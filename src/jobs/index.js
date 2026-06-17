@@ -16,6 +16,7 @@ const defs = [
   require('./handlers/paymentReconcile.job'),
   require('./handlers/orderExpire.job'),
   require('./handlers/lowStock.job'),
+  require('./handlers/promoAnnounce.job'),
   require('./handlers/cleanup.job'), // array of housekeeping defs
 ].flat();
 

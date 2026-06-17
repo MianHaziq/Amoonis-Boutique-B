@@ -1,7 +1,11 @@
 /**
  * push.broadcast — fan a promotion/announcement out to many users.
  *
- * Data: { kind: 'promotion'|'announcement', title, body, data?, regionId? }
+ * Data: {
+ *   kind: 'promotion'|'announcement', title, body, data?, regionId?,
+ *   audience?: 'all'|'new_users',   // default 'all'
+ *   newUserWithinDays?: number,     // account-age window when audience === 'new_users'
+ * }
  *
  * Rather than blasting FCM here, we enqueue one push.send job per active user. Each
  * is then independently retryable, preference-gated and written to that user's inbox.
@@ -15,8 +19,11 @@ const { QUEUES } = require('../queues');
 // How many push.send jobs to write per pg-boss batch insert.
 const ENQUEUE_BATCH_SIZE = 200;
 
+// Fallback account-age window (days) for a 'new_users' broadcast with no explicit window.
+const NEW_USER_DEFAULT_WINDOW_DAYS = 30;
+
 async function handle(data) {
-  const { kind = 'announcement', title, body, data: payload = {}, regionId } = data;
+  const { kind = 'announcement', title, body, data: payload = {}, regionId, audience = 'all', newUserWithinDays } = data;
   if (!title || !body) {
     console.warn('[jobs] push.broadcast skipped — missing title/body');
     return { enqueued: 0 };
@@ -25,6 +32,15 @@ async function handle(data) {
   const prefKey = kind === 'promotion' ? 'promotions' : 'announcements';
   const type = kind === 'promotion' ? 'PROMOTION' : 'ANNOUNCEMENT';
   const where = { status: 'ACTIVE', ...(regionId ? { regionId } : {}) };
+
+  // 'new_users' audience: restrict to accounts created within the eligibility window,
+  // so a new-user-only promo is only announced to users who can actually redeem it.
+  if (audience === 'new_users') {
+    const days = Number.isFinite(Number(newUserWithinDays)) && Number(newUserWithinDays) > 0
+      ? Number(newUserWithinDays)
+      : NEW_USER_DEFAULT_WINDOW_DAYS;
+    where.createdAt = { gte: new Date(Date.now() - days * 86_400_000) };
+  }
 
   const pageSize = 500;
   let cursor = null;
@@ -55,7 +71,7 @@ async function handle(data) {
     cursor = users[users.length - 1].id;
   }
 
-  console.log(`[jobs] push.broadcast kind=${kind} enqueued=${enqueued}`);
+  console.log(`[jobs] push.broadcast kind=${kind} audience=${audience} enqueued=${enqueued}`);
   return { enqueued };
 }
 
