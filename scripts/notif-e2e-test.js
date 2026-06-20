@@ -18,6 +18,7 @@ const prefsService = require('../src/services/notificationPreferences.service');
 const inboxService = require('../src/services/notification.service');
 const broadcastJob = require('../src/jobs/handlers/broadcast.job');
 const promoAnnounceJob = require('../src/jobs/handlers/promoAnnounce.job');
+const adminOrderAlertJob = require('../src/jobs/handlers/adminOrderAlert.job');
 const cleanupDefs = require('../src/jobs/handlers/cleanup.job');
 
 const TAG = `e2e-${Date.now()}`;
@@ -37,13 +38,14 @@ function check(name, cond, detail = '') {
 // Stubbed workers consume the durable jobs (so the queue drains) without real FCM.
 const recorded = { pushSend: [], broadcast: [] };
 
-async function makeUser({ ageDays = 0, status = 'ACTIVE' } = {}) {
+async function makeUser({ ageDays = 0, status = 'ACTIVE', role = 'CUSTOMER' } = {}) {
   const createdAt = new Date(Date.now() - ageDays * 86_400_000);
   return prisma.user.create({
     data: {
       email: `${TAG}-${Math.random().toString(36).slice(2)}@test.local`,
       fullName: `Notif E2E ${TAG}`,
       status,
+      role,
       createdAt,
     },
   });
@@ -230,6 +232,38 @@ async function run() {
     allJobs2.length === 1 && newJobs2.length === 1,
     `all=${allJobs2.length} new=${newJobs2.length} announced=${r2.announced}`);
 
+  // ---------------------------------------------------------------------------
+  // 6) Admin "new order" alert (staff fan-out, operational, buyer excluded)
+  // ---------------------------------------------------------------------------
+  console.log('\n[6] Admin new-order alert');
+
+  async function pushSendJobsFor(orderId) {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT data FROM pgboss.job WHERE name = 'push.send' AND data->'data'->>'orderId' = $1`,
+      orderId
+    );
+    return rows.map((r) => (typeof r.data === 'string' ? JSON.parse(r.data) : r.data));
+  }
+
+  const staffAdmin = await makeUser({ role: 'ADMIN' });
+  const staffManager = await makeUser({ role: 'MANAGER' });
+  const adminBuyer = await makeUser({ role: 'ADMIN' }); // an admin who is the buyer — must be excluded
+
+  const fakeOrderId = `order-${TAG}`;
+  const alertRes = await adminOrderAlertJob.handler({ orderId: fakeOrderId, totalAmount: 199, buyerId: adminBuyer.id });
+  check('admin alert enqueued for staff', alertRes.enqueued >= 2, `enqueued=${alertRes.enqueued}`);
+
+  const sendJobs = await pushSendJobsFor(fakeOrderId);
+  const recipientIds = sendJobs.map((j) => j.userId);
+  check('alert reached the admin', recipientIds.includes(staffAdmin.id));
+  check('alert reached the manager', recipientIds.includes(staffManager.id));
+  check('buyer (admin) was excluded', !recipientIds.includes(adminBuyer.id));
+  const sample = sendJobs[0];
+  check('alert is operational (prefKey null — bypasses prefs)', sample && sample.prefKey === null);
+  check('alert type is ORDER_PLACED', sample && sample.type === 'ORDER_PLACED' && sample.data.type === 'ORDER_PLACED');
+  check('alert data carries orderId + PENDING status', sample && sample.data.orderId === fakeOrderId && sample.data.status === 'PENDING');
+  check('alert title/body are staff-facing', sample && sample.title === 'New Order' && sample.body.includes('199 AED'));
+
   console.log(`\n=== Result: ${passed} passed, ${failed} failed ===\n`);
 }
 
@@ -238,6 +272,10 @@ async function cleanup() {
     await prisma.promoCode.deleteMany({ where: { code: { startsWith: TAG.toUpperCase() } } });
     // Deleting users cascades to prefs / notifications / push devices.
     await prisma.user.deleteMany({ where: { email: { contains: TAG } } });
+    // Drop any still-queued jobs this run produced so they can't error against deleted test users.
+    await prisma.$executeRawUnsafe(
+      "DELETE FROM pgboss.job WHERE name IN ('push.send','push.broadcast','order.admin-alert') AND state IN ('created','active','retry')"
+    );
   } catch (e) {
     console.error('[cleanup] error:', e.message);
   }
