@@ -177,6 +177,7 @@ function buildPromoCodeData(data, { isUpdate = false } = {}) {
   }
 
   if (data.isActive !== undefined) out.isActive = Boolean(data.isActive);
+  if (data.announceToUsers !== undefined) out.announceToUsers = Boolean(data.announceToUsers);
 
   if (!isUpdate) {
     if (!out.code) throw Object.assign(new Error('code is required'), { code: 'PROMO_INVALID_INPUT' });

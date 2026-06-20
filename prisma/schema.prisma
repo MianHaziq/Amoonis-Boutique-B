@@ -436,6 +436,10 @@ model CartItem {
 
 model Order {
   id                    String        @id @default(uuid())
+  /// Human-friendly sequential order number (Shopify-style, starts at 1001). Backed by a
+  /// Postgres sequence; assigned by the DB on insert. Unique and shown to customers/staff
+  /// instead of the raw UUID.
+  orderNumber           Int           @unique @default(dbgenerated("nextval('order_number_seq'::regclass)"))
   userId                String
   orderMessage          String?       @db.Text
   totalAmount           Decimal       @db.Decimal(10, 2)
@@ -602,6 +606,10 @@ model PromoCode {
   /// so the daily announce job never notifies the same code twice. Null = not yet
   /// announced (a freshly created, not-yet-started code).
   announcedAt DateTime?
+
+  /// When false, the code is silent — the daily announce job never broadcasts it to users
+  /// (for internal/staff codes). Default true so normal promos auto-announce when active.
+  announceToUsers Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

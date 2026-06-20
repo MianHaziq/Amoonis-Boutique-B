@@ -39,10 +39,11 @@ function orderStatusChange(userId, orderId, status) {
  * not gated by the staff member's personal notification preferences. `buyerId` is
  * excluded so an admin buying as a customer isn't notified twice.
  */
-function adminNewOrder({ orderId, totalAmount, currency, buyerId } = {}) {
+function adminNewOrder({ orderId, orderNumber, totalAmount, currency, buyerId } = {}) {
   if (!orderId) return Promise.resolve(null);
   return enqueue(QUEUES.ADMIN_ORDER_ALERT, {
     orderId,
+    orderNumber: orderNumber ?? null,
     totalAmount,
     currency: currency || 'AED',
     buyerId: buyerId || null,

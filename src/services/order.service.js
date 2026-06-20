@@ -79,6 +79,7 @@ function toOrderResponsePayload(order) {
   }));
   return {
     id: order.id,
+    orderNumber: order.orderNumber ?? null,
     userId: order.userId,
     orderMessage: order.orderMessage,
     totalAmount: decimalToNumber(order.totalAmount),
@@ -552,9 +553,15 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // success. Both push and email go through the job queue (retried, off the request path).
   if (!isOnlinePayment) {
     notify.orderPlaced(userId, createdOrderId);
-    notify.adminNewOrder({ orderId: createdOrderId, totalAmount: payload.totalAmount, buyerId: userId });
+    notify.adminNewOrder({
+      orderId: createdOrderId,
+      orderNumber: payload.orderNumber,
+      totalAmount: payload.totalAmount,
+      buyerId: userId,
+    });
     notify.orderConfirmationEmail({
       id: createdOrderId,
+      orderNumber: payload.orderNumber,
       userEmail: order.user?.email,
       totalAmount: payload.totalAmount,
     });
@@ -1284,10 +1291,19 @@ async function finalizePaidOrder(order, { firstPlacement } = {}) {
       await prisma.cart.updateMany({ where: { userId: order.userId }, data: { orderMessage: null } }).catch(() => {});
     }
     if (firstPlacement) {
-      notify.orderPlaced(order.userId, orderId);
-      notify.adminNewOrder({ orderId, totalAmount: Number(order.totalAmount), buyerId: order.userId });
+      // Online orders auto-confirm immediately below, which sends the customer an
+      // "Order confirmed" push — so we deliberately do NOT also send "Order placed"
+      // (that would be two near-identical pushes within a second). COD keeps "Order
+      // placed" because it's confirmed manually later. Staff alert + email still fire.
+      notify.adminNewOrder({
+        orderId,
+        orderNumber: order.orderNumber,
+        totalAmount: Number(order.totalAmount),
+        buyerId: order.userId,
+      });
       notify.orderConfirmationEmail({
         id: orderId,
+        orderNumber: order.orderNumber,
         userEmail: order.user?.email,
         totalAmount: Number(order.totalAmount),
       });
@@ -1317,6 +1333,7 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
     where: { id: orderId },
     select: {
       id: true,
+      orderNumber: true,
       userId: true,
       totalAmount: true,
       status: true,

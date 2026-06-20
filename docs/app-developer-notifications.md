@@ -230,7 +230,8 @@ Server already sets: **Android** `priority: high`; **iOS** `aps.sound = "default
 
 | Event | `data.type` | Extra `data` fields | Preference channel | Audience |
 |---|---|---|---|---|
-| Order placed (after checkout / payment) | `ORDER_PLACED` | `orderId`, `status: "PENDING"` | `orderStatus`* | the buyer |
+| Order placed — **COD** | `ORDER_PLACED` | `orderId`, `status: "PENDING"` | `orderStatus`* | the buyer |
+| Order placed — **online payment** | `ORDER_STATUS` (`CONFIRMED`) | `orderId`, `status: "CONFIRMED"` | `orderStatus`* | the buyer |
 | **New order — staff alert** 🆕 | `ORDER_PLACED` | `orderId`, `status: "PENDING"` | none (operational) | all **ADMIN + MANAGER** (buyer excluded) |
 | Order confirmed | `ORDER_STATUS` | `orderId`, `status: "CONFIRMED"` | `orderStatus`* | the buyer |
 | Order processing | `ORDER_STATUS` | `orderId`, `status: "PROCESSING"` | `orderStatus`* | the buyer |
@@ -243,7 +244,12 @@ Server already sets: **Android** `priority: high`; **iOS** `aps.sound = "default
 \* **Order-status pushes are transactional**: even if `orderStatus` push is OFF, the notification is still written to the in-app inbox (the push just isn't delivered). Promotions/announcements are skipped entirely when their channel is off.
 
 ### Staff "new order" alert 🆕
-When a customer places an order, **all ADMIN and MANAGER users** also receive a push with `data.type = "ORDER_PLACED"` (title **"New Order"**, body e.g. *"Order #A1B2C3D4 placed — 199 AED."*). This is **operational** — it is *not* gated by the staff member's personal notification preferences, so admins always get alerted. The buyer is excluded (an admin buying as a customer won't be double-notified). Since the type is `ORDER_PLACED`, route it by the logged-in user's **role**: ADMIN/MANAGER → admin order screen, customer → customer order screen (you've already implemented this).
+When a customer places an order, **all ADMINs and MANAGERs who hold the `ORDERS` permission** also receive a push with `data.type = "ORDER_PLACED"` (title **"New Order"**, body e.g. *"Order #1042 placed — 199 AED."* using the real sequential order number). This is **operational** — it is *not* gated by the staff member's personal notification preferences, so they always get alerted. The buyer is excluded (an admin buying as a customer won't be double-notified). Since the type is `ORDER_PLACED`, route it by the logged-in user's **role**: ADMIN/MANAGER → admin order screen, customer → customer order screen (you've already implemented this).
+
+**Notes for the customer order flow:**
+- **COD** orders send **`ORDER_PLACED`** at checkout. **Online-payment** orders skip `ORDER_PLACED` and send **`ORDER_STATUS` = `CONFIRMED`** once payment succeeds (the order auto-confirms), so the customer gets exactly one push, not two.
+- **Promotions/announcements are now localized per user** (EN/AR) — the same as order notifications. The body you receive is already in the recipient's language.
+- Orders now have a human-friendly **`orderNumber`** (sequential, e.g. `1042`) returned in the order API payload — prefer showing it over the UUID.
 
 ### About the new "promo code goes live" feature 🆕
 When an admin creates a discount code with a future start date (e.g. *active from the 1st*), the backend automatically notifies users **on the day it becomes active** — once per code:
