@@ -34,6 +34,21 @@ function orderStatusChange(userId, orderId, status) {
   });
 }
 
+/**
+ * Notify staff (ADMIN + MANAGER) that a customer placed an order. Operational alert —
+ * not gated by the staff member's personal notification preferences. `buyerId` is
+ * excluded so an admin buying as a customer isn't notified twice.
+ */
+function adminNewOrder({ orderId, totalAmount, currency, buyerId } = {}) {
+  if (!orderId) return Promise.resolve(null);
+  return enqueue(QUEUES.ADMIN_ORDER_ALERT, {
+    orderId,
+    totalAmount,
+    currency: currency || 'AED',
+    buyerId: buyerId || null,
+  });
+}
+
 /** Order confirmation email (best-effort; queued with retries). */
 function orderConfirmationEmail(order) {
   if (!order || !order.userEmail) return Promise.resolve(null);
@@ -54,4 +69,4 @@ function email(to, subject, html) {
   return enqueue(QUEUES.EMAIL_SEND, { to, subject, html });
 }
 
-module.exports = { orderPlaced, orderStatusChange, orderConfirmationEmail, email };
+module.exports = { orderPlaced, orderStatusChange, adminNewOrder, orderConfirmationEmail, email };

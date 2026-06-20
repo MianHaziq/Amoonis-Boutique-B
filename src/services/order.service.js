@@ -552,6 +552,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // success. Both push and email go through the job queue (retried, off the request path).
   if (!isOnlinePayment) {
     notify.orderPlaced(userId, createdOrderId);
+    notify.adminNewOrder({ orderId: createdOrderId, totalAmount: payload.totalAmount, buyerId: userId });
     notify.orderConfirmationEmail({
       id: createdOrderId,
       userEmail: order.user?.email,
@@ -1284,6 +1285,7 @@ async function finalizePaidOrder(order, { firstPlacement } = {}) {
     }
     if (firstPlacement) {
       notify.orderPlaced(order.userId, orderId);
+      notify.adminNewOrder({ orderId, totalAmount: Number(order.totalAmount), buyerId: order.userId });
       notify.orderConfirmationEmail({
         id: orderId,
         userEmail: order.user?.email,

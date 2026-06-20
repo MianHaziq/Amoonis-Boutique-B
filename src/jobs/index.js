@@ -13,6 +13,7 @@ const defs = [
   require('./handlers/email.job'),
   require('./handlers/push.job'),
   require('./handlers/broadcast.job'),
+  require('./handlers/adminOrderAlert.job'),
   require('./handlers/paymentReconcile.job'),
   require('./handlers/orderExpire.job'),
   require('./handlers/lowStock.job'),

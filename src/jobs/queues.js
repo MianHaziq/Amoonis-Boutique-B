@@ -11,6 +11,7 @@ const QUEUES = {
   EMAIL_SEND: 'email.send',
   PUSH_SEND: 'push.send',
   PUSH_BROADCAST: 'push.broadcast',
+  ADMIN_ORDER_ALERT: 'order.admin-alert',
 
   // Scheduled (cron — registered in src/jobs/index.js)
   PAYMENT_RECONCILE: 'payment.reconcile',

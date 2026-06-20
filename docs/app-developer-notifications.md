@@ -231,6 +231,7 @@ Server already sets: **Android** `priority: high`; **iOS** `aps.sound = "default
 | Event | `data.type` | Extra `data` fields | Preference channel | Audience |
 |---|---|---|---|---|
 | Order placed (after checkout / payment) | `ORDER_PLACED` | `orderId`, `status: "PENDING"` | `orderStatus`* | the buyer |
+| **New order — staff alert** 🆕 | `ORDER_PLACED` | `orderId`, `status: "PENDING"` | none (operational) | all **ADMIN + MANAGER** (buyer excluded) |
 | Order confirmed | `ORDER_STATUS` | `orderId`, `status: "CONFIRMED"` | `orderStatus`* | the buyer |
 | Order processing | `ORDER_STATUS` | `orderId`, `status: "PROCESSING"` | `orderStatus`* | the buyer |
 | Order shipped | `ORDER_STATUS` | `orderId`, `status: "SHIPPED"` | `orderStatus`* | the buyer |
@@ -240,6 +241,9 @@ Server already sets: **Android** `priority: high`; **iOS** `aps.sound = "default
 | Admin announcement | `ANNOUNCEMENT` | (campaign-specific) | `announcements` | broadcast |
 
 \* **Order-status pushes are transactional**: even if `orderStatus` push is OFF, the notification is still written to the in-app inbox (the push just isn't delivered). Promotions/announcements are skipped entirely when their channel is off.
+
+### Staff "new order" alert 🆕
+When a customer places an order, **all ADMIN and MANAGER users** also receive a push with `data.type = "ORDER_PLACED"` (title **"New Order"**, body e.g. *"Order #A1B2C3D4 placed — 199 AED."*). This is **operational** — it is *not* gated by the staff member's personal notification preferences, so admins always get alerted. The buyer is excluded (an admin buying as a customer won't be double-notified). Since the type is `ORDER_PLACED`, route it by the logged-in user's **role**: ADMIN/MANAGER → admin order screen, customer → customer order screen (you've already implemented this).
 
 ### About the new "promo code goes live" feature 🆕
 When an admin creates a discount code with a future start date (e.g. *active from the 1st*), the backend automatically notifies users **on the day it becomes active** — once per code:

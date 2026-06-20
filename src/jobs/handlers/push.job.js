@@ -51,11 +51,16 @@ async function handle(data) {
     return;
   }
 
-  // Check the channel preference once. Order-status notifications are transactional, so
-  // we always write them to the inbox even if device push is off; promotional and
-  // announcement channels are skipped entirely when the user opted out (no inbox spam,
-  // no wasted token lookups — important under a 2000-user broadcast).
-  const allowed = await prefsService.getOrCreate(userId).then((p) => p[prefKey] === true).catch(() => true);
+  // `prefKey: null` marks an OPERATIONAL notification (e.g. a staff "new order" alert)
+  // that bypasses the per-user customer channel preferences entirely — it must always
+  // be delivered. Otherwise check the channel preference once. Order-status
+  // notifications are transactional, so we always write them to the inbox even if
+  // device push is off; promotional and announcement channels are skipped entirely when
+  // the user opted out (no inbox spam, no wasted token lookups under a big broadcast).
+  const operational = prefKey == null;
+  const allowed = operational
+    ? true
+    : await prefsService.getOrCreate(userId).then((p) => p[prefKey] === true).catch(() => true);
   if (!allowed && prefKey !== 'orderStatus') return;
 
   const { title, body } = await resolveCopy(data);

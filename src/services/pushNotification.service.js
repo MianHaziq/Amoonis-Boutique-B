@@ -22,15 +22,19 @@ async function preferenceAllows(userId, key) {
 }
 
 /**
- * Send FCM to all devices for a user when a preference channel is enabled.
- * @param {'orderStatus'|'promotions'|'announcements'} prefKey
+ * Send FCM to all devices for a user. When `prefKey` is one of the channel keys the
+ * send is gated by that preference; pass `null` for operational notifications (e.g. a
+ * staff "new order" alert) that must always be delivered regardless of preferences.
+ * @param {'orderStatus'|'promotions'|'announcements'|null} prefKey
  */
 async function sendToUser(userId, prefKey, title, body, data = {}) {
   const messaging = getMessaging();
   if (!messaging) return { sent: 0, skipped: 'firebase_unavailable' };
 
-  const allowed = await preferenceAllows(userId, prefKey);
-  if (!allowed) return { sent: 0, skipped: 'preference_off' };
+  if (prefKey != null) {
+    const allowed = await preferenceAllows(userId, prefKey);
+    if (!allowed) return { sent: 0, skipped: 'preference_off' };
+  }
 
   const tokens = await pushDeviceService.listTokensForUser(userId);
   if (tokens.length === 0) return { sent: 0, skipped: 'no_tokens' };
