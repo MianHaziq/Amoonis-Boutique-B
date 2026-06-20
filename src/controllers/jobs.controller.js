@@ -39,17 +39,28 @@ async function status(req, res, next) {
 }
 
 // POST /admin/jobs/broadcast — send a promotion/announcement to users.
-// Body: { kind: 'promotion'|'announcement', title, body, data?, regionId? }
+// Body: { kind: 'promotion'|'announcement', title, body, title_ar?, body_ar?, data?, regionId? }
+// When title_ar + body_ar are supplied the push is localized per recipient (en/ar);
+// otherwise the single title/body is sent to everyone.
 async function broadcast(req, res, next) {
   try {
-    const { kind = 'announcement', title, body, data, regionId } = req.body || {};
+    const { kind = 'announcement', title, body, title_ar, body_ar, data, regionId } = req.body || {};
     if (!title || !body) return error(res, 'title and body are required', 400);
     if (!['promotion', 'announcement'].includes(kind)) {
       return error(res, "kind must be 'promotion' or 'announcement'", 400);
     }
+    const localized =
+      title_ar && body_ar
+        ? { en: { title, body }, ar: { title: title_ar, body: body_ar } }
+        : null;
     const id = await queue.enqueue(
       QUEUES.PUSH_BROADCAST,
-      { kind, title, body, data: data || {}, regionId: regionId || null },
+      {
+        kind,
+        ...(localized ? { localized } : { title, body }),
+        data: data || {},
+        regionId: regionId || null,
+      },
       { allowInlineFallback: false }
     );
     // Don't claim success the engine couldn't deliver — a null id means it wasn't queued.

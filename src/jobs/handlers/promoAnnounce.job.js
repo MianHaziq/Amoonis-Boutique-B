@@ -23,14 +23,14 @@ const { QUEUES } = require('../queues');
 // unbounded number of broadcasts in a single tick.
 const MAX_PER_RUN = Math.max(1, parseInt(process.env.PROMO_ANNOUNCE_MAX_PER_RUN || '20', 10));
 
-function formatDiscount(promo) {
+function formatDiscount(promo, lang) {
   const value = Number(promo.discountValue);
   if (promo.discountType === 'PERCENTAGE') {
     const pct = Number.isInteger(value) ? String(value) : value.toFixed(0);
-    return `${pct}% off`;
+    return lang === 'ar' ? `خصم ${pct}%` : `${pct}% off`;
   }
   const amount = Number.isInteger(value) ? String(value) : value.toFixed(2);
-  return `${amount} AED off`;
+  return lang === 'ar' ? `خصم ${amount} درهم` : `${amount} AED off`;
 }
 
 function formatDate(d) {
@@ -38,13 +38,22 @@ function formatDate(d) {
   return new Date(d).toISOString().slice(0, 10);
 }
 
-// Build the single-language broadcast copy from the promo. Matches the existing
-// admin-broadcast path, which sends one title/body to everyone (not per-user i18n).
-function buildMessage(promo) {
-  const title = `New offer: ${promo.name}`;
-  let body = `Use code ${promo.code} for ${formatDiscount(promo)}.`;
-  if (promo.expiresAt) body += ` Valid until ${formatDate(promo.expiresAt)}.`;
-  return { title, body };
+// Build bilingual broadcast copy from the promo. push.job picks en/ar per recipient's
+// preferredLanguage, so an Arabic customer reads the Arabic line. The Arabic name falls
+// back to the English name when name_ar isn't set.
+function buildLocalized(promo) {
+  const date = promo.expiresAt ? formatDate(promo.expiresAt) : null;
+  const nameAr = promo.name_ar || promo.name;
+  return {
+    en: {
+      title: `New offer: ${promo.name}`,
+      body: `Use code ${promo.code} for ${formatDiscount(promo, 'en')}.` + (date ? ` Valid until ${date}.` : ''),
+    },
+    ar: {
+      title: `عرض جديد: ${nameAr}`,
+      body: `استخدم الرمز ${promo.code} للحصول على ${formatDiscount(promo, 'ar')}.` + (date ? ` ساري حتى ${date}.` : ''),
+    },
+  };
 }
 
 async function handle() {
@@ -54,6 +63,7 @@ async function handle() {
     where: {
       isActive: true,
       announcedAt: null,
+      announceToUsers: true, // silent (internal/staff) codes are never broadcast
       AND: [
         { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
         { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
@@ -72,16 +82,18 @@ async function handle() {
     });
     if (claim.count !== 1) continue; // someone else already claimed it
 
-    const { title, body } = buildMessage(promo);
     try {
-      await enqueue(QUEUES.PUSH_BROADCAST, {
+      const jobId = await enqueue(QUEUES.PUSH_BROADCAST, {
         kind: 'promotion',
-        title,
-        body,
+        localized: buildLocalized(promo),
         audience: promo.newUsersOnly ? 'new_users' : 'all',
         newUserWithinDays: promo.newUserWithinDays ?? null,
         data: { type: 'PROMOTION', promoCode: promo.code, promoCodeId: promo.id },
       }, { allowInlineFallback: false });
+      // enqueue returns null (without throwing) if the engine couldn't queue the job.
+      // Treat that as a failure so the claim is rolled back and the code is retried next
+      // run — otherwise it would stay stamped "announced" with nobody ever notified.
+      if (!jobId) throw new Error('broadcast enqueue returned null (engine unavailable)');
       announced += 1;
     } catch (err) {
       // Roll the claim back so the next run retries this code rather than silently

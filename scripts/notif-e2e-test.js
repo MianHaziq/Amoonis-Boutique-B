@@ -19,6 +19,7 @@ const inboxService = require('../src/services/notification.service');
 const broadcastJob = require('../src/jobs/handlers/broadcast.job');
 const promoAnnounceJob = require('../src/jobs/handlers/promoAnnounce.job');
 const adminOrderAlertJob = require('../src/jobs/handlers/adminOrderAlert.job');
+const pushJob = require('../src/jobs/handlers/push.job');
 const cleanupDefs = require('../src/jobs/handlers/cleanup.job');
 
 const TAG = `e2e-${Date.now()}`;
@@ -38,7 +39,7 @@ function check(name, cond, detail = '') {
 // Stubbed workers consume the durable jobs (so the queue drains) without real FCM.
 const recorded = { pushSend: [], broadcast: [] };
 
-async function makeUser({ ageDays = 0, status = 'ACTIVE', role = 'CUSTOMER' } = {}) {
+async function makeUser({ ageDays = 0, status = 'ACTIVE', role = 'CUSTOMER', managerPermissions = [] } = {}) {
   const createdAt = new Date(Date.now() - ageDays * 86_400_000);
   return prisma.user.create({
     data: {
@@ -46,6 +47,7 @@ async function makeUser({ ageDays = 0, status = 'ACTIVE', role = 'CUSTOMER' } = 
       fullName: `Notif E2E ${TAG}`,
       status,
       role,
+      managerPermissions,
       createdAt,
     },
   });
@@ -197,32 +199,51 @@ async function run() {
   const codeNew = `${TAG}-NEW`.toUpperCase();
   const promoNew = await prisma.promoCode.create({
     data: {
-      code: codeNew, name: 'E2E New', name_ar: 'E2E New',
+      code: codeNew, name: 'E2E New', name_ar: 'E2E جديد',
       discountType: 'FIXED', discountValue: 10,
       startsAt: new Date(Date.now() - 86_400_000), expiresAt: new Date(Date.now() + 15 * 86_400_000),
       isActive: true, newUsersOnly: true, newUserWithinDays: 14, announcedAt: null,
     },
   });
 
+  // Silent code (announceToUsers:false) — must NEVER be broadcast.
+  const codeSilent = `${TAG}-SILENT`.toUpperCase();
+  const promoSilent = await prisma.promoCode.create({
+    data: {
+      code: codeSilent, name: 'E2E Silent', name_ar: 'E2E Silent',
+      discountType: 'PERCENTAGE', discountValue: 5,
+      startsAt: new Date(Date.now() - 86_400_000), expiresAt: new Date(Date.now() + 15 * 86_400_000),
+      isActive: true, newUsersOnly: false, announcedAt: null, announceToUsers: false,
+    },
+  });
+
   const r1 = await promoAnnounceJob.handler();
-  check('announce job processed both due codes', r1.announced >= 2, `announced=${r1.announced}`);
+  check('announce job processed the due codes', r1.announced >= 2, `announced=${r1.announced}`);
 
   const afterAll = await prisma.promoCode.findUnique({ where: { id: promoAll.id } });
   const afterNew = await prisma.promoCode.findUnique({ where: { id: promoNew.id } });
+  const afterSilent = await prisma.promoCode.findUnique({ where: { id: promoSilent.id } });
   check('promo (all) stamped announcedAt', afterAll.announcedAt != null);
   check('promo (new) stamped announcedAt', afterNew.announcedAt != null);
+  check('silent promo NOT announced (announcedAt stays null)', afterSilent.announcedAt == null);
 
   const allJobs = await broadcastJobFor(codeAll);
   const newJobs = await broadcastJobFor(codeNew);
+  const silentJobs = await broadcastJobFor(codeSilent);
   const bAll = allJobs[0];
   const bNew = newJobs[0];
   check('exactly one broadcast enqueued for the public code', allJobs.length === 1, `count=${allJobs.length}`);
   check('public code targets audience=all', bAll && bAll.audience === 'all');
-  check('public code message names the code', bAll && bAll.body.includes(codeAll) && bAll.title.includes('E2E All'));
+  check('silent code produced NO broadcast', silentJobs.length === 0, `count=${silentJobs.length}`);
+  check('broadcast carries localized EN copy naming the code',
+    bAll && bAll.localized && bAll.localized.en.body.includes(codeAll) && bAll.localized.en.title.includes('E2E All'));
+  check('broadcast carries localized AR copy',
+    bAll && bAll.localized && bAll.localized.ar.title.includes('عرض جديد'));
   check('exactly one broadcast enqueued for the new-user code', newJobs.length === 1, `count=${newJobs.length}`);
   check('new-user code targets audience=new_users', bNew && bNew.audience === 'new_users');
   check('new-user code carries its window', bNew && bNew.newUserWithinDays === 14);
   check('new-user code data carries promoCode for deep-link', bNew && bNew.data && bNew.data.promoCode === codeNew);
+  check('new-user code AR copy uses name_ar', bNew && bNew.localized && bNew.localized.ar.title.includes('جديد'));
 
   // Idempotency: a second run must not enqueue any NEW broadcast for already-stamped codes.
   const r2 = await promoAnnounceJob.handler();
@@ -246,23 +267,63 @@ async function run() {
   }
 
   const staffAdmin = await makeUser({ role: 'ADMIN' });
-  const staffManager = await makeUser({ role: 'MANAGER' });
+  const managerWithOrders = await makeUser({ role: 'MANAGER', managerPermissions: ['ORDERS'] });
+  const managerNoOrders = await makeUser({ role: 'MANAGER', managerPermissions: ['PRODUCTS'] });
   const adminBuyer = await makeUser({ role: 'ADMIN' }); // an admin who is the buyer — must be excluded
 
   const fakeOrderId = `order-${TAG}`;
-  const alertRes = await adminOrderAlertJob.handler({ orderId: fakeOrderId, totalAmount: 199, buyerId: adminBuyer.id });
+  const alertRes = await adminOrderAlertJob.handler({ orderId: fakeOrderId, orderNumber: 1042, totalAmount: 199, buyerId: adminBuyer.id });
   check('admin alert enqueued for staff', alertRes.enqueued >= 2, `enqueued=${alertRes.enqueued}`);
 
   const sendJobs = await pushSendJobsFor(fakeOrderId);
   const recipientIds = sendJobs.map((j) => j.userId);
   check('alert reached the admin', recipientIds.includes(staffAdmin.id));
-  check('alert reached the manager', recipientIds.includes(staffManager.id));
+  check('alert reached manager WITH ORDERS permission', recipientIds.includes(managerWithOrders.id));
+  check('manager WITHOUT ORDERS permission was excluded', !recipientIds.includes(managerNoOrders.id));
   check('buyer (admin) was excluded', !recipientIds.includes(adminBuyer.id));
   const sample = sendJobs[0];
   check('alert is operational (prefKey null — bypasses prefs)', sample && sample.prefKey === null);
   check('alert type is ORDER_PLACED', sample && sample.type === 'ORDER_PLACED' && sample.data.type === 'ORDER_PLACED');
   check('alert data carries orderId + PENDING status', sample && sample.data.orderId === fakeOrderId && sample.data.status === 'PENDING');
-  check('alert title/body are staff-facing', sample && sample.title === 'New Order' && sample.body.includes('199 AED'));
+  check('alert body uses the order NUMBER (#1042) + amount', sample && sample.title === 'New Order' && sample.body.includes('#1042') && sample.body.includes('199 AED'));
+
+  // ---------------------------------------------------------------------------
+  // 7) Per-user localization + deleted-user discard (push.job)
+  // ---------------------------------------------------------------------------
+  console.log('\n[7] Localization + deleted-user discard');
+  const arUser = await makeUser();
+  const enUser = await makeUser();
+  await prisma.user.update({ where: { id: arUser.id }, data: { preferredLanguage: 'ar' } });
+  await prisma.user.update({ where: { id: enUser.id }, data: { preferredLanguage: 'en' } });
+
+  const localized = { en: { title: 'EN Title', body: 'EN Body' }, ar: { title: 'AR عنوان', body: 'AR نص' } };
+  await pushJob.handler({ userId: arUser.id, prefKey: 'promotions', type: 'PROMOTION', localized, data: { type: 'PROMOTION' } });
+  await pushJob.handler({ userId: enUser.id, prefKey: 'promotions', type: 'PROMOTION', localized, data: { type: 'PROMOTION' } });
+
+  const arInbox = await prisma.notification.findFirst({ where: { userId: arUser.id }, orderBy: { createdAt: 'desc' } });
+  const enInbox = await prisma.notification.findFirst({ where: { userId: enUser.id }, orderBy: { createdAt: 'desc' } });
+  check('Arabic user gets Arabic copy', arInbox && arInbox.title === 'AR عنوان' && arInbox.body === 'AR نص');
+  check('English user gets English copy', enInbox && enInbox.title === 'EN Title' && enInbox.body === 'EN Body');
+
+  // Deleted user: handler must discard quietly (no throw, no inbox row).
+  const ghostId = '00000000-0000-0000-0000-0000000000ff';
+  let threw = false;
+  try {
+    await pushJob.handler({ userId: ghostId, prefKey: 'orderStatus', type: 'ORDER_PLACED', copyKey: 'ORDER_PLACED', data: { type: 'ORDER_PLACED' } });
+  } catch (e) { threw = true; }
+  const ghostInbox = await prisma.notification.count({ where: { userId: ghostId } });
+  check('deleted/unknown user is discarded without throwing', !threw);
+  check('no inbox row written for unknown user', ghostInbox === 0);
+
+  // ---------------------------------------------------------------------------
+  // 8) Sequential order numbers (DB sequence, auto-assigned + increasing)
+  // ---------------------------------------------------------------------------
+  console.log('\n[8] Sequential order numbers');
+  const onUser = await makeUser();
+  const o1 = await prisma.order.create({ data: { userId: onUser.id, totalAmount: 50 }, select: { orderNumber: true } });
+  const o2 = await prisma.order.create({ data: { userId: onUser.id, totalAmount: 75 }, select: { orderNumber: true } });
+  check('order number auto-assigned (>= 1001)', typeof o1.orderNumber === 'number' && o1.orderNumber >= 1001, `got ${o1.orderNumber}`);
+  check('order numbers strictly increase', o2.orderNumber === o1.orderNumber + 1, `${o1.orderNumber} -> ${o2.orderNumber}`);
 
   console.log(`\n=== Result: ${passed} passed, ${failed} failed ===\n`);
 }

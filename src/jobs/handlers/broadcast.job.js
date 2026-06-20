@@ -2,10 +2,16 @@
  * push.broadcast — fan a promotion/announcement out to many users.
  *
  * Data: {
- *   kind: 'promotion'|'announcement', title, body, data?, regionId?,
+ *   kind: 'promotion'|'announcement',
+ *   title, body,                    // single-language copy, OR…
+ *   localized?: { en:{title,body}, ar:{title,body} },  // per-user localized copy
+ *   data?, regionId?,
  *   audience?: 'all'|'new_users',   // default 'all'
  *   newUserWithinDays?: number,     // account-age window when audience === 'new_users'
  * }
+ *
+ * When `localized` is present each push.send job carries it and the push worker picks the
+ * recipient's language; otherwise the fixed title/body is sent to everyone.
  *
  * Rather than blasting FCM here, we enqueue one push.send job per active user. Each
  * is then independently retryable, preference-gated and written to that user's inbox.
@@ -23,8 +29,11 @@ const ENQUEUE_BATCH_SIZE = 200;
 const NEW_USER_DEFAULT_WINDOW_DAYS = 30;
 
 async function handle(data) {
-  const { kind = 'announcement', title, body, data: payload = {}, regionId, audience = 'all', newUserWithinDays } = data;
-  if (!title || !body) {
+  const { kind = 'announcement', title, body, localized, data: payload = {}, regionId, audience = 'all', newUserWithinDays } = data;
+  const hasContent = localized
+    ? Boolean(localized.en && localized.en.title && localized.en.body)
+    : Boolean(title && body);
+  if (!hasContent) {
     console.warn('[jobs] push.broadcast skipped — missing title/body');
     return { enqueued: 0 };
   }
@@ -61,8 +70,11 @@ async function handle(data) {
     // unchanged; we only change how it's written.
     for (let i = 0; i < users.length; i += ENQUEUE_BATCH_SIZE) {
       const slice = users.slice(i, i + ENQUEUE_BATCH_SIZE);
+      // Pass EITHER localized copy (worker picks the user's language) OR a fixed
+      // title/body — never both, since push.job prefers a present title/body.
+      const content = localized ? { localized } : { title, body };
       const jobs = slice.map((u) => ({
-        data: { userId: u.id, prefKey, type, title, body, data: { type, ...payload } },
+        data: { userId: u.id, prefKey, type, ...content, data: { type, ...payload } },
       }));
       enqueued += await enqueueMany(QUEUES.PUSH_SEND, jobs, { allowInlineFallback: false });
     }
