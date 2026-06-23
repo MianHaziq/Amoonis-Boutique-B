@@ -317,7 +317,11 @@ router.post(
  *             properties:
  *               sessionId: { type: string }
  *     responses:
- *       200: { description: "{ isPaid, orderId, status, paymentUrl }" }
+ *       200: { description: "Paid — order placed. data: { isPaid: true, orderId, status, paymentStatus: PAID }" }
+ *       402: { description: "Payment not completed (declined). Show failure / allow retry." }
+ *       409: { description: "A payment is already in progress for this order (double-tap guard)." }
+ *       400: { description: "Missing sessionId or order not payable." }
+ *       404: { description: "Order not found." }
  */
 router.post(
   '/:id/pay-session',

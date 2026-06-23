@@ -1147,18 +1147,6 @@ async function initiateOrderPayment(orderId, userId) {
 }
 
 /**
- * Verify a MyFatoorah payment (authoritative server-side check) and, if genuinely paid,
- * place the order: atomically mark it PAID, clear the cart, fire the "order placed" push,
- * and move AWAITING_PAYMENT → CONFIRMED (reusing updateOrderStatus, which deducts stock +
- * notifies). `key` is the PaymentId from the callback or InvoiceId from a webhook;
- * `keyType` selects which.
- *
- * Idempotent and race-safe: the PAID flip is a single conditional UPDATE, so only one of
- * N concurrent callers (callback + webhook + retries) ever places the order.
- *
- * Returns { isPaid, orderId, status, ...flags }.
- */
-/**
  * Native Apple Pay — step 1. Create a MyFatoorah session for an order the caller owns.
  * Returns { sessionId, countryCode } for the mobile app, or { error } on a guard failure.
  * Same payable-state guards as initiateOrderPayment.
@@ -1321,6 +1309,17 @@ async function finalizePaidOrder(order, { firstPlacement } = {}) {
   }
 }
 
+/**
+ * Verify a MyFatoorah payment (authoritative server-side check) and, if genuinely paid,
+ * place the order: atomically mark it PAID, clear the cart, fire the "order placed" push,
+ * and move AWAITING_PAYMENT → CONFIRMED. `key` is the PaymentId from the callback or the
+ * InvoiceId from a webhook / session execute; `keyType` selects which.
+ *
+ * Idempotent and race-safe: the PAID flip is a single conditional UPDATE, so only one of
+ * N concurrent callers (callback + webhook + SDK execute + retries) ever places the order.
+ *
+ * Returns { isPaid, orderId, status, ...flags }.
+ */
 async function confirmOrderPayment(key, keyType = 'PaymentId') {
   const result = await paymentService.verifyPayment(key, keyType);
   const orderId = result.orderId;

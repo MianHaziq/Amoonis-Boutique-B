@@ -206,13 +206,21 @@ async function executeApplePay(req, res, next) {
       const status = result.error === 'Order not found' ? 404 : 400;
       return error(res, result.error, status);
     }
-    // result.isPaid true → order placed (CONFIRMED/PAID). false → not paid (e.g. declined);
-    // app should show failure / retry. paymentUrl is present only for non-direct methods.
-    return success(
-      res,
-      { isPaid: result.isPaid, orderId: result.orderId, status: result.status, paymentUrl: result.paymentUrl || null },
-      result.isPaid ? 'Payment successful' : 'Payment not completed'
-    );
+    // Strict contract for the app: 2xx ONLY when the order is actually paid (so it can show
+    // the thank-you screen on HTTP success alone). Otherwise a non-2xx with details.
+    if (result.isPaid) {
+      return success(
+        res,
+        { isPaid: true, orderId: result.orderId, status: result.status, paymentStatus: 'PAID' },
+        'Payment successful'
+      );
+    }
+    if (result.reason === 'payment_already_in_progress') {
+      return error(res, 'A payment is already in progress for this order', 409);
+    }
+    // Declined / not completed. paymentUrl is non-null only for non-direct methods (e.g. a
+    // card needing 3-D Secure); for Apple Pay it is null.
+    return error(res, 'Payment not completed', 402, result.paymentUrl ? [{ field: 'paymentUrl', message: result.paymentUrl }] : null);
   } catch (err) {
     if (err.code === 'PAYMENT_NOT_CONFIGURED') return error(res, 'Online payment is not enabled', 503);
     if (err.code === 'PAYMENT_GATEWAY_ERROR') return error(res, err.message, 502);
