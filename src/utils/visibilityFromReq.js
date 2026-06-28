@@ -19,7 +19,20 @@ const NO_MATCH_REGION_ID = '00000000-0000-0000-0000-000000000000';
 
 async function visibilityFromReq(req) {
   const isStaff = !!req.isStaff;
-  const opts = { isStaff, regionId: req.regionId || null };
+  let regionId = req.regionId || null;
+
+  // CAT-7: for storefront (non-staff) reads, never fall through to an UNSCOPED query.
+  // If the region middleware didn't resolve a region (route without the middleware, or a
+  // missing/unknown header that wasn't defaulted upstream), scope to the default region
+  // so other regions' products can't leak. When NO regions are configured, defaultRegion
+  // is null and behavior is unchanged (region clause omitted — the only way a region-less
+  // store shows anything).
+  if (!isStaff && !regionId) {
+    const def = await regionService.getDefaultRegion();
+    regionId = def?.id || null;
+  }
+
+  const opts = { isStaff, regionId };
 
   if (isStaff) {
     const status = req.query?.status ? String(req.query.status).trim().toUpperCase() : null;

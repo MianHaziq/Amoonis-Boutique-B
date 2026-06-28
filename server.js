@@ -53,6 +53,13 @@ const { startJobs, stopJobs } = require('./src/jobs');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// AUTH-2: the app runs behind a reverse proxy / load balancer (Railway), so the real
+// client IP arrives in X-Forwarded-For. Without trusting the proxy, express-rate-limit
+// keys every request on the proxy's IP — one shared bucket for all clients, which both
+// throttles legitimate traffic and lets attackers bypass the per-IP brute-force limits.
+// Trust a single proxy hop by default; override with TRUST_PROXY (e.g. 2 for two hops).
+app.set('trust proxy', Number(process.env.TRUST_PROXY) || 1);
+
 // const allowedOrigins = process.env.ALLOWED_ORIGINS
 //   ? process.env.ALLOWED_ORIGINS.split(',')
 //   : ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000'];

@@ -44,13 +44,23 @@ async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[WORKER] ${signal} received — shutting down...`);
+
+  // JOB-5: arm the force-exit backstop BEFORE awaiting the drain. If stopJobs() hangs,
+  // this still fires so the process exits instead of blocking until the platform SIGKILLs
+  // it (which would drop in-flight jobs ungracefully). Mirrors server.js's shutdown.
+  const backstop = setTimeout(() => {
+    console.error('[WORKER] graceful shutdown timed out — forcing exit');
+    process.exit(1);
+  }, 15000);
+  backstop.unref();
+
   try {
     await stopJobs();
     await prisma.$disconnect();
   } catch (err) {
     console.error('[WORKER] shutdown error:', err.message);
   }
-  setTimeout(() => process.exit(0), 10000).unref();
+  clearTimeout(backstop);
   process.exit(0);
 }
 ['SIGTERM', 'SIGINT'].forEach((sig) => process.on(sig, () => shutdown(sig)));

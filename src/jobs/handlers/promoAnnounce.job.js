@@ -88,6 +88,9 @@ async function handle() {
         localized: buildLocalized(promo),
         audience: promo.newUsersOnly ? 'new_users' : 'all',
         newUserWithinDays: promo.newUserWithinDays ?? null,
+        // JOB-6: top-level promoCodeId lets the broadcast release this code's announcedAt
+        // claim if its fan-out fails before reaching anyone (so it's retried next run).
+        promoCodeId: promo.id,
         data: { type: 'PROMOTION', promoCode: promo.code, promoCodeId: promo.id },
       }, { allowInlineFallback: false });
       // enqueue returns null (without throwing) if the engine couldn't queue the job.
@@ -112,8 +115,9 @@ async function handle() {
 module.exports = {
   queue: QUEUES.PROMO_ANNOUNCE,
   handler: handle,
-  // Daily, just after midnight UTC, so a code with a 1st-of-month start is announced
-  // on the 1st. Override with PROMO_ANNOUNCE_CRON.
+  // Daily, just after midnight in the business timezone (JOBS_TIMEZONE, default
+  // Asia/Dubai — see src/jobs/index.js), so a code with a 1st-of-month local start is
+  // announced on the 1st. Override the time with PROMO_ANNOUNCE_CRON.
   cron: process.env.PROMO_ANNOUNCE_CRON || '15 0 * * *',
   options: { retryLimit: 0 },
 };
