@@ -159,6 +159,13 @@ async function resolveWriteRegionIds(regionIds) {
 async function createProduct(data) {
   const categoryId = data.categoryId ? String(data.categoryId).trim() || null : null;
   const status = normalizeStatus(data.status);
+  // CAT-2: a discount must never exceed the base price (guard here too, not only in the
+  // route validator, so non-HTTP callers can't create an inverted price).
+  if (data.discountedPrice != null && data.price != null && Number(data.discountedPrice) > Number(data.price)) {
+    const err = new Error('discountedPrice cannot exceed price');
+    err.code = 'INVALID_PRICE';
+    throw err;
+  }
   const regionIds = await resolveWriteRegionIds(data.regionIds);
   const imageUrls = Array.isArray(data.images)
     ? data.images.filter((u) => typeof u === 'string' && u.trim()).slice(0, MAX_IMAGES)
@@ -253,6 +260,33 @@ async function updateProduct(id, data) {
   });
   if (!existing) return null;
 
+  // CAT-3: optimistic concurrency. When the caller passes the updatedAt it last read,
+  // reject the write if the row changed since (concurrent edit, or stock moved under it)
+  // rather than silently clobbering. Enforced again inside the transaction below.
+  let expectedUpdatedAtMs = null;
+  if (data.expectedUpdatedAt != null) {
+    const ms = new Date(data.expectedUpdatedAt).getTime();
+    if (!Number.isNaN(ms)) {
+      expectedUpdatedAtMs = ms;
+      if (ms !== new Date(existing.updatedAt).getTime()) {
+        const err = new Error('This product was changed by someone else. Reload and try again.');
+        err.code = 'STALE_WRITE';
+        throw err;
+      }
+    }
+  }
+
+  // CAT-2: discount can't exceed the base price — compare against the incoming price, or
+  // the EXISTING price when this partial update doesn't touch price.
+  if (data.discountedPrice != null) {
+    const basePrice = data.price != null ? Number(data.price) : Number(existing.price);
+    if (Number(data.discountedPrice) > basePrice) {
+      const err = new Error('discountedPrice cannot exceed price');
+      err.code = 'INVALID_PRICE';
+      throw err;
+    }
+  }
+
   const bilingualDraft = {};
   if (data.title !== undefined) bilingualDraft.title = data.title;
   if (data.title_ar !== undefined) bilingualDraft.title_ar = data.title_ar;
@@ -318,10 +352,24 @@ async function updateProduct(id, data) {
       }
     }
 
-    await tx.product.update({
-      where: { id },
-      data: updatePayload,
-    });
+    if (expectedUpdatedAtMs != null) {
+      // CAT-3: conditional write closes the read→write race — only succeeds if the row's
+      // updatedAt still matches what the caller saw. 0 rows ⇒ someone else won; abort.
+      const res = await tx.product.updateMany({
+        where: { id, updatedAt: new Date(expectedUpdatedAtMs) },
+        data: updatePayload,
+      });
+      if (res.count === 0) {
+        const err = new Error('This product was changed by someone else. Reload and try again.');
+        err.code = 'STALE_WRITE';
+        throw err;
+      }
+    } else {
+      await tx.product.update({
+        where: { id },
+        data: updatePayload,
+      });
+    }
 
     if (data.images !== undefined) {
       const imageUrls = Array.isArray(data.images)
@@ -415,9 +463,14 @@ async function deleteProduct(id) {
   return product;
 }
 
+// CAT-6: cap how deep a client can page so ?page=99999999 can't force a giant OFFSET
+// scan on this public endpoint. 10k pages × 100/page covers any real catalog.
+const MAX_PAGE = 10000;
+
 async function getAllProducts(page = 1, limit = 10, categoryId = null, visibility = {}) {
-  const skip = (Math.max(1, page) - 1) * Math.min(100, Math.max(1, limit));
+  const safePage = Math.min(MAX_PAGE, Math.max(1, page));
   const take = Math.min(100, Math.max(1, limit));
+  const skip = (safePage - 1) * take;
   const where = {
     ...buildVisibilityWhere(visibility),
     ...(categoryId ? { categoryId } : {}),
@@ -443,7 +496,7 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null, visibilit
   return {
     items: items.map(mapProduct),
     total,
-    page: Math.max(1, page),
+    page: safePage,
     limit: take,
     totalPages: Math.ceil(total / take),
   };

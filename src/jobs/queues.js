@@ -7,6 +7,11 @@
  */
 
 const QUEUES = {
+  // JOB-2: shared dead-letter queue. Jobs that exhaust their retries are routed here
+  // (instead of vanishing after the archive purge) so failures can be inspected/alerted.
+  // It has no worker — landing here is a terminal, visible state.
+  DEAD_LETTER: 'dead-letter',
+
   // On-demand (enqueued from request handlers)
   EMAIL_SEND: 'email.send',
   PUSH_SEND: 'push.send',

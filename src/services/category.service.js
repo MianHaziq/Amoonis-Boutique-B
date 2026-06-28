@@ -127,13 +127,18 @@ async function updateCategory(id, data) {
 }
 
 async function deleteCategory(id) {
-  const count = await prisma.product.count({ where: { categoryId: id } });
-  if (count > 0) {
-    const err = new Error('Cannot delete category with products');
-    err.code = 'CATEGORY_HAS_PRODUCTS';
-    throw err;
-  }
-  return prisma.category.delete({ where: { id } });
+  // CAT-4: count + delete in ONE transaction so a product created between the count and
+  // the delete can't slip through. The DB-level onDelete:Restrict FK is the final guard;
+  // if it fires (race), Prisma throws P2003 which the controller maps to a clean 409.
+  return prisma.$transaction(async (tx) => {
+    const count = await tx.product.count({ where: { categoryId: id } });
+    if (count > 0) {
+      const err = new Error('Cannot delete category with products');
+      err.code = 'CATEGORY_HAS_PRODUCTS';
+      throw err;
+    }
+    return tx.category.delete({ where: { id } });
+  });
 }
 
 async function getAllCategories(visibility = {}) {
@@ -159,6 +164,12 @@ async function getCategoryById(id, includeProducts = false, visibility = {}) {
       ? {
           products: {
             ...(hasFilter ? { where: contentWhere } : {}),
+            // CAT-1: bound the nested product fetch so a category with thousands of
+            // products can't blow up the response / DB load on this public endpoint.
+            // Deterministic newest-first; full browsing uses the paginated
+            // GET /products/category/:categoryId endpoint.
+            take: 100,
+            orderBy: { createdAt: 'desc' },
             include: {
               category: { select: { id: true, title: true } },
               images: { orderBy: { sortOrder: 'asc' } },

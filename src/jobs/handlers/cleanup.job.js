@@ -52,16 +52,26 @@ async function cleanupNotifications() {
   const readCutoff = new Date(Date.now() - readDays * 86_400_000);
   const unreadCutoff = new Date(Date.now() - unreadDays * 86_400_000);
 
-  const res = await prisma.notification.deleteMany({
-    where: {
-      OR: [
-        { readAt: { not: null }, createdAt: { lt: readCutoff } },
-        { createdAt: { lt: unreadCutoff } },
-      ],
-    },
-  });
-  if (res.count > 0) console.log(`[jobs] cleanup.notifications deleted=${res.count}`);
-  return { deleted: res.count };
+  const where = {
+    OR: [
+      { readAt: { not: null }, createdAt: { lt: readCutoff } },
+      { createdAt: { lt: unreadCutoff } },
+    ],
+  };
+
+  // JOB-3: delete in capped batches (select ids, then delete by id) so the first run on a
+  // large table doesn't take one long table-locking statement. Loop until a short batch.
+  const BATCH = Math.max(500, parseInt(process.env.NOTIFICATION_CLEANUP_BATCH || '5000', 10));
+  let deleted = 0;
+  for (;;) {
+    const rows = await prisma.notification.findMany({ where, select: { id: true }, take: BATCH });
+    if (rows.length === 0) break;
+    const res = await prisma.notification.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+    deleted += res.count;
+    if (rows.length < BATCH) break;
+  }
+  if (deleted > 0) console.log(`[jobs] cleanup.notifications deleted=${deleted}`);
+  return { deleted };
 }
 
 // Deactivate promo codes whose expiry has passed so they drop out of active lookups.
@@ -78,31 +88,31 @@ module.exports = [
   {
     queue: QUEUES.CLEANUP_RESET_TOKENS,
     handler: cleanupResetTokens,
-    cron: process.env.CLEANUP_RESET_TOKENS_CRON || '0 3 * * *', // daily 03:00 UTC
+    cron: process.env.CLEANUP_RESET_TOKENS_CRON || '0 3 * * *', // daily 03:00 (JOBS_TIMEZONE, default Asia/Dubai)
     options: { retryLimit: 0 },
   },
   {
     queue: QUEUES.CLEANUP_REFRESH_TOKENS,
     handler: cleanupRefreshTokens,
-    cron: process.env.CLEANUP_REFRESH_TOKENS_CRON || '15 3 * * *', // daily 03:15 UTC
+    cron: process.env.CLEANUP_REFRESH_TOKENS_CRON || '15 3 * * *', // daily 03:15 (JOBS_TIMEZONE, default Asia/Dubai)
     options: { retryLimit: 0 },
   },
   {
     queue: QUEUES.CART_ABANDONED,
     handler: cleanupAbandonedCarts,
-    cron: process.env.CART_ABANDONED_CRON || '30 3 * * *', // daily 03:30 UTC
+    cron: process.env.CART_ABANDONED_CRON || '30 3 * * *', // daily 03:30 (JOBS_TIMEZONE, default Asia/Dubai)
     options: { retryLimit: 0 },
   },
   {
     queue: QUEUES.CLEANUP_NOTIFICATIONS,
     handler: cleanupNotifications,
-    cron: process.env.CLEANUP_NOTIFICATIONS_CRON || '50 3 * * *', // daily 03:50 UTC
+    cron: process.env.CLEANUP_NOTIFICATIONS_CRON || '50 3 * * *', // daily 03:50 (JOBS_TIMEZONE, default Asia/Dubai)
     options: { retryLimit: 0 },
   },
   {
     queue: QUEUES.PROMO_ARCHIVE,
     handler: archiveExpiredPromos,
-    cron: process.env.PROMO_ARCHIVE_CRON || '45 3 * * *', // daily 03:45 UTC
+    cron: process.env.PROMO_ARCHIVE_CRON || '45 3 * * *', // daily 03:45 (JOBS_TIMEZONE, default Asia/Dubai)
     options: { retryLimit: 0 },
   },
 ];

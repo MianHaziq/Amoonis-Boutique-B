@@ -103,5 +103,6 @@ module.exports = {
   queue: QUEUES.PUSH_SEND,
   handler: handle,
   // Pushes are time-sensitive; retry a few times quickly then give up (inbox copy persists).
-  options: { retryLimit: 3, retryDelay: 15, retryBackoff: true },
+  // JOB-2: exhausted pushes land in the dead-letter queue for visibility rather than vanishing.
+  options: { retryLimit: 3, retryDelay: 15, retryBackoff: true, deadLetter: QUEUES.DEAD_LETTER },
 };

@@ -94,6 +94,12 @@ const { resolveRegion } = require('../middleware/region');
  */
 // Helper for nested-array bilingual checks (descriptions[] / productOptions[]):
 // each row must have at least one filled side across its bilingual pair(s).
+// Money values map to a Decimal(10,2) column. Accept at most two fractional digits so a
+// value like 49.999 is rejected instead of being silently rounded by Postgres to 50.00.
+function isTwoDecimals(val) {
+  return /^\d+(\.\d{1,2})?$/.test(String(val));
+}
+
 function eachRowHasOneSide(arr, pairs) {
   if (!Array.isArray(arr)) return true; // optional — array missing is fine
   return arr.every((row) => {
@@ -113,8 +119,19 @@ const createValidation = [
   requireEitherBilingual('title', 'title_ar', 'Title'),
   body('subtitle').optional().trim(),
   body('subtitle_ar').optional().trim(),
-  body('price').isFloat({ min: 0 }).withMessage('Price must be a positive number'),
-  body('discountedPrice').optional().isFloat({ min: 0 }),
+  // CAT-5: bound price to the Decimal(10,2) column range and reject >2 decimal places
+  // (Postgres would silently round them, storing a price the admin never typed).
+  body('price')
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('Price must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('Price supports at most 2 decimal places'),
+  body('discountedPrice')
+    .optional()
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPrice must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('discountedPrice supports at most 2 decimal places').bail()
+    // CAT-2: a discount can never be higher than the base price (would display as a
+    // "discount" above the original). The service re-checks against the stored price too.
+    .custom((val, { req }) => req.body.price == null || Number(val) <= Number(req.body.price))
+    .withMessage('discountedPrice cannot exceed price'),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
   body('categoryId').optional().isUUID().withMessage('categoryId must be a valid UUID when provided'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
@@ -164,9 +181,24 @@ const updateValidation = [
   body('title_ar').optional().trim(),
   body('subtitle').optional().trim(),
   body('subtitle_ar').optional().trim(),
-  body('price').optional().isFloat({ min: 0 }),
-  body('discountedPrice').optional().isFloat({ min: 0 }),
+  // CAT-5 / CAT-2: same bounds, decimal limit, and discount<=price guard on update. The
+  // service additionally compares discountedPrice against the EXISTING price when price
+  // isn't part of this partial update (the validator can't see the stored value).
+  body('price')
+    .optional()
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('Price must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('Price supports at most 2 decimal places'),
+  body('discountedPrice')
+    .optional()
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPrice must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('discountedPrice supports at most 2 decimal places').bail()
+    .custom((val, { req }) => req.body.price == null || Number(val) <= Number(req.body.price))
+    .withMessage('discountedPrice cannot exceed price'),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
+  // CAT-3: optional optimistic-concurrency token. When the admin panel sends the
+  // updatedAt it last read, a stale overwrite (someone else edited meanwhile, or stock
+  // moved) is rejected with 409 instead of silently clobbering.
+  body('expectedUpdatedAt').optional().isISO8601().withMessage('expectedUpdatedAt must be an ISO 8601 timestamp'),
   body('categoryId').optional().isUUID(),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),

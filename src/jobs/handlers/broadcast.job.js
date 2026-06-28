@@ -29,7 +29,7 @@ const ENQUEUE_BATCH_SIZE = 200;
 const NEW_USER_DEFAULT_WINDOW_DAYS = 30;
 
 async function handle(data) {
-  const { kind = 'announcement', title, body, localized, data: payload = {}, regionId, audience = 'all', newUserWithinDays } = data;
+  const { kind = 'announcement', title, body, localized, data: payload = {}, regionId, audience = 'all', newUserWithinDays, promoCodeId = null } = data;
   const hasContent = localized
     ? Boolean(localized.en && localized.en.title && localized.en.body)
     : Boolean(title && body);
@@ -55,32 +55,47 @@ async function handle(data) {
   let cursor = null;
   let enqueued = 0;
 
-  for (;;) {
-    const users = await prisma.user.findMany({
-      where,
-      select: { id: true },
-      take: pageSize,
-      orderBy: { id: 'asc' },
-      ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
-    });
-    if (users.length === 0) break;
+  try {
+    for (;;) {
+      const users = await prisma.user.findMany({
+        where,
+        select: { id: true },
+        take: pageSize,
+        orderBy: { id: 'asc' },
+        ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+      });
+      if (users.length === 0) break;
 
-    // Batch the per-user push.send jobs into a few multi-row inserts rather than one
-    // serial enqueue (one DB insert) per user. The data enqueued per user is
-    // unchanged; we only change how it's written.
-    for (let i = 0; i < users.length; i += ENQUEUE_BATCH_SIZE) {
-      const slice = users.slice(i, i + ENQUEUE_BATCH_SIZE);
-      // Pass EITHER localized copy (worker picks the user's language) OR a fixed
-      // title/body — never both, since push.job prefers a present title/body.
-      const content = localized ? { localized } : { title, body };
-      const jobs = slice.map((u) => ({
-        data: { userId: u.id, prefKey, type, ...content, data: { type, ...payload } },
-      }));
-      enqueued += await enqueueMany(QUEUES.PUSH_SEND, jobs, { allowInlineFallback: false });
+      // Batch the per-user push.send jobs into a few multi-row inserts rather than one
+      // serial enqueue (one DB insert) per user. The data enqueued per user is
+      // unchanged; we only change how it's written.
+      for (let i = 0; i < users.length; i += ENQUEUE_BATCH_SIZE) {
+        const slice = users.slice(i, i + ENQUEUE_BATCH_SIZE);
+        // Pass EITHER localized copy (worker picks the user's language) OR a fixed
+        // title/body — never both, since push.job prefers a present title/body.
+        const content = localized ? { localized } : { title, body };
+        const jobs = slice.map((u) => ({
+          data: { userId: u.id, prefKey, type, ...content, data: { type, ...payload } },
+        }));
+        enqueued += await enqueueMany(QUEUES.PUSH_SEND, jobs, { allowInlineFallback: false });
+      }
+
+      if (users.length < pageSize) break;
+      cursor = users[users.length - 1].id;
     }
-
-    if (users.length < pageSize) break;
-    cursor = users[users.length - 1].id;
+  } catch (err) {
+    // JOB-6: this broadcast was triggered by promo.announce-active, which already stamped
+    // the code's announcedAt (the dedupe claim) BEFORE enqueuing us. If we failed before
+    // reaching ANY user, the code would be stuck marked "announced" with nobody notified.
+    // Release the claim so the daily job retries it. Only on zero progress — if we already
+    // enqueued some users, keep the claim to avoid re-blasting them (this queue is
+    // retryLimit:0 by design, accepting at most a few lost users over duplicate sends).
+    if (promoCodeId && enqueued === 0) {
+      await prisma.promoCode
+        .updateMany({ where: { id: promoCodeId }, data: { announcedAt: null } })
+        .catch(() => {});
+    }
+    throw err;
   }
 
   console.log(`[jobs] push.broadcast kind=${kind} audience=${audience} enqueued=${enqueued}`);
@@ -93,5 +108,8 @@ module.exports = {
   // No retry: a mid-run failure would restart the fan-out from the first user and
   // re-enqueue duplicate pushes for everyone already processed. Individual push.send
   // jobs have their own retries, so a partial broadcast loses at most a few users.
-  options: { retryLimit: 0 },
+  // JOB-1: give the fan-out a generous 1-hour expiry so a large user base can't trip
+  // pg-boss's 15-minute default mid-run (which, with retryLimit:0, would silently mark
+  // the broadcast failed and skip every remaining user).
+  options: { retryLimit: 0, expireInSeconds: 3600 },
 };

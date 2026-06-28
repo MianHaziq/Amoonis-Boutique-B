@@ -35,7 +35,10 @@ async function deleteCategory(req, res, next) {
     return success(res, null, 'Category deleted successfully');
   } catch (err) {
     if (err.code === 'P2025') return error(res, 'Category not found', 404);
-    if (err.code === 'CATEGORY_HAS_PRODUCTS') {
+    // CAT-4: keep the existing 400 for "has products", and map the foreign-key restrict
+    // violation (a product slipped in during a race) to the SAME clean 400 instead of a
+    // generic 500 — so the client behavior is unchanged, just no longer crashes on the race.
+    if (err.code === 'CATEGORY_HAS_PRODUCTS' || err.code === 'P2003') {
       return error(res, 'Cannot delete category that has products', 400);
     }
     next(err);

@@ -26,6 +26,18 @@ function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
 
+// PROMO-2: parse a money field that may be explicitly null. Rejects NaN / non-finite /
+// negative input instead of letting it reach the Decimal column (which would 500 on NaN
+// or store a nonsensical negative cap).
+function parseMoneyOrNull(value, field) {
+  if (value === null) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) {
+    throw Object.assign(new Error(`${field} must be a non-negative number`), { code: 'PROMO_INVALID_INPUT' });
+  }
+  return n;
+}
+
 // Fallback account-age window (days) for newUsersOnly codes whose newUserWithinDays is null.
 const NEW_USER_DEFAULT_WINDOW_DAYS = 30;
 
@@ -136,7 +148,7 @@ function buildPromoCodeData(data, { isUpdate = false } = {}) {
   }
 
   if (data.maxDiscountAmount !== undefined) {
-    out.maxDiscountAmount = data.maxDiscountAmount === null ? null : Number(data.maxDiscountAmount);
+    out.maxDiscountAmount = parseMoneyOrNull(data.maxDiscountAmount, 'maxDiscountAmount');
   }
 
   if (data.appliesTo !== undefined) {
@@ -150,10 +162,10 @@ function buildPromoCodeData(data, { isUpdate = false } = {}) {
   }
 
   if (data.minOrderAmount !== undefined) {
-    out.minOrderAmount = data.minOrderAmount === null ? null : Number(data.minOrderAmount);
+    out.minOrderAmount = parseMoneyOrNull(data.minOrderAmount, 'minOrderAmount');
   }
   if (data.maxOrderAmount !== undefined) {
-    out.maxOrderAmount = data.maxOrderAmount === null ? null : Number(data.maxOrderAmount);
+    out.maxOrderAmount = parseMoneyOrNull(data.maxOrderAmount, 'maxOrderAmount');
   }
 
   if (data.startsAt !== undefined) {

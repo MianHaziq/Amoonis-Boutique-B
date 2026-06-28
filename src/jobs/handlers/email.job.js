@@ -33,5 +33,7 @@ async function handle(data) {
 module.exports = {
   queue: QUEUES.EMAIL_SEND,
   handler: handle,
-  options: { retryLimit: 5, retryDelay: 30, retryBackoff: true },
+  // JOB-2: a transactional email (password reset, order confirmation) that exhausts its
+  // retries is routed to the dead-letter queue instead of being purged with only a log line.
+  options: { retryLimit: 5, retryDelay: 30, retryBackoff: true, deadLetter: QUEUES.DEAD_LETTER },
 };
