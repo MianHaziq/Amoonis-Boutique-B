@@ -92,8 +92,26 @@ async function start() {
       boss.on('error', (err) => console.error('[jobs] pg-boss error:', err.message));
       await boss.start();
 
+      // JOB-2: create any dead-letter queues referenced by handlers BEFORE the queues
+      // that route to them, so the reference resolves. These have no worker — exhausted
+      // jobs accumulate here as a terminal, inspectable state rather than disappearing.
+      const deadLetters = new Set();
+      for (const [, { options }] of registry.entries()) {
+        if (options.deadLetter) deadLetters.add(options.deadLetter);
+      }
+      for (const dl of deadLetters) {
+        if (!registry.has(dl)) await boss.createQueue(dl);
+      }
+
       for (const [queueName, { handler, options }] of registry.entries()) {
-        await boss.createQueue(queueName);
+        // JOB-1: queue-level expiration so a long-running job (e.g. a large broadcast
+        // fan-out) isn't silently killed at pg-boss's 15-minute default and, for
+        // retryable queues, re-run from the top. JOB-2: dead-letter routing for jobs
+        // that exhaust their retries.
+        const queueConfig = {};
+        if (options.expireInSeconds) queueConfig.expireInSeconds = options.expireInSeconds;
+        if (options.deadLetter) queueConfig.deadLetter = options.deadLetter;
+        await boss.createQueue(queueName, Object.keys(queueConfig).length ? queueConfig : undefined);
         const workOptions = {
           batchSize: options.batchSize || 1,
           pollingIntervalSeconds: options.pollingIntervalSeconds || 2,
@@ -218,6 +236,9 @@ async function stop() {
   ready = false;
   boss = null;
   startPromise = null;
+  // Clear registrations so a subsequent start() (e.g. a startJobs retry after a failed
+  // boot) re-registers from scratch instead of throwing "registered twice" (JOB-4).
+  registry.clear();
 }
 
 module.exports = {

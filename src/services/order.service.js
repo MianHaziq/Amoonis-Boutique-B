@@ -351,6 +351,15 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     let finalDiscount = null;
     if (promoResult) {
       const promoId = promoResult.promoCode.id;
+
+      // PROMO-1: take a row lock on this promo for the rest of the transaction. The
+      // per-user usage check below is a COUNT, which under Read Committed two concurrent
+      // orders could both pass before either commits — letting a user exceed
+      // usageLimitPerUser (or re-redeem a single-use / new-user code). Locking the promo
+      // row serializes all concurrent redemptions of THIS code so the count is accurate.
+      // (The global cap is already race-safe via the conditional UPDATE further down.)
+      await tx.$queryRaw`SELECT id FROM "PromoCode" WHERE id::text = ${promoId} FOR UPDATE`;
+
       const livePromo = await tx.promoCode.findUnique({
         where: { id: promoId },
         select: {

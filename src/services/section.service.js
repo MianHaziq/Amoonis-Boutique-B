@@ -69,7 +69,16 @@ function sectionInclude(visibility = {}) {
     categories: {
       orderBy: { sortOrder: 'asc' },
       ...(hasFilter ? { where: { category: contentWhere } } : {}),
-      include: { category: isStaff ? { include: SECTION_REGION_INCLUDE } : true },
+      // CAT-4: include the live product _count so the section's per-category product
+      // total reflects reality instead of the denormalized (drift-prone) totalProducts.
+      include: {
+        category: {
+          include: {
+            _count: { select: { products: true } },
+            ...(isStaff ? SECTION_REGION_INCLUDE : {}),
+          },
+        },
+      },
     },
     ...(isStaff ? SECTION_REGION_INCLUDE : {}),
   };
@@ -85,7 +94,8 @@ function mapCategoryForSection(cat) {
     description: category.description ?? null,
     description_ar: category.description_ar ?? null,
     image: category.image ?? null,
-    totalProducts: category.totalProducts ?? 0,
+    // CAT-4: prefer the live count; fall back to the denormalized column only if absent.
+    totalProducts: category._count?.products ?? category.totalProducts ?? 0,
     status: category.status,
     createdAt: category.createdAt,
     updatedAt: category.updatedAt,
