@@ -18,6 +18,7 @@ const defs = [
   require('./handlers/orderExpire.job'),
   require('./handlers/lowStock.job'),
   require('./handlers/promoAnnounce.job'),
+  require('./handlers/salesReport.job'), // array: report.weekly + report.monthly
   require('./handlers/cleanup.job'), // array of housekeeping defs
 ].flat();
 
