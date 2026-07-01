@@ -95,25 +95,6 @@ async function deliver(to, subject, html) {
   throw new Error('No email transport configured (set RESEND_API_KEY or SMTP_HOST)');
 }
 
-/** Simple branded order-confirmation email body. */
-function renderOrderConfirmation(order) {
-  const total = order.totalAmount != null ? `${order.totalAmount} ${order.currency || 'AED'}` : '';
-  return `
-<!DOCTYPE html><html><head><meta charset="utf-8"></head>
-<body style="margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f5f5f5;padding:24px;">
-  <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
-    <div style="background:#111;padding:24px 32px;text-align:center;">
-      <h1 style="margin:0;color:#fff;font-size:22px;">Amoon Bloom</h1>
-    </div>
-    <div style="padding:32px;color:#1f2937;">
-      <h2 style="margin:0 0 12px;font-size:18px;">Thank you for your order!</h2>
-      <p style="margin:0 0 8px;color:#4b5563;">Your order <strong>#${order.orderNumber}</strong> has been received${total ? ` for <strong>${total}</strong>` : ''}.</p>
-      <p style="margin:0;color:#4b5563;">We'll notify you as it progresses. You can track it any time in the app.</p>
-    </div>
-  </div>
-</body></html>`;
-}
-
 /**
  * Send team invitation email (existing user: access granted; new user: sign up to accept).
  * @param {object} opts
@@ -175,6 +156,5 @@ async function sendTeamInvitationEmail({ to, inviterName, acceptUrl, isExistingU
 module.exports = {
   sendEmail,
   deliver,
-  renderOrderConfirmation,
   sendTeamInvitationEmail,
 };
