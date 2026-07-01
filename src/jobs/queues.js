@@ -28,6 +28,8 @@ const QUEUES = {
   CART_ABANDONED: 'cart.abandoned',
   PROMO_ARCHIVE: 'promo.archive-expired',
   PROMO_ANNOUNCE: 'promo.announce-active',
+  REPORT_WEEKLY: 'report.weekly',
+  REPORT_MONTHLY: 'report.monthly',
 };
 
 // Every scheduled queue, so the UI/status endpoint can report on each even before
@@ -42,6 +44,8 @@ const SCHEDULED_QUEUES = [
   QUEUES.CART_ABANDONED,
   QUEUES.PROMO_ARCHIVE,
   QUEUES.PROMO_ANNOUNCE,
+  QUEUES.REPORT_WEEKLY,
+  QUEUES.REPORT_MONTHLY,
 ];
 
 const ALL_QUEUES = Object.values(QUEUES);

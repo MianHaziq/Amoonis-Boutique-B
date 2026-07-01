@@ -568,12 +568,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       totalAmount: payload.totalAmount,
       buyerId: userId,
     });
-    notify.orderConfirmationEmail({
-      id: createdOrderId,
-      orderNumber: payload.orderNumber,
-      userEmail: order.user?.email,
-      totalAmount: payload.totalAmount,
-    });
+    notify.orderConfirmationEmail({ orderId: createdOrderId, to: order.user?.email });
   }
 
   return { order: payload, error: null };
@@ -1298,12 +1293,7 @@ async function finalizePaidOrder(order, { firstPlacement } = {}) {
         totalAmount: Number(order.totalAmount),
         buyerId: order.userId,
       });
-      notify.orderConfirmationEmail({
-        id: orderId,
-        orderNumber: order.orderNumber,
-        userEmail: order.user?.email,
-        totalAmount: Number(order.totalAmount),
-      });
+      notify.orderConfirmationEmail({ orderId, to: order.user?.email });
     }
   }
 

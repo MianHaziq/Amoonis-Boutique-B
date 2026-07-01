@@ -50,19 +50,15 @@ function adminNewOrder({ orderId, orderNumber, totalAmount, currency, buyerId } 
   });
 }
 
-/** Order confirmation email (best-effort; queued with retries). */
-function orderConfirmationEmail(order) {
-  if (!order || !order.userEmail) return Promise.resolve(null);
-  return enqueue(QUEUES.EMAIL_SEND, {
-    template: 'order-confirmation',
-    to: order.userEmail,
-    order: {
-      id: order.id,
-      orderNumber: order.orderNumber || order.id,
-      totalAmount: order.totalAmount,
-      currency: order.currency || 'AED',
-    },
-  });
+/**
+ * Order confirmation email (best-effort; queued with retries). Only the orderId + email
+ * are passed — the email.send job loads the full order (items, shipping, payment status)
+ * from the DB at send time, so the rich template can never drift from how callers happen
+ * to shape their in-memory order object.
+ */
+function orderConfirmationEmail({ orderId, to } = {}) {
+  if (!orderId || !to) return Promise.resolve(null);
+  return enqueue(QUEUES.EMAIL_SEND, { template: 'order-confirmation', orderId, to });
 }
 
 /** Generic transactional email (e.g. password reset). */
