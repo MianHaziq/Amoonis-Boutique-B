@@ -67,6 +67,7 @@ async function main() {
   await makeProduct({ title: 'Sunflower Basket', status: 'PUBLISHED', regionId: region1.id });
 
   const storefront = { isStaff: false, regionId: region1.id };
+  const storefront2 = { isStaff: false, regionId: region2.id };
   const staff = { isStaff: true };
 
   // --- 1. Storefront: title match, region + PUBLISHED scoped --------------------
@@ -76,6 +77,13 @@ async function main() {
   ok('storefront excludes DRAFT', !titles1.some((t) => t.includes('Secret Rose Draft')));
   ok('storefront excludes other-region product', !titles1.some((t) => t.includes('Other Region')));
   ok('subtitle match is included', titles1.some((t) => t.includes('White Lily Stems')));
+  ok('every result carries an id (navigable slug)', r1.items.length > 0 && r1.items.every((p) => typeof p.id === 'string' && p.id.length > 0));
+
+  // --- 1b. Region isolation: a different region sees ONLY its own product -------
+  const r1b = await productService.searchProducts('rose', 1, 50, storefront2);
+  const titles1b = r1b.items.map((p) => p.title);
+  ok('region 2 storefront sees only its own rose', r1b.total === 1 && titles1b.some((t) => t.includes('Other Region')), `got ${r1b.total}: ${titles1b.join(' | ')}`);
+  ok('region 2 does NOT see region 1 products', !titles1b.some((t) => t.includes('Red Rose Bouquet')));
 
   // --- 2. Staff: sees drafts + all regions --------------------------------------
   const r2 = await productService.searchProducts('rose', 1, 50, staff);
@@ -95,6 +103,29 @@ async function main() {
   // --- 5. Category-name match ---------------------------------------------------
   const r5 = await productService.searchProducts('sunflower', 1, 50, storefront);
   ok('non-rose term matches its own product only', r5.total === 1 && r5.items[0].title.includes('Sunflower'), `got ${r5.total}`);
+
+  // --- 5b. Click-through: search result -> product detail is region-consistent --
+  // The storefront links each result to /shop/<id>, which loads via getProductById
+  // under the SAME visibility. Verify the navigation target opens in-region and is
+  // blocked cross-region (so an out-of-region product can't be reached by URL either).
+  const region1RoseId = r1.items.find((p) => p.title.includes('Red Rose Bouquet')).id;
+  const region2RoseId = r1b.items.find((p) => p.title.includes('Other Region')).id;
+  const draftRose = await prisma.product.findFirst({ where: { title: { contains: 'Secret Rose Draft' } } });
+
+  const openInRegion = await productService.getProductById(region1RoseId, storefront);
+  ok('clicking a region-1 result opens the product for a region-1 user', openInRegion && openInRegion.id === region1RoseId);
+
+  const openCrossRegion = await productService.getProductById(region1RoseId, storefront2);
+  ok('region-2 user CANNOT open a region-1 product by id (404 path)', openCrossRegion === null);
+
+  const openOtherFromR1 = await productService.getProductById(region2RoseId, storefront);
+  ok('region-1 user CANNOT open a region-2 product by id (404 path)', openOtherFromR1 === null);
+
+  const openDraft = await productService.getProductById(draftRose.id, storefront);
+  ok('storefront CANNOT open a DRAFT product by id (404 path)', openDraft === null);
+
+  const staffOpensOtherRegion = await productService.getProductById(region2RoseId, staff);
+  ok('staff CAN open any product by id regardless of region', staffOpensOtherRegion && staffOpensOtherRegion.id === region2RoseId);
 
   // --- 6. Empty query returns nothing (not the whole catalog) -------------------
   const r6 = await productService.searchProducts('   ', 1, 50, storefront);
