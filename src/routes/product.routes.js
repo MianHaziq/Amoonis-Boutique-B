@@ -246,6 +246,10 @@ const pagination = [
   query('page').optional().isInt({ min: 1 }),
   query('limit').optional().isInt({ min: 1, max: 100 }),
 ];
+const searchValidation = [
+  query('q').optional().trim().isLength({ max: 100 }).withMessage('q must be at most 100 characters'),
+  ...pagination,
+];
 
 router.post(
   '/',
@@ -417,6 +421,48 @@ router.delete(
  *                 pagination: { page: 1, limit: 10, total: 0, totalPages: 0 }
  */
 router.get('/', publicLimiter, attachStaffIfPresent, resolveRegion, pagination, handleValidationErrors, productController.getAllProducts);
+
+/**
+ * @swagger
+ * /products/search:
+ *   get:
+ *     summary: Search products (paginated)
+ *     description: |
+ *       Case-insensitive search across product title/subtitle (EN + AR) and the
+ *       product's category name. Backed by pg_trgm GIN indexes so it stays fast as the
+ *       catalog grows. Storefront requests (X-Region) match only PUBLISHED products in
+ *       that region; staff match everything (optionally narrowed by region/status).
+ *       An empty `q` returns no results. `meta.query` echoes the normalized term.
+ *     tags: [Products]
+ *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
+ *       - in: query
+ *         name: q
+ *         schema: { type: string, maxLength: 100 }
+ *         description: Search term
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 10 }
+ *       - $ref: '#/components/parameters/RegionFilterQuery'
+ *       - $ref: '#/components/parameters/StatusFilterQuery'
+ *     responses:
+ *       200:
+ *         description: Paginated search results
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ApiSuccess' }
+ *             example:
+ *               success: true
+ *               message: Products fetched successfully
+ *               data: []
+ *               meta:
+ *                 pagination: { page: 1, limit: 10, total: 0, totalPages: 0 }
+ *                 query: "rose"
+ */
+router.get('/search', publicLimiter, attachStaffIfPresent, resolveRegion, searchValidation, handleValidationErrors, productController.searchProducts);
 
 /**
  * @swagger
