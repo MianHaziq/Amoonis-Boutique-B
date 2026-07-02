@@ -17,6 +17,8 @@
     "test:promo": "node scripts/test-promo-codes.js",
     "test:permissions": "node scripts/manager-permissions-test.js",
     "test:search": "node scripts/search-verify.js",
+    "test:cart": "node scripts/cart-verify.js",
+    "test:notifications": "node scripts/notifications-verify.js",
     "kill-port-5000": "powershell -ExecutionPolicy Bypass -File scripts/kill-port-5000.ps1",
     "migrate:fix-p3009": "node scripts/fix-p3009-ecommerce-migration.js"
   },
