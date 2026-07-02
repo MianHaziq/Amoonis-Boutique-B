@@ -506,6 +506,76 @@ async function getProductsByCategory(categoryId, page = 1, limit = 10, visibilit
   return getAllProducts(page, limit, categoryId, visibility);
 }
 
+// Cap the search term length so a pathological 10k-char query can't build a huge
+// ILIKE pattern. Anything past this can't add meaningful signal for a catalog search.
+const MAX_SEARCH_LEN = 100;
+
+/**
+ * Full-text-ish product search across the bilingual title/subtitle columns and the
+ * product's category name. Backed by pg_trgm GIN indexes (see the
+ * 20260702000000_product_search_trgm migration) so the case-insensitive substring
+ * match is served from an index instead of a sequential scan.
+ *
+ * Visibility is applied through the same buildVisibilityWhere() used everywhere else,
+ * so storefront callers only ever match PUBLISHED products in their region and staff
+ * see everything (optionally narrowed by their admin filters).
+ *
+ * Results are ordered by recency (createdAt desc) — the standard catalog order — after
+ * the index narrows the set to matches. Returns the same paginated shape as the list
+ * endpoints, plus the normalized query echoed back.
+ */
+async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
+  const q = String(rawQuery ?? '').trim().slice(0, MAX_SEARCH_LEN);
+  const safePage = Math.min(MAX_PAGE, Math.max(1, page));
+  const take = Math.min(100, Math.max(1, limit));
+  const skip = (safePage - 1) * take;
+
+  // Empty query → no results (rather than "everything"), so an accidental blank
+  // search doesn't dump the whole catalog through the search path.
+  if (!q) {
+    return { items: [], total: 0, page: safePage, limit: take, totalPages: 0, query: q };
+  }
+
+  const contains = { contains: q, mode: 'insensitive' };
+  const where = {
+    ...buildVisibilityWhere(visibility),
+    OR: [
+      { title: contains },
+      { title_ar: contains },
+      { subtitle: contains },
+      { subtitle_ar: contains },
+      { category: { is: { title: contains } } },
+      { category: { is: { title_ar: contains } } },
+    ],
+  };
+
+  const [items, total] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      skip,
+      take,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        category: { select: { id: true, title: true } },
+        images: { orderBy: { sortOrder: 'asc' } },
+        descriptions: { orderBy: { sortOrder: 'asc' } },
+        productOptions: { orderBy: { sortOrder: 'asc' } },
+        ...(visibility.isStaff ? REGION_INCLUDE : {}),
+      },
+    }),
+    prisma.product.count({ where }),
+  ]);
+
+  return {
+    items: items.map(mapProduct),
+    total,
+    page: safePage,
+    limit: take,
+    totalPages: Math.ceil(total / take),
+    query: q,
+  };
+}
+
 async function getProductById(id, visibility = {}) {
   const product = await prisma.product.findFirst({
     where: { id, ...buildVisibilityWhere(visibility) },
@@ -526,6 +596,7 @@ module.exports = {
   deleteProduct,
   getAllProducts,
   getProductsByCategory,
+  searchProducts,
   getProductById,
   mapProduct,
   decimalToNumber,
