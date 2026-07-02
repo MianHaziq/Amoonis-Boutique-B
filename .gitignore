@@ -11,3 +11,4 @@ temp_interactive_push.bat
 .env
 
 .report-previews/
+config.bat
