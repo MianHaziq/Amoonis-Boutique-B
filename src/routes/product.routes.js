@@ -347,6 +347,52 @@ router.post(
  *       404:
  *         description: Product or category not found
  */
+/**
+ * @swagger
+ * /products/order:
+ *   patch:
+ *     summary: Reorder products (admin)
+ *     description: |
+ *       Set product display order by sending an array of `{ id, sortOrder }`.
+ *       `sortOrder` is the absolute display position (admin page offset + row index),
+ *       so ordering stays consistent across paginated admin pages. Requires admin JWT.
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [items]
+ *             properties:
+ *               items:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [id, sortOrder]
+ *                   properties:
+ *                     id: { type: string, format: uuid }
+ *                     sortOrder: { type: integer, minimum: 0 }
+ *     responses:
+ *       200: { description: Product order updated }
+ *       404: { description: One or more products not found }
+ */
+const reorderValidation = [
+  body('items').isArray({ min: 1 }).withMessage('items must be a non-empty array'),
+  body('items.*.id').isUUID().withMessage('Each item.id must be a valid UUID'),
+  body('items.*.sortOrder').isInt({ min: 0 }).withMessage('Each item.sortOrder must be a non-negative integer'),
+];
+router.patch(
+  '/order',
+  verifyAdminOrManager,
+  requireManagerPermission('PRODUCTS'),
+  reorderValidation,
+  handleValidationErrors,
+  productController.reorderProducts
+);
+
 router.put(
   '/:id',
   verifyAdminOrManager,

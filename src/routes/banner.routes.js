@@ -23,9 +23,18 @@ const { resolveRegion } = require('../middleware/region');
  *       Returns banner images in display order (first = top of landing page). No auth required.
  *       Storefront sends **X-Region** and gets only PUBLISHED banners for that region; staff
  *       (admin/manager token) get all banners across all regions.
+ *
+ *       **Platform:** pass `?platform=WEB` for website banners (may be videos). When omitted,
+ *       non-staff requests default to `MOBILE`, so the mobile app never receives web-only
+ *       banners. Staff see all platforms unless a `platform` filter is supplied.
  *     tags: [Banners]
  *     parameters:
  *       - $ref: '#/components/parameters/XRegionHeader'
+ *       - in: query
+ *         name: platform
+ *         required: false
+ *         schema: { type: string, enum: [MOBILE, WEB] }
+ *         description: Filter banners by target client. Storefront defaults to MOBILE when omitted.
  *     responses:
  *       200:
  *         description: Banners in display order
@@ -145,6 +154,7 @@ const addValidation = [
     return true;
   }),
   body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
+  body('platform').optional().isIn(['MOBILE', 'WEB']).withMessage('platform must be MOBILE or WEB'),
   body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
   body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
 ];
@@ -170,6 +180,7 @@ const updateValidation = [
   param('id').isUUID().withMessage('Valid banner ID required'),
   body('url').optional().trim().isURL().withMessage('url must be a valid URL'),
   body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
+  body('platform').optional().isIn(['MOBILE', 'WEB']).withMessage('platform must be MOBILE or WEB'),
   body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
   body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
 ];

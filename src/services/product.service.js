@@ -60,6 +60,9 @@ function orderedProductOptions(product) {
     title_ar: o.title_ar ?? null,
     options: Array.isArray(o.options) ? o.options : [],
     options_ar: Array.isArray(o.options_ar) ? o.options_ar : [],
+    // Additive: per-value image URLs (aligned with `options`). Older clients
+    // that don't read this field are unaffected.
+    optionImages: Array.isArray(o.optionImages) ? o.optionImages : [],
   }));
 }
 
@@ -124,11 +127,17 @@ function normalizeProductOptions(productOptions) {
       const options_ar = Array.isArray(item.options_ar)
         ? item.options_ar.filter((v) => v != null && String(v).trim() !== '').map((v) => String(v).trim())
         : [];
+      // Optional per-value images, aligned by index with `options`. We keep the
+      // full array (including "" gaps) so index alignment with options holds.
+      const optionImages = Array.isArray(item.optionImages)
+        ? item.optionImages.map((v) => (v == null ? '' : String(v).trim())).slice(0, options.length)
+        : [];
       return {
         title: titleEn || null,
         title_ar: titleAr || null,
         options,
         options_ar,
+        optionImages,
         sortOrder: i,
       };
     })
@@ -463,6 +472,27 @@ async function deleteProduct(id) {
   return product;
 }
 
+/**
+ * Reorder products by assigning explicit sortOrder values (admin drag-and-drop).
+ * Accepts an array of { id, sortOrder }. Because the admin list is paginated, the
+ * caller sends absolute positions (base = page offset + row index) so ordering
+ * stays globally consistent across pages. Runs in a single transaction.
+ * @param {{ id: string, sortOrder: number }[]} items
+ */
+async function reorderProducts(items) {
+  const clean = (Array.isArray(items) ? items : [])
+    .filter((it) => it && typeof it.id === 'string' && Number.isInteger(it.sortOrder))
+    .map((it) => ({ id: it.id, sortOrder: it.sortOrder }));
+  if (clean.length === 0) return { count: 0 };
+
+  await prisma.$transaction(
+    clean.map((it) =>
+      prisma.product.update({ where: { id: it.id }, data: { sortOrder: it.sortOrder } })
+    )
+  );
+  return { count: clean.length };
+}
+
 // CAT-6: cap how deep a client can page so ?page=99999999 can't force a giant OFFSET
 // scan on this public endpoint. 10k pages × 100/page covers any real catalog.
 const MAX_PAGE = 10000;
@@ -481,7 +511,10 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null, visibilit
       where,
       skip,
       take,
-      orderBy: { createdAt: 'desc' },
+      // Admin-controlled display order first (drag-and-drop sets sortOrder), then
+      // newest. All products default to sortOrder 0, so the effective order is
+      // unchanged until an admin explicitly reorders.
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
       include: {
         category: { select: { id: true, title: true } },
         images: { orderBy: { sortOrder: 'asc' } },
@@ -594,6 +627,7 @@ module.exports = {
   createProduct,
   updateProduct,
   deleteProduct,
+  reorderProducts,
   getAllProducts,
   getProductsByCategory,
   searchProducts,

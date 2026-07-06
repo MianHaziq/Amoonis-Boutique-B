@@ -217,17 +217,22 @@ model SectionCategory {
 // ============================================
 
 model BannerImage {
-  id        String        @id @default(uuid())
-  url       String        @db.Text
-  sortOrder Int           @default(0)
-  status    PublishStatus @default(DRAFT)
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  id        String         @id @default(uuid())
+  url       String         @db.Text
+  sortOrder Int            @default(0)
+  status    PublishStatus  @default(DRAFT)
+  // Which client this banner targets. MOBILE (default) keeps the existing Flutter
+  // app behavior untouched; WEB banners (incl. hero videos) are served only to the
+  // website, so the storefront default query never leaks them to the mobile app.
+  platform  BannerPlatform @default(MOBILE)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
 
   regions BannerRegion[]
 
   @@index([sortOrder])
   @@index([status])
+  @@index([platform])
 }
 
 // ============================================
@@ -304,6 +309,9 @@ model Product {
   quantity        Int           @default(0)
   categoryId      String?
   status          PublishStatus @default(DRAFT)
+  // Admin-controlled display order (drag-and-drop). Defaults to 0 so existing
+  // products keep their createdAt-desc order until an admin reorders them.
+  sortOrder       Int           @default(0)
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
@@ -322,6 +330,8 @@ model Product {
   // Composite serves the hot storefront query: WHERE status='PUBLISHED' ORDER BY createdAt DESC.
   // Leftmost prefix also covers plain status-equality filters/counts.
   @@index([status, createdAt])
+  // Serves the admin-ordered list: WHERE status=? ORDER BY sortOrder ASC, createdAt DESC.
+  @@index([status, sortOrder])
 }
 
 model ProductOption {
@@ -331,6 +341,11 @@ model ProductOption {
   title_ar   String?
   options    String[]
   options_ar String[] @default([])
+  // Optional per-value image URLs, aligned by index with `options` (e.g. a
+  // "Colour" option maps Blue/Pink/White to specific product photos). Empty by
+  // default — purely additive, so existing API consumers (the mobile app) are
+  // unaffected. An entry may be "" when a value has no dedicated image.
+  optionImages String[] @default([])
   sortOrder  Int      @default(0)
   createdAt  DateTime @default(now())
 
@@ -688,6 +703,13 @@ enum PushPlatform {
 enum PublishStatus {
   DRAFT
   PUBLISHED
+}
+
+/// Which client a banner targets. MOBILE (default) preserves the existing Flutter
+/// app behavior; WEB banners (including hero videos) are served only to the website.
+enum BannerPlatform {
+  MOBILE
+  WEB
 }
 
 enum UserRole {
