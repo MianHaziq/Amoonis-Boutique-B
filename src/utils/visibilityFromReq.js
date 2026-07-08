@@ -43,6 +43,12 @@ async function visibilityFromReq(req) {
       const region = await regionService.getRegionByCode(explicitCode);
       opts.adminRegionId = region ? region.id : NO_MATCH_REGION_ID;
     }
+  } else {
+    // Storefront currency: which price a product shows (see product.service's
+    // applyRegionCurrency) is driven by the requesting region's currency, resolved
+    // once here so every list/detail endpoint gets it for free via `visibility`.
+    const region = await regionService.getRegionById(regionId);
+    opts.currency = region?.currency || 'AED';
   }
 
   return opts;

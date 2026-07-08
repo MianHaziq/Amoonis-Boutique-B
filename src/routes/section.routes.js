@@ -189,6 +189,26 @@ router.post('/', verifyAdminOrManager, requireManagerPermission('SECTIONS'), cre
  *       404:
  *         description: Section or linked product/category not found
  */
+/**
+ * @swagger
+ * /sections/order:
+ *   patch:
+ *     summary: Reorder sections (admin)
+ *     description: Set section display order by sending [{ id, sortOrder }]. Requires admin JWT.
+ *     tags: [Sections]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200: { description: Section order updated }
+ *       404: { description: One or more sections not found }
+ */
+const reorderValidation = [
+  body('items').isArray({ min: 1 }).withMessage('items must be a non-empty array'),
+  body('items.*.id').isUUID().withMessage('Each item.id must be a valid UUID'),
+  body('items.*.sortOrder').isInt({ min: 0 }).withMessage('Each item.sortOrder must be a non-negative integer'),
+];
+router.patch('/order', verifyAdminOrManager, requireManagerPermission('SECTIONS'), reorderValidation, handleValidationErrors, sectionController.reorderSections);
+
 const updateValidation = [
   param('id').isUUID().withMessage('Valid section ID required'),
   body('title').optional().trim().notEmpty().withMessage('Section title cannot be empty'),

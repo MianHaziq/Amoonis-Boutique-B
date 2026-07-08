@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { uploadImage } = require('../controllers/upload.controller');
-const { uploadImage: uploadImageMulter } = require('../middleware/upload');
+const { uploadImage, uploadVideo } = require('../controllers/upload.controller');
+const { uploadImage: uploadImageMulter, uploadVideo: uploadVideoMulter } = require('../middleware/upload');
 const { verifyAdminOrManager, requireAnyManagerPermission } = require('../middleware/managerAuth');
 const { UPLOAD_RELATED_PERMISSIONS } = require('../constants/managerPermissions');
 
@@ -60,6 +60,43 @@ router.post(
   requireAnyManagerPermission([...UPLOAD_RELATED_PERMISSIONS]),
   uploadImageMulter.single('file'),
   uploadImage
+);
+
+/**
+ * @swagger
+ * /upload/video:
+ *   post:
+ *     summary: Upload video to Bunny Storage (admin)
+ *     description: Upload a video via multipart form (field `file`). Returns the CDN URL. Used for web hero banner videos. MP4/WebM/MOV/AVI/MKV, up to 500MB. Requires admin JWT.
+ *     tags: [Upload]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file]
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *                 description: Video file (MP4, WebM, MOV, AVI, MKV)
+ *     responses:
+ *       200:
+ *         description: Upload successful; returns CDN URL
+ *       400:
+ *         description: No file or invalid file type
+ *       401:
+ *         description: Unauthorized
+ */
+router.post(
+  '/video',
+  verifyAdminOrManager,
+  requireAnyManagerPermission([...UPLOAD_RELATED_PERMISSIONS]),
+  uploadVideoMulter.single('file'),
+  uploadVideo
 );
 
 module.exports = router;

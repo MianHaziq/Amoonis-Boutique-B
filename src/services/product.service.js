@@ -60,12 +60,30 @@ function orderedProductOptions(product) {
     title_ar: o.title_ar ?? null,
     options: Array.isArray(o.options) ? o.options : [],
     options_ar: Array.isArray(o.options_ar) ? o.options_ar : [],
+    // Additive: per-value image URLs (aligned with `options`). Older clients
+    // that don't read this field are unaffected.
+    optionImages: Array.isArray(o.optionImages) ? o.optionImages : [],
+    // Additive: per-value swatch colours (hex), aligned with `options`.
+    optionColors: Array.isArray(o.optionColors) ? o.optionColors : [],
+    // Additive: per-value image SETS (array-of-arrays), aligned with `options`.
+    // Null/absent when unused; consumers fall back to single `optionImages`.
+    optionImageSets: Array.isArray(o.optionImageSets) ? o.optionImageSets : [],
   }));
 }
 
 function mapProduct(product) {
   if (!product) return null;
-  const { price, discountedPrice, images, descriptions, productOptions, regions, ...rest } = product;
+  const {
+    price,
+    discountedPrice,
+    priceSar,
+    discountedPriceSar,
+    images,
+    descriptions,
+    productOptions,
+    regions,
+    ...rest
+  } = product;
   const imagesList = orderedImages(product);
   const descriptionsList = orderedDescriptions(product);
   const productOptionsList = orderedProductOptions(product);
@@ -73,6 +91,12 @@ function mapProduct(product) {
     ...rest,
     price: decimalToNumber(price),
     discountedPrice: decimalToNumber(discountedPrice),
+    // Raw SAR override (manually entered by the admin), always present and additive —
+    // null means "no SAR price set yet". Region-currency resolution (which field a
+    // storefront request actually sees as `price`/`discountedPrice`) happens on top of
+    // this via applyRegionCurrency, so admin reads always get both currencies raw.
+    priceSar: decimalToNumber(priceSar),
+    discountedPriceSar: decimalToNumber(discountedPriceSar),
     images: imagesList.map((i) => i.url),
     image: imagesList[0]?.url ?? null,
     descriptions: descriptionsList,
@@ -86,6 +110,41 @@ function mapProduct(product) {
     out.regionIds = regionList.map((r) => r.id);
   }
   return out;
+}
+
+/**
+ * Overlay a region's currency onto an already-mapped product for STOREFRONT reads:
+ * when the currency is SAR, `price`/`discountedPrice` become the SAR override (falling
+ * back to the AED value when no SAR price is set), so the frontend reads the same
+ * field names regardless of region — no currency-branching needed client-side.
+ * Staff/admin reads should NOT call this — they get the raw AED + SAR fields so the
+ * edit form can show/edit both.
+ */
+function applyRegionCurrency(mapped, currency) {
+  if (!mapped || currency !== 'SAR') return mapped;
+  return {
+    ...mapped,
+    price: mapped.priceSar != null ? mapped.priceSar : mapped.price,
+    discountedPrice:
+      mapped.discountedPriceSar != null ? mapped.discountedPriceSar : mapped.discountedPrice,
+  };
+}
+
+/**
+ * Same resolution as applyRegionCurrency, but works directly on a raw Prisma product
+ * row (Decimal fields) instead of an already-mapped product — used where only the
+ * numeric price is needed (order totals, cart line totals), not the full product shape.
+ */
+function regionPriceFromRow(row, currency) {
+  const price = decimalToNumber(row.price) ?? 0;
+  const discountedPrice = decimalToNumber(row.discountedPrice);
+  if (currency !== 'SAR') return { price, discountedPrice };
+  const priceSar = decimalToNumber(row.priceSar);
+  const discountedPriceSar = decimalToNumber(row.discountedPriceSar);
+  return {
+    price: priceSar != null ? priceSar : price,
+    discountedPrice: discountedPriceSar != null ? discountedPriceSar : discountedPrice,
+  };
 }
 
 function normalizeDescriptions(descriptions) {
@@ -124,11 +183,43 @@ function normalizeProductOptions(productOptions) {
       const options_ar = Array.isArray(item.options_ar)
         ? item.options_ar.filter((v) => v != null && String(v).trim() !== '').map((v) => String(v).trim())
         : [];
+      // Optional per-value images, aligned by index with `options`. We keep the
+      // full array (including "" gaps) so index alignment with options holds.
+      // Optional per-value swatch colours (hex), aligned by index with `options`.
+      const optionColors = Array.isArray(item.optionColors)
+        ? item.optionColors.map((v) => (v == null ? '' : String(v).trim())).slice(0, options.length)
+        : [];
+
+      // Per-value image SETS (array-of-arrays). When provided, they are the
+      // source of truth and we derive the single `optionImages` (mobile/hover =
+      // first photo of each set). When absent, fall back to the legacy single
+      // `optionImages` and synthesise trivial one-item sets from it.
+      const cleanUrl = (v) => (v == null ? '' : String(v).trim());
+      let optionImages;
+      let optionImageSets;
+      if (Array.isArray(item.optionImageSets)) {
+        optionImageSets = [];
+        for (let k = 0; k < options.length; k++) {
+          const raw = Array.isArray(item.optionImageSets[k]) ? item.optionImageSets[k] : [];
+          optionImageSets.push(raw.map(cleanUrl).filter(Boolean));
+        }
+        optionImages = optionImageSets.map((set) => set[0] || '');
+      } else {
+        optionImages = Array.isArray(item.optionImages)
+          ? item.optionImages.map(cleanUrl).slice(0, options.length)
+          : [];
+        while (optionImages.length < options.length) optionImages.push('');
+        optionImageSets = optionImages.map((u) => (u ? [u] : []));
+      }
+
       return {
         title: titleEn || null,
         title_ar: titleAr || null,
         options,
         options_ar,
+        optionImages,
+        optionColors,
+        optionImageSets,
         sortOrder: i,
       };
     })
@@ -163,6 +254,15 @@ async function createProduct(data) {
   // route validator, so non-HTTP callers can't create an inverted price).
   if (data.discountedPrice != null && data.price != null && Number(data.discountedPrice) > Number(data.price)) {
     const err = new Error('discountedPrice cannot exceed price');
+    err.code = 'INVALID_PRICE';
+    throw err;
+  }
+  if (
+    data.discountedPriceSar != null &&
+    data.priceSar != null &&
+    Number(data.discountedPriceSar) > Number(data.priceSar)
+  ) {
+    const err = new Error('discountedPriceSar cannot exceed priceSar');
     err.code = 'INVALID_PRICE';
     throw err;
   }
@@ -207,6 +307,8 @@ async function createProduct(data) {
         subtitle_ar: productDraft.subtitle_ar ?? null,
         price: data.price,
         discountedPrice: data.discountedPrice ?? null,
+        priceSar: data.priceSar != null ? Number(data.priceSar) : null,
+        discountedPriceSar: data.discountedPriceSar != null ? Number(data.discountedPriceSar) : null,
         quantity,
         status,
         ...(regionIds.length > 0
@@ -286,6 +388,19 @@ async function updateProduct(id, data) {
       throw err;
     }
   }
+  if (data.discountedPriceSar != null) {
+    const basePriceSar =
+      data.priceSar != null
+        ? Number(data.priceSar)
+        : existing.priceSar != null
+          ? Number(existing.priceSar)
+          : null;
+    if (basePriceSar != null && Number(data.discountedPriceSar) > basePriceSar) {
+      const err = new Error('discountedPriceSar cannot exceed priceSar');
+      err.code = 'INVALID_PRICE';
+      throw err;
+    }
+  }
 
   const bilingualDraft = {};
   if (data.title !== undefined) bilingualDraft.title = data.title;
@@ -329,6 +444,12 @@ async function updateProduct(id, data) {
     ...(bilingualDraft.subtitle_ar !== undefined && { subtitle_ar: bilingualDraft.subtitle_ar ?? null }),
     ...(data.price != null && { price: data.price }),
     ...(data.discountedPrice !== undefined && { discountedPrice: data.discountedPrice }),
+    ...(data.priceSar !== undefined && {
+      priceSar: data.priceSar != null ? Number(data.priceSar) : null,
+    }),
+    ...(data.discountedPriceSar !== undefined && {
+      discountedPriceSar: data.discountedPriceSar != null ? Number(data.discountedPriceSar) : null,
+    }),
     ...(data.quantity !== undefined && { quantity: Math.max(0, parseInt(data.quantity, 10) || 0) }),
     ...(data.categoryId !== undefined && { categoryId: data.categoryId || null }),
     ...(data.status !== undefined && { status: normalizeStatus(data.status, existing.status) }),
@@ -463,6 +584,27 @@ async function deleteProduct(id) {
   return product;
 }
 
+/**
+ * Reorder products by assigning explicit sortOrder values (admin drag-and-drop).
+ * Accepts an array of { id, sortOrder }. Because the admin list is paginated, the
+ * caller sends absolute positions (base = page offset + row index) so ordering
+ * stays globally consistent across pages. Runs in a single transaction.
+ * @param {{ id: string, sortOrder: number }[]} items
+ */
+async function reorderProducts(items) {
+  const clean = (Array.isArray(items) ? items : [])
+    .filter((it) => it && typeof it.id === 'string' && Number.isInteger(it.sortOrder))
+    .map((it) => ({ id: it.id, sortOrder: it.sortOrder }));
+  if (clean.length === 0) return { count: 0 };
+
+  await prisma.$transaction(
+    clean.map((it) =>
+      prisma.product.update({ where: { id: it.id }, data: { sortOrder: it.sortOrder } })
+    )
+  );
+  return { count: clean.length };
+}
+
 // CAT-6: cap how deep a client can page so ?page=99999999 can't force a giant OFFSET
 // scan on this public endpoint. 10k pages × 100/page covers any real catalog.
 const MAX_PAGE = 10000;
@@ -481,7 +623,10 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null, visibilit
       where,
       skip,
       take,
-      orderBy: { createdAt: 'desc' },
+      // Admin-controlled display order first (drag-and-drop sets sortOrder), then
+      // newest. All products default to sortOrder 0, so the effective order is
+      // unchanged until an admin explicitly reorders.
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
       include: {
         category: { select: { id: true, title: true } },
         images: { orderBy: { sortOrder: 'asc' } },
@@ -493,8 +638,11 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null, visibilit
     prisma.product.count({ where }),
   ]);
 
+  const mapped = items.map(mapProduct);
   return {
-    items: items.map(mapProduct),
+    // Storefront-only: overlay the requesting region's currency (AED/SAR) so `price`/
+    // `discountedPrice` are already correct for the region. Staff/admin keep raw fields.
+    items: visibility.isStaff ? mapped : mapped.map((p) => applyRegionCurrency(p, visibility.currency)),
     total,
     page: safePage,
     limit: take,
@@ -566,8 +714,11 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
     prisma.product.count({ where }),
   ]);
 
+  const mappedResults = items.map(mapProduct);
   return {
-    items: items.map(mapProduct),
+    items: visibility.isStaff
+      ? mappedResults
+      : mappedResults.map((p) => applyRegionCurrency(p, visibility.currency)),
     total,
     page: safePage,
     limit: take,
@@ -587,17 +738,22 @@ async function getProductById(id, visibility = {}) {
       ...(visibility.isStaff ? REGION_INCLUDE : {}),
     },
   });
-  return product ? mapProduct(product) : null;
+  if (!product) return null;
+  const mapped = mapProduct(product);
+  return visibility.isStaff ? mapped : applyRegionCurrency(mapped, visibility.currency);
 }
 
 module.exports = {
   createProduct,
   updateProduct,
   deleteProduct,
+  reorderProducts,
   getAllProducts,
   getProductsByCategory,
   searchProducts,
   getProductById,
   mapProduct,
+  applyRegionCurrency,
+  regionPriceFromRow,
   decimalToNumber,
 };

@@ -18,6 +18,8 @@ const createValidation = [
   body('code').isString().trim().notEmpty().withMessage('code is required (e.g. UAE, SA)'),
   body('name').isString().trim().notEmpty().withMessage('name is required'),
   body('name_ar').optional().isString().trim(),
+  body('currency').optional().isString().trim().isLength({ min: 3, max: 3 })
+    .withMessage('currency must be a 3-letter ISO code (e.g. AED, SAR)'),
   body('isDefault').optional().isBoolean(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),
@@ -28,6 +30,8 @@ const updateValidation = [
   body('code').optional().isString().trim().notEmpty(),
   body('name').optional().isString().trim().notEmpty(),
   body('name_ar').optional().isString().trim(),
+  body('currency').optional().isString().trim().isLength({ min: 3, max: 3 })
+    .withMessage('currency must be a 3-letter ISO code (e.g. AED, SAR)'),
   body('isDefault').optional().isBoolean(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),

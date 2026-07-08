@@ -1,4 +1,5 @@
 const prisma = require('../config/db');
+const regionService = require('./region.service');
 const { autoTranslate, fillBilingualGapsFromTwin } = require('../utils/bilingual');
 
 const DISCOUNT_TYPES = ['PERCENTAGE', 'FIXED'];
@@ -38,6 +39,16 @@ function parseMoneyOrNull(value, field) {
   return n;
 }
 
+// Regions this code can be redeemed in. Mirrors Product/Category/Section/Banner:
+// omitted/empty on create -> defaults to the default region (UAE) only.
+async function resolveWriteRegionIds(regionIds) {
+  if (Array.isArray(regionIds) && regionIds.length > 0) {
+    return regionService.assertValidRegionIds(regionIds);
+  }
+  const def = await regionService.getDefaultRegion();
+  return def ? [def.id] : [];
+}
+
 // Fallback account-age window (days) for newUsersOnly codes whose newUserWithinDays is null.
 const NEW_USER_DEFAULT_WINDOW_DAYS = 30;
 
@@ -63,6 +74,7 @@ function mapPromoCode(promo, { includeInternal = true } = {}) {
     maxOrderAmount,
     products,
     categories,
+    regions,
     _count,
     ...rest
   } = promo;
@@ -79,6 +91,9 @@ function mapPromoCode(promo, { includeInternal = true } = {}) {
         title: c.category?.title,
       }))
     : undefined;
+  const regionList = Array.isArray(regions)
+    ? regions.map((r) => r.region).filter(Boolean)
+    : undefined;
 
   const payload = {
     ...rest,
@@ -90,6 +105,10 @@ function mapPromoCode(promo, { includeInternal = true } = {}) {
 
   if (productList !== undefined) payload.products = productList;
   if (categoryList !== undefined) payload.categories = categoryList;
+  if (regionList !== undefined) {
+    payload.regions = regionList;
+    payload.regionIds = regionList.map((r) => r.id);
+  }
   if (_count) {
     payload.totalUses = _count.usages ?? payload.usageCount;
     if (productList === undefined && _count.products != null) {
@@ -241,17 +260,23 @@ function buildPromoCodeData(data, { isUpdate = false } = {}) {
   return out;
 }
 
+const REGION_INCLUDE = {
+  regions: { include: { region: { select: { id: true, code: true, name: true, name_ar: true } } } },
+};
+
 // Full shape — used for create / update / getById so admins see linked products & categories.
 const DETAIL_INCLUDE = {
   products: { include: { product: { select: { id: true, title: true } } } },
   categories: { include: { category: { select: { id: true, title: true } } } },
   _count: { select: { usages: true, products: true, categories: true } },
+  ...REGION_INCLUDE,
 };
 
 // Lean shape — used for paginated list. Avoids hauling dozens of join rows per promo
 // when appliesTo = SPECIFIC_PRODUCTS covers many SKUs. Counts stay cheap for admin UX.
 const LIST_INCLUDE = {
   _count: { select: { usages: true, products: true, categories: true } },
+  ...REGION_INCLUDE,
 };
 
 async function createPromoCode(data) {
@@ -262,6 +287,7 @@ async function createPromoCode(data) {
   fillBilingualGapsFromTwin(base, PROMO_REQUIRED_PAIRS);
   const productIds = Array.isArray(data.productIds) ? [...new Set(data.productIds.filter(Boolean))] : [];
   const categoryIds = Array.isArray(data.categoryIds) ? [...new Set(data.categoryIds.filter(Boolean))] : [];
+  const regionIds = await resolveWriteRegionIds(data.regionIds);
 
   if (base.appliesTo === 'SPECIFIC_PRODUCTS' && productIds.length === 0) {
     throw Object.assign(new Error('productIds is required when appliesTo = SPECIFIC_PRODUCTS'), {
@@ -282,6 +308,9 @@ async function createPromoCode(data) {
         : {}),
       ...(base.appliesTo === 'SPECIFIC_CATEGORIES' && categoryIds.length > 0
         ? { categories: { create: categoryIds.map((categoryId) => ({ categoryId })) } }
+        : {}),
+      ...(regionIds.length > 0
+        ? { regions: { create: regionIds.map((regionId) => ({ regionId })) } }
         : {}),
     },
     include: DETAIL_INCLUDE,
@@ -304,6 +333,12 @@ async function updatePromoCode(id, data) {
   const categoryIdsProvided = Array.isArray(data.categoryIds);
   const productIds = productIdsProvided ? [...new Set(data.productIds.filter(Boolean))] : null;
   const categoryIds = categoryIdsProvided ? [...new Set(data.categoryIds.filter(Boolean))] : null;
+
+  // Region links are replaced wholesale when `regionIds` is sent. Validate before the
+  // transaction so an unknown id fails fast without a partial write.
+  const newRegionIds = data.regionIds !== undefined
+    ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
+    : null;
 
   await prisma.$transaction(async (tx) => {
     await tx.promoCode.update({ where: { id }, data: base });
@@ -338,6 +373,16 @@ async function updatePromoCode(id, data) {
       }
     } else if (base.appliesTo && base.appliesTo !== 'SPECIFIC_CATEGORIES') {
       await tx.promoCodeCategory.deleteMany({ where: { promoCodeId: id } });
+    }
+
+    if (newRegionIds !== null) {
+      await tx.promoCodeRegion.deleteMany({ where: { promoCodeId: id } });
+      if (newRegionIds.length > 0) {
+        await tx.promoCodeRegion.createMany({
+          data: newRegionIds.map((regionId) => ({ promoCodeId: id, regionId })),
+          skipDuplicates: true,
+        });
+      }
     }
   });
 
@@ -403,7 +448,7 @@ async function listPromoCodes({ page = 1, limit = 10, search = null, status = nu
  * User-facing list: only shows codes currently usable (active + within window) and hides
  * internal usage counters. Per-user remaining uses can be computed separately if needed.
  */
-async function listAvailablePromoCodes({ page = 1, limit = 20, userId = null } = {}) {
+async function listAvailablePromoCodes({ page = 1, limit = 20, userId = null, regionId = null } = {}) {
   const take = Math.min(50, Math.max(1, Number(limit) || 20));
   const skip = (Math.max(1, Number(page) || 1) - 1) * take;
   const now = new Date();
@@ -414,6 +459,9 @@ async function listAvailablePromoCodes({ page = 1, limit = 20, userId = null } =
       { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
       { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
     ],
+    // Only show codes redeemable in the shopper's current region — mirrors how
+    // products/categories/sections are region-filtered for the storefront.
+    ...(regionId ? { regions: { some: { regionId } } } : {}),
   };
 
   const [items, total] = await Promise.all([
@@ -569,7 +617,22 @@ function computeDiscount(promo, items) {
  * Reused by validateAndCalculate (preview) and the order-commit transaction. Pass the
  * already-counted per-user usage and the user's createdAt to avoid extra round-trips.
  */
-function assertPromoUsable(promo, { now = new Date(), userPriorUsage = 0, userCreatedAt = null } = {}) {
+function assertPromoUsable(
+  promo,
+  { now = new Date(), userPriorUsage = 0, userCreatedAt = null, regionId = null } = {}
+) {
+  // Region eligibility: a code with no row for the shopper's region can't be redeemed
+  // there. Every promo has at least one region row going forward (defaults to the
+  // default region on create), so this only skips when the caller didn't select
+  // `regions` (defensive) or when checking region isn't relevant (regionId omitted).
+  if (regionId && Array.isArray(promo.regions)) {
+    const allowed = promo.regions.some((r) => r.regionId === regionId);
+    if (!allowed) {
+      throw Object.assign(new Error('This promo code is not available in your region'), {
+        code: 'PROMO_REGION_NOT_AVAILABLE',
+      });
+    }
+  }
   if (!promo.isActive) {
     throw Object.assign(new Error('This promo code is not active'), { code: 'PROMO_INACTIVE' });
   }
@@ -603,8 +666,9 @@ function assertPromoUsable(promo, { now = new Date(), userPriorUsage = 0, userCr
  * @param {string} code     The raw user-entered code
  * @param {string} userId   Authenticated user id
  * @param {Array<{productId:string, quantity:number, price:number, categoryId?:string|null}>} items
+ * @param {string|null} regionId  The order/cart's region — code must be assigned to it.
  */
-async function validateAndCalculate(code, userId, items) {
+async function validateAndCalculate(code, userId, items, regionId = null) {
   const normalized = normalizeCode(code);
   if (!normalized) {
     throw Object.assign(new Error('Promo code is required'), { code: 'PROMO_INVALID_INPUT' });
@@ -615,6 +679,7 @@ async function validateAndCalculate(code, userId, items) {
     include: {
       products: { select: { productId: true } },
       categories: { select: { categoryId: true } },
+      regions: { select: { regionId: true } },
     },
   });
   if (!promo) {
@@ -635,7 +700,7 @@ async function validateAndCalculate(code, userId, items) {
     }
   }
 
-  assertPromoUsable(promo, { userPriorUsage, userCreatedAt });
+  assertPromoUsable(promo, { userPriorUsage, userCreatedAt, regionId });
 
   const calc = computeDiscount(promo, items);
 

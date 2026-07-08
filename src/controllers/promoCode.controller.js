@@ -23,6 +23,7 @@ function handlePromoError(err, res, next) {
     case 'PROMO_NO_ELIGIBLE_ITEMS':
     case 'PROMO_NEW_USERS_ONLY':
     case 'PROMO_ZERO_TOTAL_ONLINE':
+    case 'PROMO_REGION_NOT_AVAILABLE':
       return error(res, err.message, 400);
     default:
       return next(err);
@@ -110,6 +111,7 @@ async function listAvailablePromoCodes(req, res, next) {
       page,
       limit,
       userId: req.userId || null,
+      regionId: req.regionId || null,
     });
     return success(res, result.items, 'Available promo codes fetched successfully', 200, {
       pagination: {
@@ -190,7 +192,7 @@ async function validatePromoCode(req, res, next) {
       }
     }
 
-    const result = await promoCodeService.validateAndCalculate(code, req.userId, items);
+    const result = await promoCodeService.validateAndCalculate(code, req.userId, items, req.regionId || null);
     return success(res, result, 'Promo code is valid');
   } catch (err) {
     return handlePromoError(err, res, next);

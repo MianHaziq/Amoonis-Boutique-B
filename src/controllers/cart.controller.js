@@ -1,5 +1,14 @@
 const cartService = require('../services/cart.service');
+const regionService = require('../services/region.service');
 const { success, error } = require('../utils/response');
+
+// Cart isn't behind the region middleware (it's user-only), so resolve the
+// requesting region's currency directly from the X-Region header. Falls back to
+// AED (via resolveRegion's default-region fallback) when absent/unknown.
+async function currencyFromReq(req) {
+  const region = await regionService.resolveRegion(req.headers['x-region']);
+  return region?.currency || 'AED';
+}
 
 async function addToCart(req, res, next) {
   try {
@@ -11,7 +20,7 @@ async function addToCart(req, res, next) {
       message,
     });
     if (errMsg) return error(res, errMsg, 404);
-    const data = await cartService.getCart(userId);
+    const data = await cartService.getCart(userId, await currencyFromReq(req));
     return success(res, data, 'Product added to cart', 200);
   } catch (err) {
     next(err);
@@ -27,7 +36,7 @@ async function updateQuantity(req, res, next) {
       quantity,
     });
     if (errMsg) return error(res, errMsg, 400);
-    const data = await cartService.getCart(userId);
+    const data = await cartService.getCart(userId, await currencyFromReq(req));
     return success(res, data, 'Cart updated');
   } catch (err) {
     next(err);
@@ -43,7 +52,7 @@ async function updateItemMessage(req, res, next) {
       message,
     });
     if (errMsg) return error(res, errMsg, 404);
-    const data = await cartService.getCart(userId);
+    const data = await cartService.getCart(userId, await currencyFromReq(req));
     return success(res, data, 'Item message updated');
   } catch (err) {
     next(err);
@@ -55,7 +64,7 @@ async function removeFromCart(req, res, next) {
     const userId = req.userId;
     const { productId } = req.params;
     await cartService.removeFromCart(userId, productId);
-    const data = await cartService.getCart(userId);
+    const data = await cartService.getCart(userId, await currencyFromReq(req));
     return success(res, data, 'Product removed from cart');
   } catch (err) {
     next(err);
@@ -65,7 +74,7 @@ async function removeFromCart(req, res, next) {
 async function getCart(req, res, next) {
   try {
     const userId = req.userId;
-    const data = await cartService.getCart(userId);
+    const data = await cartService.getCart(userId, await currencyFromReq(req));
     return success(res, data, 'Cart fetched successfully');
   } catch (err) {
     next(err);
@@ -77,7 +86,7 @@ async function updateOrderMessage(req, res, next) {
     const userId = req.userId;
     const { orderMessage } = req.body;
     await cartService.updateCartMessage(userId, orderMessage);
-    const data = await cartService.getCart(userId);
+    const data = await cartService.getCart(userId, await currencyFromReq(req));
     return success(res, data, 'Cart message updated');
   } catch (err) {
     next(err);
@@ -87,7 +96,7 @@ async function updateOrderMessage(req, res, next) {
 async function clearCart(req, res, next) {
   try {
     const userId = req.userId;
-    const data = await cartService.clearCart(userId);
+    const data = await cartService.clearCart(userId, await currencyFromReq(req));
     return success(res, data, 'Cart cleared');
   } catch (err) {
     next(err);

@@ -22,6 +22,10 @@ model Region {
   code      String   @unique
   name      String
   name_ar   String?
+  // ISO 4217 currency code shown/charged for this region (e.g. "AED", "SAR").
+  // Drives storefront price display, order currency, and which orders are
+  // eligible for online payment (see payment.service's configured currency).
+  currency  String   @default("AED")
   isDefault Boolean  @default(false)
   isActive  Boolean  @default(true)
   sortOrder Int      @default(0)
@@ -32,6 +36,7 @@ model Region {
   categories CategoryRegion[]
   banners    BannerRegion[]
   sections   SectionRegion[]
+  promoCodes PromoCodeRegion[]
   users      User[]
   orders     Order[]
 
@@ -217,17 +222,22 @@ model SectionCategory {
 // ============================================
 
 model BannerImage {
-  id        String        @id @default(uuid())
-  url       String        @db.Text
-  sortOrder Int           @default(0)
-  status    PublishStatus @default(DRAFT)
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  id        String         @id @default(uuid())
+  url       String         @db.Text
+  sortOrder Int            @default(0)
+  status    PublishStatus  @default(DRAFT)
+  // Which client this banner targets. MOBILE (default) keeps the existing Flutter
+  // app behavior untouched; WEB banners (incl. hero videos) are served only to the
+  // website, so the storefront default query never leaks them to the mobile app.
+  platform  BannerPlatform @default(MOBILE)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
 
   regions BannerRegion[]
 
   @@index([sortOrder])
   @@index([status])
+  @@index([platform])
 }
 
 // ============================================
@@ -299,11 +309,19 @@ model Product {
   title_ar        String?
   subtitle        String?
   subtitle_ar     String?
-  price           Decimal       @db.Decimal(10, 2)
-  discountedPrice Decimal?      @db.Decimal(10, 2)
+  price              Decimal       @db.Decimal(10, 2)
+  discountedPrice    Decimal?      @db.Decimal(10, 2)
+  // Optional Saudi Riyal price override, entered manually by the admin (no
+  // auto FX conversion). Null means "no SAR price set yet" — storefront/order
+  // pricing falls back to the AED price above for a Saudi-region request.
+  priceSar           Decimal?      @db.Decimal(10, 2)
+  discountedPriceSar Decimal?      @db.Decimal(10, 2)
   quantity        Int           @default(0)
   categoryId      String?
   status          PublishStatus @default(DRAFT)
+  // Admin-controlled display order (drag-and-drop). Defaults to 0 so existing
+  // products keep their createdAt-desc order until an admin reorders them.
+  sortOrder       Int           @default(0)
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
@@ -322,6 +340,8 @@ model Product {
   // Composite serves the hot storefront query: WHERE status='PUBLISHED' ORDER BY createdAt DESC.
   // Leftmost prefix also covers plain status-equality filters/counts.
   @@index([status, createdAt])
+  // Serves the admin-ordered list: WHERE status=? ORDER BY sortOrder ASC, createdAt DESC.
+  @@index([status, sortOrder])
 }
 
 model ProductOption {
@@ -331,6 +351,21 @@ model ProductOption {
   title_ar   String?
   options    String[]
   options_ar String[] @default([])
+  // Optional per-value image URLs, aligned by index with `options` (e.g. a
+  // "Colour" option maps Blue/Pink/White to specific product photos). Empty by
+  // default — purely additive, so existing API consumers (the mobile app) are
+  // unaffected. An entry may be "" when a value has no dedicated image.
+  optionImages String[] @default([])
+  // Optional per-value swatch colours (CSS hex, e.g. "#c2185b" for a custom
+  // "dark pink"), aligned by index with `options`. Let admins pick an exact
+  // colour instead of relying on name→swatch guessing. Empty by default and
+  // purely additive, so the mobile app (which doesn't read it) is unaffected.
+  optionColors String[] @default([])
+  // Optional per-value image SETS: a JSON array-of-arrays aligned by index with
+  // `options`, so a value (e.g. a colour) can carry several photos. The first of
+  // each set is mirrored into `optionImages` above, which the mobile app keeps
+  // reading — so this is purely additive and mobile-safe. Null when unused.
+  optionImageSets Json?
   sortOrder  Int      @default(0)
   createdAt  DateTime @default(now())
 
@@ -473,6 +508,10 @@ model Order {
   /// Region the order was placed in (captured from X-Region / the user's region at checkout).
   /// Drives region-scoped analytics. Nullable for legacy orders (backfilled to default region).
   regionId              String?
+  /// Currency the order was totaled/charged in (e.g. "AED", "SAR") — snapshot of the
+  /// order region's currency at placement. Null for legacy orders placed before
+  /// multi-currency (treat as the store's default, AED).
+  currency              String?
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -618,12 +657,27 @@ model PromoCode {
   categories PromoCodeCategory[]
   usages     PromoCodeUsage[]
   orders     Order[]
+  // Regions this code can be redeemed in. Mirrors Product/Category/Section/Banner:
+  // omitted on create -> defaults to the default region (UAE) only.
+  regions    PromoCodeRegion[]
 
   @@index([code])
   @@index([isActive])
   @@index([startsAt])
   @@index([expiresAt])
   @@index([createdAt])
+}
+
+model PromoCodeRegion {
+  promoCodeId String
+  regionId    String
+  createdAt   DateTime @default(now())
+
+  promoCode PromoCode @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+  region    Region    @relation(fields: [regionId], references: [id], onDelete: Cascade)
+
+  @@id([promoCodeId, regionId])
+  @@index([regionId])
 }
 
 model PromoCodeProduct {
@@ -688,6 +742,13 @@ enum PushPlatform {
 enum PublishStatus {
   DRAFT
   PUBLISHED
+}
+
+/// Which client a banner targets. MOBILE (default) preserves the existing Flutter
+/// app behavior; WEB banners (including hero videos) are served only to the website.
+enum BannerPlatform {
+  MOBILE
+  WEB
 }
 
 enum UserRole {

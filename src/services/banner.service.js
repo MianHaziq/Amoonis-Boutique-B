@@ -17,6 +17,14 @@ function normalizeStatus(value, fallback = 'DRAFT') {
   return v === 'PUBLISHED' ? 'PUBLISHED' : v === 'DRAFT' ? 'DRAFT' : fallback;
 }
 
+// MOBILE is the safe default: any banner without an explicit platform stays on the
+// mobile app (matching pre-platform behavior); WEB is opt-in for the website.
+function normalizePlatform(value, fallback = 'MOBILE') {
+  if (value === undefined || value === null) return fallback;
+  const v = String(value).trim().toUpperCase();
+  return v === 'WEB' ? 'WEB' : v === 'MOBILE' ? 'MOBILE' : fallback;
+}
+
 async function resolveWriteRegionIds(regionIds) {
   if (Array.isArray(regionIds) && regionIds.length > 0) {
     return regionService.assertValidRegionIds(regionIds);
@@ -53,6 +61,7 @@ async function addBanners(urlOrUrls, opts = {}) {
   if (urls.length === 0) return { count: 0, items: [] };
 
   const status = normalizeStatus(opts.status);
+  const platform = normalizePlatform(opts.platform);
   const regionIds = await resolveWriteRegionIds(opts.regionIds);
 
   const maxOrder = await prisma.bannerImage
@@ -67,6 +76,7 @@ async function addBanners(urlOrUrls, opts = {}) {
           url: String(urls[i]).trim(),
           sortOrder: maxOrder + i,
           status,
+          platform,
           ...(regionIds.length > 0
             ? { regions: { create: regionIds.map((regionId) => ({ regionId })) } }
             : {}),
@@ -96,6 +106,7 @@ async function updateBanner(id, data) {
     const payload = {};
     if (data.url !== undefined) payload.url = String(data.url).trim();
     if (data.status !== undefined) payload.status = normalizeStatus(data.status, existing.status);
+    if (data.platform !== undefined) payload.platform = normalizePlatform(data.platform, existing.platform);
     if (Object.keys(payload).length > 0) {
       await tx.bannerImage.update({ where: { id }, data: payload });
     }

@@ -479,6 +479,7 @@ router.get(
     query('limit').optional().isInt({ min: 1, max: 100 }),
     query('status').optional().isIn(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']),
     query('userId').optional().isUUID(),
+    query('region').optional().isString().trim(),
     query('dateFrom').optional().isISO8601(),
     query('dateTo').optional().isISO8601(),
     query('includeItems')
@@ -533,6 +534,7 @@ router.get(
     query('page').optional().isInt({ min: 1 }),
     query('limit').optional().isInt({ min: 1, max: 100 }),
     query('status').optional().isIn(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']),
+    query('region').optional().isString().trim(),
   ],
   handleValidationErrors,
   orderController.getAllOrdersAdmin

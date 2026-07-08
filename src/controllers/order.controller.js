@@ -1,5 +1,6 @@
 const orderService = require('../services/order.service');
 const paymentService = require('../services/payment.service');
+const regionService = require('../services/region.service');
 const { success, error } = require('../utils/response');
 
 async function createOrder(req, res, next) {
@@ -47,7 +48,14 @@ async function getAllOrdersAdmin(req, res, next) {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const status = req.query.status || null;
-    const result = await orderService.getAllOrdersAdmin(page, limit, status);
+    let regionId = null;
+    if (req.query.region) {
+      const region = await regionService.getRegionByCode(String(req.query.region));
+      // Unknown code -> a sentinel that matches nothing, so the filter narrows to
+      // zero rows instead of silently falling back to "all regions".
+      regionId = region ? region.id : '00000000-0000-0000-0000-000000000000';
+    }
+    const result = await orderService.getAllOrdersAdmin(page, limit, status, regionId);
     return success(res, result.data, 'Orders fetched successfully', 200, {
       pagination: {
         page: result.page,
@@ -125,9 +133,16 @@ async function getAdminOrderHistory(req, res, next) {
       return error(res, 'Invalid dateTo; use ISO 8601 date or datetime', 400);
     }
 
+    let regionId = null;
+    if (req.query.region) {
+      const region = await regionService.getRegionByCode(String(req.query.region));
+      regionId = region ? region.id : '00000000-0000-0000-0000-000000000000';
+    }
+
     const result = await orderService.getAdminOrderHistory(page, limit, {
       status,
       userId,
+      regionId,
       dateFrom,
       dateTo,
       includeItems,

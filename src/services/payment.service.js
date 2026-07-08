@@ -23,6 +23,16 @@ function isConfigured() {
   return Boolean(API_KEY);
 }
 
+/**
+ * The single currency this gateway is configured to charge (env MYFATOORAH_CURRENCY,
+ * default AED). Online payment is only offered to orders whose region currency
+ * matches this — everything else (e.g. Saudi/SAR) falls back to Cash on Delivery
+ * until a region-specific gateway/credentials are set up.
+ */
+function getConfiguredCurrency() {
+  return CURRENCY;
+}
+
 function gatewayError(message, { retryable = false } = {}) {
   const err = new Error(message);
   err.code = 'PAYMENT_GATEWAY_ERROR';
@@ -263,6 +273,7 @@ async function executePayment({ sessionId, order, customer = {} }) {
 
 module.exports = {
   isConfigured,
+  getConfiguredCurrency,
   createPaymentInvoice,
   verifyPayment,
   verifyWebhookSignature,

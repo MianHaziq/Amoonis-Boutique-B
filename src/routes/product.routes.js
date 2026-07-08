@@ -125,15 +125,27 @@ const createValidation = [
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('Price must be between 0 and 99999999.99').bail()
     .custom(isTwoDecimals).withMessage('Price supports at most 2 decimal places'),
   body('discountedPrice')
-    .optional()
+    .optional({ values: 'null' })
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPrice must be between 0 and 99999999.99').bail()
     .custom(isTwoDecimals).withMessage('discountedPrice supports at most 2 decimal places').bail()
     // CAT-2: a discount can never be higher than the base price (would display as a
     // "discount" above the original). The service re-checks against the stored price too.
     .custom((val, { req }) => req.body.price == null || Number(val) <= Number(req.body.price))
     .withMessage('discountedPrice cannot exceed price'),
+  // Optional manual Saudi Riyal price override — same bounds as the AED price. No
+  // auto-conversion: admin enters both currencies explicitly.
+  body('priceSar')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('priceSar must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('priceSar supports at most 2 decimal places'),
+  body('discountedPriceSar')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPriceSar must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('discountedPriceSar supports at most 2 decimal places').bail()
+    .custom((val, { req }) => req.body.priceSar == null || Number(val) <= Number(req.body.priceSar))
+    .withMessage('discountedPriceSar cannot exceed priceSar'),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
-  body('categoryId').optional().isUUID().withMessage('categoryId must be a valid UUID when provided'),
+  body('categoryId').optional({ values: 'null' }).isUUID().withMessage('categoryId must be a valid UUID when provided'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),
   body('descriptions.*.title_ar').optional().trim(),
@@ -189,17 +201,27 @@ const updateValidation = [
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('Price must be between 0 and 99999999.99').bail()
     .custom(isTwoDecimals).withMessage('Price supports at most 2 decimal places'),
   body('discountedPrice')
-    .optional()
+    .optional({ values: 'null' })
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPrice must be between 0 and 99999999.99').bail()
     .custom(isTwoDecimals).withMessage('discountedPrice supports at most 2 decimal places').bail()
     .custom((val, { req }) => req.body.price == null || Number(val) <= Number(req.body.price))
     .withMessage('discountedPrice cannot exceed price'),
+  body('priceSar')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('priceSar must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('priceSar supports at most 2 decimal places'),
+  body('discountedPriceSar')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPriceSar must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('discountedPriceSar supports at most 2 decimal places').bail()
+    .custom((val, { req }) => req.body.priceSar == null || Number(val) <= Number(req.body.priceSar))
+    .withMessage('discountedPriceSar cannot exceed priceSar'),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
   // CAT-3: optional optimistic-concurrency token. When the admin panel sends the
   // updatedAt it last read, a stale overwrite (someone else edited meanwhile, or stock
   // moved) is rejected with 409 instead of silently clobbering.
   body('expectedUpdatedAt').optional().isISO8601().withMessage('expectedUpdatedAt must be an ISO 8601 timestamp'),
-  body('categoryId').optional().isUUID(),
+  body('categoryId').optional({ values: 'null' }).isUUID().withMessage('categoryId must be a valid UUID when provided'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),
   body('descriptions.*.title_ar').optional().trim(),
@@ -347,6 +369,52 @@ router.post(
  *       404:
  *         description: Product or category not found
  */
+/**
+ * @swagger
+ * /products/order:
+ *   patch:
+ *     summary: Reorder products (admin)
+ *     description: |
+ *       Set product display order by sending an array of `{ id, sortOrder }`.
+ *       `sortOrder` is the absolute display position (admin page offset + row index),
+ *       so ordering stays consistent across paginated admin pages. Requires admin JWT.
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [items]
+ *             properties:
+ *               items:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [id, sortOrder]
+ *                   properties:
+ *                     id: { type: string, format: uuid }
+ *                     sortOrder: { type: integer, minimum: 0 }
+ *     responses:
+ *       200: { description: Product order updated }
+ *       404: { description: One or more products not found }
+ */
+const reorderValidation = [
+  body('items').isArray({ min: 1 }).withMessage('items must be a non-empty array'),
+  body('items.*.id').isUUID().withMessage('Each item.id must be a valid UUID'),
+  body('items.*.sortOrder').isInt({ min: 0 }).withMessage('Each item.sortOrder must be a non-negative integer'),
+];
+router.patch(
+  '/order',
+  verifyAdminOrManager,
+  requireManagerPermission('PRODUCTS'),
+  reorderValidation,
+  handleValidationErrors,
+  productController.reorderProducts
+);
+
 router.put(
   '/:id',
   verifyAdminOrManager,

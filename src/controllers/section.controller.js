@@ -71,6 +71,19 @@ async function updateSection(req, res, next) {
 }
 
 /**
+ * PATCH /sections/order – Reorder sections (admin). Body: { items: [{ id, sortOrder }] }.
+ */
+async function reorderSections(req, res, next) {
+  try {
+    const result = await sectionService.reorderSections(req.body.items);
+    return success(res, null, 'Section order updated successfully', 200, result);
+  } catch (err) {
+    if (err.code === 'P2025') return error(res, 'One or more sections not found', 404);
+    next(err);
+  }
+}
+
+/**
  * DELETE /sections/:id – Delete section (admin).
  */
 async function deleteSection(req, res, next) {
@@ -89,5 +102,6 @@ module.exports = {
   getSectionById,
   createSection,
   updateSection,
+  reorderSections,
   deleteSection,
 };

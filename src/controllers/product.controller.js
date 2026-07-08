@@ -51,6 +51,17 @@ async function deleteProduct(req, res, next) {
   }
 }
 
+async function reorderProducts(req, res, next) {
+  try {
+    const { items } = req.body;
+    const result = await productService.reorderProducts(items);
+    return success(res, null, 'Product order updated successfully', 200, result);
+  } catch (err) {
+    if (err.code === 'P2025') return error(res, 'One or more products not found', 404);
+    next(err);
+  }
+}
+
 async function getAllProducts(req, res, next) {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -127,6 +138,7 @@ module.exports = {
   createProduct,
   updateProduct,
   deleteProduct,
+  reorderProducts,
   getAllProducts,
   getProductsByCategory,
   searchProducts,
