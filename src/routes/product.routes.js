@@ -125,7 +125,7 @@ const createValidation = [
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('Price must be between 0 and 99999999.99').bail()
     .custom(isTwoDecimals).withMessage('Price supports at most 2 decimal places'),
   body('discountedPrice')
-    .optional()
+    .optional({ values: 'null' })
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPrice must be between 0 and 99999999.99').bail()
     .custom(isTwoDecimals).withMessage('discountedPrice supports at most 2 decimal places').bail()
     // CAT-2: a discount can never be higher than the base price (would display as a
@@ -133,7 +133,7 @@ const createValidation = [
     .custom((val, { req }) => req.body.price == null || Number(val) <= Number(req.body.price))
     .withMessage('discountedPrice cannot exceed price'),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
-  body('categoryId').optional().isUUID().withMessage('categoryId must be a valid UUID when provided'),
+  body('categoryId').optional({ values: 'null' }).isUUID().withMessage('categoryId must be a valid UUID when provided'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),
   body('descriptions.*.title_ar').optional().trim(),
@@ -189,7 +189,7 @@ const updateValidation = [
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('Price must be between 0 and 99999999.99').bail()
     .custom(isTwoDecimals).withMessage('Price supports at most 2 decimal places'),
   body('discountedPrice')
-    .optional()
+    .optional({ values: 'null' })
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPrice must be between 0 and 99999999.99').bail()
     .custom(isTwoDecimals).withMessage('discountedPrice supports at most 2 decimal places').bail()
     .custom((val, { req }) => req.body.price == null || Number(val) <= Number(req.body.price))
@@ -199,7 +199,7 @@ const updateValidation = [
   // updatedAt it last read, a stale overwrite (someone else edited meanwhile, or stock
   // moved) is rejected with 409 instead of silently clobbering.
   body('expectedUpdatedAt').optional().isISO8601().withMessage('expectedUpdatedAt must be an ISO 8601 timestamp'),
-  body('categoryId').optional().isUUID(),
+  body('categoryId').optional({ values: 'null' }).isUUID().withMessage('categoryId must be a valid UUID when provided'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),
   body('descriptions.*.title_ar').optional().trim(),

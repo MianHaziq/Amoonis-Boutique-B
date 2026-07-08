@@ -290,10 +290,30 @@ async function deleteSection(id) {
   return true;
 }
 
+/**
+ * Reorder sections by assigning explicit sortOrder values (admin drag-and-drop).
+ * Accepts an array of { id, sortOrder }. Runs in a single transaction.
+ * @param {{ id: string, sortOrder: number }[]} items
+ */
+async function reorderSections(items) {
+  const clean = (Array.isArray(items) ? items : [])
+    .filter((it) => it && typeof it.id === 'string' && Number.isInteger(it.sortOrder))
+    .map((it) => ({ id: it.id, sortOrder: it.sortOrder }));
+  if (clean.length === 0) return { count: 0 };
+
+  await prisma.$transaction(
+    clean.map((it) =>
+      prisma.section.update({ where: { id: it.id }, data: { sortOrder: it.sortOrder } })
+    )
+  );
+  return { count: clean.length };
+}
+
 module.exports = {
   getSections,
   getSectionById,
   createSection,
   updateSection,
   deleteSection,
+  reorderSections,
 };

@@ -63,6 +63,11 @@ function orderedProductOptions(product) {
     // Additive: per-value image URLs (aligned with `options`). Older clients
     // that don't read this field are unaffected.
     optionImages: Array.isArray(o.optionImages) ? o.optionImages : [],
+    // Additive: per-value swatch colours (hex), aligned with `options`.
+    optionColors: Array.isArray(o.optionColors) ? o.optionColors : [],
+    // Additive: per-value image SETS (array-of-arrays), aligned with `options`.
+    // Null/absent when unused; consumers fall back to single `optionImages`.
+    optionImageSets: Array.isArray(o.optionImageSets) ? o.optionImageSets : [],
   }));
 }
 
@@ -129,15 +134,41 @@ function normalizeProductOptions(productOptions) {
         : [];
       // Optional per-value images, aligned by index with `options`. We keep the
       // full array (including "" gaps) so index alignment with options holds.
-      const optionImages = Array.isArray(item.optionImages)
-        ? item.optionImages.map((v) => (v == null ? '' : String(v).trim())).slice(0, options.length)
+      // Optional per-value swatch colours (hex), aligned by index with `options`.
+      const optionColors = Array.isArray(item.optionColors)
+        ? item.optionColors.map((v) => (v == null ? '' : String(v).trim())).slice(0, options.length)
         : [];
+
+      // Per-value image SETS (array-of-arrays). When provided, they are the
+      // source of truth and we derive the single `optionImages` (mobile/hover =
+      // first photo of each set). When absent, fall back to the legacy single
+      // `optionImages` and synthesise trivial one-item sets from it.
+      const cleanUrl = (v) => (v == null ? '' : String(v).trim());
+      let optionImages;
+      let optionImageSets;
+      if (Array.isArray(item.optionImageSets)) {
+        optionImageSets = [];
+        for (let k = 0; k < options.length; k++) {
+          const raw = Array.isArray(item.optionImageSets[k]) ? item.optionImageSets[k] : [];
+          optionImageSets.push(raw.map(cleanUrl).filter(Boolean));
+        }
+        optionImages = optionImageSets.map((set) => set[0] || '');
+      } else {
+        optionImages = Array.isArray(item.optionImages)
+          ? item.optionImages.map(cleanUrl).slice(0, options.length)
+          : [];
+        while (optionImages.length < options.length) optionImages.push('');
+        optionImageSets = optionImages.map((u) => (u ? [u] : []));
+      }
+
       return {
         title: titleEn || null,
         title_ar: titleAr || null,
         options,
         options_ar,
         optionImages,
+        optionColors,
+        optionImageSets,
         sortOrder: i,
       };
     })

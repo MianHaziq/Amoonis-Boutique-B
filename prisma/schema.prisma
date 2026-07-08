@@ -346,6 +346,16 @@ model ProductOption {
   // default — purely additive, so existing API consumers (the mobile app) are
   // unaffected. An entry may be "" when a value has no dedicated image.
   optionImages String[] @default([])
+  // Optional per-value swatch colours (CSS hex, e.g. "#c2185b" for a custom
+  // "dark pink"), aligned by index with `options`. Let admins pick an exact
+  // colour instead of relying on name→swatch guessing. Empty by default and
+  // purely additive, so the mobile app (which doesn't read it) is unaffected.
+  optionColors String[] @default([])
+  // Optional per-value image SETS: a JSON array-of-arrays aligned by index with
+  // `options`, so a value (e.g. a colour) can carry several photos. The first of
+  // each set is mirrored into `optionImages` above, which the mobile app keeps
+  // reading — so this is purely additive and mobile-safe. Null when unused.
+  optionImageSets Json?
   sortOrder  Int      @default(0)
   createdAt  DateTime @default(now())
 
