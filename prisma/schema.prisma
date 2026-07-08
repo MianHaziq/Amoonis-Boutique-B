@@ -22,6 +22,10 @@ model Region {
   code      String   @unique
   name      String
   name_ar   String?
+  // ISO 4217 currency code shown/charged for this region (e.g. "AED", "SAR").
+  // Drives storefront price display, order currency, and which orders are
+  // eligible for online payment (see payment.service's configured currency).
+  currency  String   @default("AED")
   isDefault Boolean  @default(false)
   isActive  Boolean  @default(true)
   sortOrder Int      @default(0)
@@ -32,6 +36,7 @@ model Region {
   categories CategoryRegion[]
   banners    BannerRegion[]
   sections   SectionRegion[]
+  promoCodes PromoCodeRegion[]
   users      User[]
   orders     Order[]
 
@@ -304,8 +309,13 @@ model Product {
   title_ar        String?
   subtitle        String?
   subtitle_ar     String?
-  price           Decimal       @db.Decimal(10, 2)
-  discountedPrice Decimal?      @db.Decimal(10, 2)
+  price              Decimal       @db.Decimal(10, 2)
+  discountedPrice    Decimal?      @db.Decimal(10, 2)
+  // Optional Saudi Riyal price override, entered manually by the admin (no
+  // auto FX conversion). Null means "no SAR price set yet" — storefront/order
+  // pricing falls back to the AED price above for a Saudi-region request.
+  priceSar           Decimal?      @db.Decimal(10, 2)
+  discountedPriceSar Decimal?      @db.Decimal(10, 2)
   quantity        Int           @default(0)
   categoryId      String?
   status          PublishStatus @default(DRAFT)
@@ -498,6 +508,10 @@ model Order {
   /// Region the order was placed in (captured from X-Region / the user's region at checkout).
   /// Drives region-scoped analytics. Nullable for legacy orders (backfilled to default region).
   regionId              String?
+  /// Currency the order was totaled/charged in (e.g. "AED", "SAR") — snapshot of the
+  /// order region's currency at placement. Null for legacy orders placed before
+  /// multi-currency (treat as the store's default, AED).
+  currency              String?
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -643,12 +657,27 @@ model PromoCode {
   categories PromoCodeCategory[]
   usages     PromoCodeUsage[]
   orders     Order[]
+  // Regions this code can be redeemed in. Mirrors Product/Category/Section/Banner:
+  // omitted on create -> defaults to the default region (UAE) only.
+  regions    PromoCodeRegion[]
 
   @@index([code])
   @@index([isActive])
   @@index([startsAt])
   @@index([expiresAt])
   @@index([createdAt])
+}
+
+model PromoCodeRegion {
+  promoCodeId String
+  regionId    String
+  createdAt   DateTime @default(now())
+
+  promoCode PromoCode @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+  region    Region    @relation(fields: [regionId], references: [id], onDelete: Cascade)
+
+  @@id([promoCodeId, regionId])
+  @@index([regionId])
 }
 
 model PromoCodeProduct {

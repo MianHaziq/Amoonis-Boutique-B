@@ -4,6 +4,7 @@ const notify = require('../notifications/notify');
 const promoCodeService = require('../services/promoCode.service');
 const paymentService = require('../services/payment.service');
 const regionService = require('../services/region.service');
+const productService = require('../services/product.service');
 
 function decimalToNumber(v) {
   return v == null ? null : Number(v);
@@ -88,6 +89,10 @@ function toOrderResponsePayload(order) {
     paymentMethod: order.paymentMethod ?? 'COD',
     paymentStatus: order.paymentStatus ?? 'UNPAID',
     status: order.status,
+    // Currency the order was totaled in ("AED"/"SAR"); legacy orders predating
+    // multi-currency have none, so default to the store's base currency.
+    currency: order.currency ?? 'AED',
+    regionId: order.regionId ?? null,
     shippingAddress:
       order.shippingFullName
       || order.shippingPhone
@@ -200,6 +205,20 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     const def = await regionService.getDefaultRegion();
     orderRegionId = def?.id || null;
   }
+  const orderRegion = orderRegionId ? await regionService.getRegionById(orderRegionId) : null;
+  // Which currency this order is priced/charged in — drives priceSar vs price selection
+  // (see productService.regionPriceFromRow) and the order's stamped Order.currency.
+  const orderCurrency = orderRegion?.currency || 'AED';
+
+  // Online payment currently only works for the gateway's configured currency (AED).
+  // A region charging a different currency (e.g. Saudi/SAR) must use Cash on Delivery
+  // until a region-specific payment setup exists.
+  if (isOnlinePayment && orderCurrency !== paymentService.getConfiguredCurrency()) {
+    return {
+      order: null,
+      error: 'Online payment isn’t available for this region yet — please choose Cash on Delivery.',
+    };
+  }
 
   // Resolve the shipping address: a saved addressId or an inline shippingAddress.
   let resolvedAddress = null;
@@ -246,6 +265,8 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       categoryId: true,
       price: true,
       discountedPrice: true,
+      priceSar: true,
+      discountedPriceSar: true,
       quantity: true,
     },
   });
@@ -281,11 +302,12 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // snapshot. Closes the price-edit drift window between cart load and order commit.
   // Mirrors cart.service.effectivePrice EXACTLY (discounted only when it's actually lower
   // than the base price) so the order never charges more than the cart displayed (M2).
+  // Resolves to the order's region currency (AED price/discountedPrice, or the manual
+  // SAR override when set) via productService.regionPriceFromRow.
   function livePrice(productRow) {
     if (!productRow) return 0;
-    const discounted = productRow.discountedPrice != null ? Number(productRow.discountedPrice) : null;
-    const price = productRow.price != null ? Number(productRow.price) : 0;
-    return discounted != null && discounted < price ? discounted : price;
+    const { price, discountedPrice } = productService.regionPriceFromRow(productRow, orderCurrency);
+    return discountedPrice != null && discountedPrice < price ? discountedPrice : price;
   }
   const livePriceById = new Map(productRows.map((p) => [p.id, livePrice(p)]));
 
@@ -300,13 +322,13 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   let promoResult = null;
   if (promoCode) {
     try {
-      promoResult = await promoCodeService.validateAndCalculate(promoCode, userId, promoItems);
+      promoResult = await promoCodeService.validateAndCalculate(promoCode, userId, promoItems, orderRegionId);
     } catch (err) {
       const promoErrors = new Set([
         'PROMO_NOT_FOUND', 'PROMO_INACTIVE', 'PROMO_EXPIRED', 'PROMO_NOT_STARTED',
         'PROMO_LIMIT_REACHED', 'PROMO_USER_LIMIT_REACHED', 'PROMO_MIN_ORDER_NOT_MET',
         'PROMO_MAX_ORDER_EXCEEDED', 'PROMO_NO_ELIGIBLE_ITEMS', 'PROMO_INVALID_INPUT',
-        'PROMO_NEW_USERS_ONLY',
+        'PROMO_NEW_USERS_ONLY', 'PROMO_REGION_NOT_AVAILABLE',
       ]);
       if (promoErrors.has(err.code)) return { order: null, error: err.message };
       throw err;
@@ -322,14 +344,20 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // tx commit must not cause customer/admin to disagree on what was paid.
     const livePriceRows = await tx.product.findMany({
       where: { id: { in: productIds } },
-      select: { id: true, price: true, discountedPrice: true },
+      select: {
+        id: true,
+        price: true,
+        discountedPrice: true,
+        priceSar: true,
+        discountedPriceSar: true,
+      },
     });
-    // Same effective-price rule as cart/livePrice (M2): discounted only when lower.
+    // Same effective-price rule as cart/livePrice (M2): discounted only when lower,
+    // resolved to the order's region currency (AED or the manual SAR override).
     const txPriceById = new Map(
       livePriceRows.map((p) => {
-        const discounted = p.discountedPrice != null ? Number(p.discountedPrice) : null;
-        const base = p.price != null ? Number(p.price) : 0;
-        return [p.id, discounted != null && discounted < base ? discounted : base];
+        const { price, discountedPrice } = productService.regionPriceFromRow(p, orderCurrency);
+        return [p.id, discountedPrice != null && discountedPrice < price ? discountedPrice : price];
       })
     );
 
@@ -379,6 +407,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
           maxOrderAmount: true,
           products: { select: { productId: true } },
           categories: { select: { categoryId: true } },
+          regions: { select: { regionId: true } },
         },
       });
       if (!livePromo) {
@@ -398,6 +427,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       promoCodeService.assertPromoUsable(livePromo, {
         userPriorUsage,
         userCreatedAt: userRow?.createdAt ?? null,
+        regionId: orderRegionId,
       });
 
       // Recompute the discount on the live tx prices. computeDiscount re-checks
@@ -444,6 +474,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         shippingPostalCode: resolvedAddress.postalCode,
         shippingCountry: resolvedAddress.country,
         regionId: orderRegionId,
+        currency: orderCurrency,
         status: initialStatus,
         // Stock is reserved (deducted) below inside this same transaction (H1), so the
         // order is created already flagged as having deducted inventory. If the deduction
@@ -527,7 +558,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       'PROMO_NOT_FOUND', 'PROMO_INACTIVE', 'PROMO_EXPIRED', 'PROMO_NOT_STARTED',
       'PROMO_LIMIT_REACHED', 'PROMO_USER_LIMIT_REACHED', 'PROMO_MIN_ORDER_NOT_MET',
       'PROMO_MAX_ORDER_EXCEEDED', 'PROMO_NO_ELIGIBLE_ITEMS', 'PROMO_EMPTY_CART',
-      'PROMO_NEW_USERS_ONLY', 'PROMO_ZERO_TOTAL_ONLINE',
+      'PROMO_NEW_USERS_ONLY', 'PROMO_ZERO_TOTAL_ONLINE', 'PROMO_REGION_NOT_AVAILABLE',
     ]);
     if (userFacingPromoCodes.has(err.code)) {
       return { order: null, error: err.message };
@@ -659,10 +690,10 @@ async function getOrderById(orderId, userId = null) {
   return toOrderResponsePayload(order);
 }
 
-async function getAllOrdersAdmin(page = 1, limit = 10, status = null) {
+async function getAllOrdersAdmin(page = 1, limit = 10, status = null, regionId = null) {
   const skip = (Math.max(1, page) - 1) * Math.min(100, Math.max(1, limit));
   const take = Math.min(100, Math.max(1, limit));
-  const where = listStatusFilter(status);
+  const where = { ...listStatusFilter(status), ...(regionId ? { regionId } : {}) };
 
   const [orders, total] = await Promise.all([
     prisma.order.findMany({
@@ -672,6 +703,7 @@ async function getAllOrdersAdmin(page = 1, limit = 10, status = null) {
       orderBy: { createdAt: 'desc' },
       include: {
         user: { select: { id: true, email: true, fullName: true } },
+        region: { select: { id: true, code: true, name: true } },
         _count: { select: { items: true } },
       },
     }),
@@ -684,7 +716,9 @@ async function getAllOrdersAdmin(page = 1, limit = 10, status = null) {
     user: o.user,
     orderMessage: o.orderMessage,
     totalAmount: decimalToNumber(o.totalAmount),
+    currency: o.currency ?? 'AED',
     status: o.status,
+    region: o.region ? { id: o.region.id, code: o.region.code, name: o.region.name } : null,
     createdAt: o.createdAt,
     updatedAt: o.updatedAt,
     itemCount: o._count.items,
@@ -705,6 +739,7 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
     userId: order.userId,
     orderMessage: order.orderMessage,
     totalAmount: decimalToNumber(order.totalAmount),
+    currency: order.currency ?? 'AED',
     status: order.status,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
@@ -715,6 +750,9 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
       email: order.user.email,
       fullName: order.user.fullName || null,
     };
+  }
+  if (order.region) {
+    base.region = { id: order.region.id, code: order.region.code, name: order.region.name };
   }
   if (order._count) {
     base.itemCount = order._count.items;
@@ -783,6 +821,7 @@ async function getAdminOrderHistory(page = 1, limit = 10, filters = {}) {
   const where = listStatusFilter(filters.status);
 
   if (filters.userId) where.userId = filters.userId;
+  if (filters.regionId) where.regionId = filters.regionId;
   if (filters.dateFrom || filters.dateTo) {
     where.createdAt = {};
     if (filters.dateFrom) where.createdAt.gte = new Date(filters.dateFrom);
@@ -793,6 +832,7 @@ async function getAdminOrderHistory(page = 1, limit = 10, filters = {}) {
 
   const include = {
     user: { select: { id: true, email: true, fullName: true } },
+    region: { select: { id: true, code: true, name: true } },
     _count: { select: { items: true } },
     ...(includeItems
       ? {

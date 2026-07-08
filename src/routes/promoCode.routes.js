@@ -7,6 +7,7 @@ const { verifyToken } = require('../middleware/auth');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors, requireEitherBilingual } = require('../middleware/validate');
 const { publicLimiter, authLimiter } = require('../middleware/rateLimit');
+const { resolveRegion } = require('../middleware/region');
 
 /**
  * @swagger
@@ -73,6 +74,8 @@ const createValidation = [
   body('newUserWithinDays').optional({ nullable: true }).isInt({ min: 1 })
     .withMessage('newUserWithinDays must be a positive integer (days)'),
   body('isActive').optional().isBoolean(),
+  body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
+  body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
 ];
 
 const updateValidation = [
@@ -101,6 +104,8 @@ const updateValidation = [
   body('newUserWithinDays').optional({ nullable: true }).isInt({ min: 1 })
     .withMessage('newUserWithinDays must be a positive integer (days)'),
   body('isActive').optional().isBoolean(),
+  body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
+  body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
 ];
 
 const listValidation = [
@@ -151,6 +156,7 @@ router.get(
   '/available',
   authLimiter,
   verifyToken,
+  resolveRegion,
   promoCodeController.listAvailablePromoCodes,
 );
 
@@ -221,6 +227,7 @@ router.post(
   '/validate',
   authLimiter,
   verifyToken,
+  resolveRegion,
   validateCodeValidation,
   handleValidationErrors,
   promoCodeController.validatePromoCode,

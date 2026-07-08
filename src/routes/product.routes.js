@@ -132,6 +132,18 @@ const createValidation = [
     // "discount" above the original). The service re-checks against the stored price too.
     .custom((val, { req }) => req.body.price == null || Number(val) <= Number(req.body.price))
     .withMessage('discountedPrice cannot exceed price'),
+  // Optional manual Saudi Riyal price override — same bounds as the AED price. No
+  // auto-conversion: admin enters both currencies explicitly.
+  body('priceSar')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('priceSar must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('priceSar supports at most 2 decimal places'),
+  body('discountedPriceSar')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPriceSar must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('discountedPriceSar supports at most 2 decimal places').bail()
+    .custom((val, { req }) => req.body.priceSar == null || Number(val) <= Number(req.body.priceSar))
+    .withMessage('discountedPriceSar cannot exceed priceSar'),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
   body('categoryId').optional({ values: 'null' }).isUUID().withMessage('categoryId must be a valid UUID when provided'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
@@ -194,6 +206,16 @@ const updateValidation = [
     .custom(isTwoDecimals).withMessage('discountedPrice supports at most 2 decimal places').bail()
     .custom((val, { req }) => req.body.price == null || Number(val) <= Number(req.body.price))
     .withMessage('discountedPrice cannot exceed price'),
+  body('priceSar')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('priceSar must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('priceSar supports at most 2 decimal places'),
+  body('discountedPriceSar')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPriceSar must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('discountedPriceSar supports at most 2 decimal places').bail()
+    .custom((val, { req }) => req.body.priceSar == null || Number(val) <= Number(req.body.priceSar))
+    .withMessage('discountedPriceSar cannot exceed priceSar'),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
   // CAT-3: optional optimistic-concurrency token. When the admin panel sends the
   // updatedAt it last read, a stale overwrite (someone else edited meanwhile, or stock

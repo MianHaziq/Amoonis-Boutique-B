@@ -19,6 +19,7 @@ const REGION_SELECT = {
   code: true,
   name: true,
   name_ar: true,
+  currency: true,
   isDefault: true,
   isActive: true,
   sortOrder: true,
@@ -147,6 +148,7 @@ async function createRegion(data) {
         code,
         name,
         name_ar: data.name_ar != null ? String(data.name_ar).trim() || null : null,
+        currency: data.currency ? String(data.currency).trim().toUpperCase() : 'AED',
         isDefault: makeDefault,
         isActive: data.isActive === undefined ? true : !!data.isActive,
         sortOrder: data.sortOrder != null ? Number(data.sortOrder) : 0,
@@ -174,6 +176,11 @@ async function updateRegion(id, data) {
     payload.name = name;
   }
   if (data.name_ar !== undefined) payload.name_ar = data.name_ar ? String(data.name_ar).trim() || null : null;
+  if (data.currency !== undefined) {
+    const currency = String(data.currency).trim().toUpperCase();
+    if (!currency) throw Object.assign(new Error('Region currency cannot be empty'), { code: 'VALIDATION' });
+    payload.currency = currency;
+  }
   if (data.isActive !== undefined) payload.isActive = !!data.isActive;
   if (data.sortOrder !== undefined) payload.sortOrder = Number(data.sortOrder);
 

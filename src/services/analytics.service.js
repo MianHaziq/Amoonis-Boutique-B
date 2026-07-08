@@ -13,13 +13,18 @@ const NO_MATCH_REGION_ID = '00000000-0000-0000-0000-000000000000';
 async function attachRegionFilter(range, params) {
   const code = params && params.region ? String(params.region).trim() : '';
   if (!code) {
+    // No region filter -> combined view across regions with mixed currencies;
+    // callers fall back to the store's configured Settings.currency.
     range.regionId = null;
     range.regionCode = null;
+    range.currency = null;
     return range;
   }
   const region = await regionService.getRegionByCode(code);
   range.regionId = region ? region.id : NO_MATCH_REGION_ID;
   range.regionCode = region ? region.code : code.toUpperCase();
+  // A single region has one unambiguous currency — prefer it over the global default.
+  range.currency = region?.currency || null;
   return range;
 }
 
@@ -385,7 +390,7 @@ async function getDailySalesAnalytics(params) {
   return {
     preset: w.preset,
     presetLabel: isAllTime ? `${w.presetLabel} (monthly buckets)` : w.presetLabel,
-    currency: settingsRow?.currency ?? 'USD',
+    currency: w.range.currency ?? settingsRow?.currency ?? 'USD',
     range: rangeMetaPayload(w.range),
     granularity: isAllTime ? 'month' : 'day',
     note: isAllTime
@@ -665,7 +670,7 @@ async function getRevenueAnalytics(params) {
   return {
     preset: preset || null,
     presetLabel,
-    currency: settingsRow?.currency ?? 'USD',
+    currency: range.currency ?? settingsRow?.currency ?? 'USD',
     range: rangeMetaPayload(range),
     bucket: trunc,
     summary,
@@ -696,7 +701,7 @@ async function getKpiAnalytics(params) {
   return {
     preset: w.preset,
     presetLabel: w.presetLabel,
-    currency: settingsRow?.currency ?? 'USD',
+    currency: w.range.currency ?? settingsRow?.currency ?? 'USD',
     range: rangeMetaPayload(w.range),
     totals: {
       totalOrdersAllStatuses: num(r.totalOrdersAllStatuses),
@@ -760,7 +765,7 @@ async function getCategorySalesAnalytics(params) {
   return {
     preset: w.preset,
     presetLabel: w.presetLabel,
-    currency: settingsRow?.currency ?? 'USD',
+    currency: w.range.currency ?? settingsRow?.currency ?? 'USD',
     range: rangeMetaPayload(w.range),
     note:
       'Revenue is the sum of line totals (quantity × captured unit price) on **non-cancelled** orders only. Compare categories for “which sold more” in the selected window.',

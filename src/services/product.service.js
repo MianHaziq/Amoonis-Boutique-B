@@ -73,7 +73,17 @@ function orderedProductOptions(product) {
 
 function mapProduct(product) {
   if (!product) return null;
-  const { price, discountedPrice, images, descriptions, productOptions, regions, ...rest } = product;
+  const {
+    price,
+    discountedPrice,
+    priceSar,
+    discountedPriceSar,
+    images,
+    descriptions,
+    productOptions,
+    regions,
+    ...rest
+  } = product;
   const imagesList = orderedImages(product);
   const descriptionsList = orderedDescriptions(product);
   const productOptionsList = orderedProductOptions(product);
@@ -81,6 +91,12 @@ function mapProduct(product) {
     ...rest,
     price: decimalToNumber(price),
     discountedPrice: decimalToNumber(discountedPrice),
+    // Raw SAR override (manually entered by the admin), always present and additive —
+    // null means "no SAR price set yet". Region-currency resolution (which field a
+    // storefront request actually sees as `price`/`discountedPrice`) happens on top of
+    // this via applyRegionCurrency, so admin reads always get both currencies raw.
+    priceSar: decimalToNumber(priceSar),
+    discountedPriceSar: decimalToNumber(discountedPriceSar),
     images: imagesList.map((i) => i.url),
     image: imagesList[0]?.url ?? null,
     descriptions: descriptionsList,
@@ -94,6 +110,41 @@ function mapProduct(product) {
     out.regionIds = regionList.map((r) => r.id);
   }
   return out;
+}
+
+/**
+ * Overlay a region's currency onto an already-mapped product for STOREFRONT reads:
+ * when the currency is SAR, `price`/`discountedPrice` become the SAR override (falling
+ * back to the AED value when no SAR price is set), so the frontend reads the same
+ * field names regardless of region — no currency-branching needed client-side.
+ * Staff/admin reads should NOT call this — they get the raw AED + SAR fields so the
+ * edit form can show/edit both.
+ */
+function applyRegionCurrency(mapped, currency) {
+  if (!mapped || currency !== 'SAR') return mapped;
+  return {
+    ...mapped,
+    price: mapped.priceSar != null ? mapped.priceSar : mapped.price,
+    discountedPrice:
+      mapped.discountedPriceSar != null ? mapped.discountedPriceSar : mapped.discountedPrice,
+  };
+}
+
+/**
+ * Same resolution as applyRegionCurrency, but works directly on a raw Prisma product
+ * row (Decimal fields) instead of an already-mapped product — used where only the
+ * numeric price is needed (order totals, cart line totals), not the full product shape.
+ */
+function regionPriceFromRow(row, currency) {
+  const price = decimalToNumber(row.price) ?? 0;
+  const discountedPrice = decimalToNumber(row.discountedPrice);
+  if (currency !== 'SAR') return { price, discountedPrice };
+  const priceSar = decimalToNumber(row.priceSar);
+  const discountedPriceSar = decimalToNumber(row.discountedPriceSar);
+  return {
+    price: priceSar != null ? priceSar : price,
+    discountedPrice: discountedPriceSar != null ? discountedPriceSar : discountedPrice,
+  };
 }
 
 function normalizeDescriptions(descriptions) {
@@ -206,6 +257,15 @@ async function createProduct(data) {
     err.code = 'INVALID_PRICE';
     throw err;
   }
+  if (
+    data.discountedPriceSar != null &&
+    data.priceSar != null &&
+    Number(data.discountedPriceSar) > Number(data.priceSar)
+  ) {
+    const err = new Error('discountedPriceSar cannot exceed priceSar');
+    err.code = 'INVALID_PRICE';
+    throw err;
+  }
   const regionIds = await resolveWriteRegionIds(data.regionIds);
   const imageUrls = Array.isArray(data.images)
     ? data.images.filter((u) => typeof u === 'string' && u.trim()).slice(0, MAX_IMAGES)
@@ -247,6 +307,8 @@ async function createProduct(data) {
         subtitle_ar: productDraft.subtitle_ar ?? null,
         price: data.price,
         discountedPrice: data.discountedPrice ?? null,
+        priceSar: data.priceSar != null ? Number(data.priceSar) : null,
+        discountedPriceSar: data.discountedPriceSar != null ? Number(data.discountedPriceSar) : null,
         quantity,
         status,
         ...(regionIds.length > 0
@@ -326,6 +388,19 @@ async function updateProduct(id, data) {
       throw err;
     }
   }
+  if (data.discountedPriceSar != null) {
+    const basePriceSar =
+      data.priceSar != null
+        ? Number(data.priceSar)
+        : existing.priceSar != null
+          ? Number(existing.priceSar)
+          : null;
+    if (basePriceSar != null && Number(data.discountedPriceSar) > basePriceSar) {
+      const err = new Error('discountedPriceSar cannot exceed priceSar');
+      err.code = 'INVALID_PRICE';
+      throw err;
+    }
+  }
 
   const bilingualDraft = {};
   if (data.title !== undefined) bilingualDraft.title = data.title;
@@ -369,6 +444,12 @@ async function updateProduct(id, data) {
     ...(bilingualDraft.subtitle_ar !== undefined && { subtitle_ar: bilingualDraft.subtitle_ar ?? null }),
     ...(data.price != null && { price: data.price }),
     ...(data.discountedPrice !== undefined && { discountedPrice: data.discountedPrice }),
+    ...(data.priceSar !== undefined && {
+      priceSar: data.priceSar != null ? Number(data.priceSar) : null,
+    }),
+    ...(data.discountedPriceSar !== undefined && {
+      discountedPriceSar: data.discountedPriceSar != null ? Number(data.discountedPriceSar) : null,
+    }),
     ...(data.quantity !== undefined && { quantity: Math.max(0, parseInt(data.quantity, 10) || 0) }),
     ...(data.categoryId !== undefined && { categoryId: data.categoryId || null }),
     ...(data.status !== undefined && { status: normalizeStatus(data.status, existing.status) }),
@@ -557,8 +638,11 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null, visibilit
     prisma.product.count({ where }),
   ]);
 
+  const mapped = items.map(mapProduct);
   return {
-    items: items.map(mapProduct),
+    // Storefront-only: overlay the requesting region's currency (AED/SAR) so `price`/
+    // `discountedPrice` are already correct for the region. Staff/admin keep raw fields.
+    items: visibility.isStaff ? mapped : mapped.map((p) => applyRegionCurrency(p, visibility.currency)),
     total,
     page: safePage,
     limit: take,
@@ -630,8 +714,11 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
     prisma.product.count({ where }),
   ]);
 
+  const mappedResults = items.map(mapProduct);
   return {
-    items: items.map(mapProduct),
+    items: visibility.isStaff
+      ? mappedResults
+      : mappedResults.map((p) => applyRegionCurrency(p, visibility.currency)),
     total,
     page: safePage,
     limit: take,
@@ -651,7 +738,9 @@ async function getProductById(id, visibility = {}) {
       ...(visibility.isStaff ? REGION_INCLUDE : {}),
     },
   });
-  return product ? mapProduct(product) : null;
+  if (!product) return null;
+  const mapped = mapProduct(product);
+  return visibility.isStaff ? mapped : applyRegionCurrency(mapped, visibility.currency);
 }
 
 module.exports = {
@@ -664,5 +753,7 @@ module.exports = {
   searchProducts,
   getProductById,
   mapProduct,
+  applyRegionCurrency,
+  regionPriceFromRow,
   decimalToNumber,
 };

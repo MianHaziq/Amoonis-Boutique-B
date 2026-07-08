@@ -108,12 +108,13 @@ function mapCategoryForSection(cat) {
   return out;
 }
 
-function mapProductForSection(pr) {
+function mapProductForSection(pr, visibility) {
   if (!pr || !pr.product) return null;
-  return productService.mapProduct(pr.product);
+  const mapped = productService.mapProduct(pr.product);
+  return visibility?.isStaff ? mapped : productService.applyRegionCurrency(mapped, visibility?.currency);
 }
 
-function mapSection(s) {
+function mapSection(s, visibility = {}) {
   if (!s) return null;
   const out = {
     id: s.id,
@@ -124,7 +125,7 @@ function mapSection(s) {
     status: s.status,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
-    products: (s.products || []).map(mapProductForSection).filter(Boolean),
+    products: (s.products || []).map((pr) => mapProductForSection(pr, visibility)).filter(Boolean),
     categories: (s.categories || []).map(mapCategoryForSection).filter(Boolean),
   };
   // Region tags only present on staff reads.
@@ -142,7 +143,7 @@ async function getSections(visibility = {}) {
     orderBy: { sortOrder: 'asc' },
     include: sectionInclude(visibility),
   });
-  return sections.map(mapSection);
+  return sections.map((s) => mapSection(s, visibility));
 }
 
 async function getSectionById(id, visibility = {}) {
@@ -150,7 +151,7 @@ async function getSectionById(id, visibility = {}) {
     where: { id, ...buildVisibilityWhere(visibility) },
     include: sectionInclude(visibility),
   });
-  return mapSection(section);
+  return mapSection(section, visibility);
 }
 
 async function createSection(data) {

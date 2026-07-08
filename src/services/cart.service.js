@@ -6,10 +6,11 @@ function decimalToNumber(v) {
   return v == null ? null : Number(v);
 }
 
-function effectivePrice(product) {
-  const discounted = product.discountedPrice != null ? Number(product.discountedPrice) : null;
-  const price = Number(product.price);
-  return discounted != null && discounted < price ? discounted : price;
+// Resolves to the requesting region's currency (AED price, or the manual SAR
+// override when set) — same rule as order.service's livePrice.
+function effectivePrice(product, currency = 'AED') {
+  const { price, discountedPrice } = productService.regionPriceFromRow(product, currency);
+  return discountedPrice != null && discountedPrice < price ? discountedPrice : price;
 }
 
 // Product include for cart (images + descriptions + productOptions for display)
@@ -211,33 +212,34 @@ async function updateItemMessage(userId, { productId, message }) {
   return { cart: await getOrCreateCart(userId), error: null };
 }
 
-async function getCart(userId) {
+async function getCart(userId, currency = 'AED') {
   const cart = await getOrCreateCart(userId);
   const items = cart.items.map((i) => ({
     id: i.id,
     productId: i.productId,
-    product: productService.mapProduct(i.product),
+    product: productService.applyRegionCurrency(productService.mapProduct(i.product), currency),
     quantity: i.quantity,
     message: i.message,
-    lineTotal: effectivePrice(i.product) * i.quantity,
+    lineTotal: effectivePrice(i.product, currency) * i.quantity,
   }));
   const totalAmount = items.reduce((sum, i) => sum + i.lineTotal, 0);
   return {
     id: cart.id,
     items,
     totalAmount: Math.round(totalAmount * 100) / 100,
+    currency,
     orderMessage: cart.orderMessage,
   };
 }
 
-async function clearCart(userId) {
+async function clearCart(userId, currency = 'AED') {
   const cart = await getOrCreateCart(userId);
   await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
   await prisma.cart.update({
     where: { id: cart.id },
     data: { orderMessage: null },
   });
-  return getCart(userId);
+  return getCart(userId, currency);
 }
 
 /**
