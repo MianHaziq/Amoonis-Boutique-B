@@ -3,7 +3,6 @@ node_modules
 
 # Prisma
 /generated/prisma
-prisma.config.js
 
 nul
 temp_auto_push.bat

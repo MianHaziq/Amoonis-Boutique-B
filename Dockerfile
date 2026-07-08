@@ -16,7 +16,7 @@ RUN npm ci && npm cache clean --force
 
 # Copy prisma schema and config (required for Prisma 7)
 COPY prisma ./prisma/
-COPY prisma.config.ts ./
+COPY prisma.config.js ./
 
 # Generate Prisma Client
 RUN npx prisma generate
