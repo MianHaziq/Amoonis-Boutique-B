@@ -475,7 +475,16 @@ model Order {
   /// Postgres sequence; assigned by the DB on insert. Unique and shown to customers/staff
   /// instead of the raw UUID.
   orderNumber           Int           @unique @default(dbgenerated("nextval('order_number_seq'::regclass)"))
-  userId                String
+  /// Owning customer. NULL for guest (unauthenticated) checkout — such orders carry
+  /// the contact snapshot in guestName/guestPhone/guestEmail and are back-linked to a
+  /// user account later when someone signs up/in with the same email (see
+  /// order.service.linkGuestOrdersToUser).
+  userId                String?
+  /// Guest checkout contact snapshot (only set when userId is NULL). guestEmail is the
+  /// account-linking key and is stored trimmed + lowercased to match auth's normalization.
+  guestName             String?
+  guestPhone            String?
+  guestEmail            String?
   orderMessage          String?       @db.Text
   totalAmount           Decimal       @db.Decimal(10, 2)
   discountAmount        Decimal?      @db.Decimal(10, 2)
@@ -515,7 +524,7 @@ model Order {
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
-  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
   address      Address?    @relation(fields: [addressId], references: [id], onDelete: SetNull)
   appliedPromo PromoCode?  @relation(fields: [appliedPromoCodeId], references: [id], onDelete: SetNull)
   region       Region?     @relation(fields: [regionId], references: [id], onDelete: SetNull)
@@ -523,6 +532,7 @@ model Order {
 
   @@index([userId])
   @@index([userId, createdAt])
+  @@index([guestEmail])
   @@index([status])
   @@index([createdAt])
   @@index([createdAt, status])
@@ -714,13 +724,15 @@ model PromoCodeCategory {
 model PromoCodeUsage {
   id             String   @id @default(uuid())
   promoCodeId    String
-  userId         String
+  /// Redeeming customer. NULL when the code was applied on a guest (unauthenticated)
+  /// order; re-pointed to the user if that guest order is later linked to an account.
+  userId         String?
   orderId        String?
   discountAmount Decimal  @db.Decimal(10, 2)
   createdAt      DateTime @default(now())
 
   promoCode PromoCode @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([promoCodeId])
   @@index([userId])

@@ -112,6 +112,43 @@ const verifyToken = async (req, res, next) => {
 };
 
 /**
+ * Optional customer auth. Behaves like verifyToken but NEVER rejects the request:
+ *   - No / invalid / expired / stale token  -> continue anonymously (req.userId stays undefined).
+ *   - Valid, active, non-stale token         -> attach req.userId/req.userRole (+ manager perms).
+ * Use on endpoints that must serve BOTH signed-in customers and guests (guest
+ * checkout, promo preview) so the same handler can branch on `req.userId`.
+ */
+const optionalAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return next();
+
+    const token = authHeader.split(' ')[1];
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch {
+      // Invalid/expired token on an optional-auth route — treat as guest, don't block.
+      return next();
+    }
+
+    const user = await loadUserForAuth(decoded.id);
+    if (!user || user.status !== 'ACTIVE') return next();
+    // Honor token-version revocation, same as verifyToken.
+    if (decoded.tv != null && decoded.tv !== user.tokenVersion) return next();
+
+    req.userId = user.id;
+    req.userRole = user.role;
+    req.userStatus = user.status;
+    req.managerPermissions = user.managerPermissions || [];
+    return next();
+  } catch {
+    // Defensive: optional auth must never break the request.
+    return next();
+  }
+};
+
+/**
  * Verify admin token middleware. Returns consistent { success: false, message } on failure.
  */
 const verifyAdmin = async (req, res, next) => {
@@ -161,6 +198,7 @@ const verifyAdmin = async (req, res, next) => {
 
 module.exports = {
   verifyToken,
+  optionalAuth,
   verifyAdmin,
   invalidateCachedUser,
   loadUserForAuth,

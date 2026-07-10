@@ -168,6 +168,84 @@ router.post(
 
 /**
  * @swagger
+ * /orders/guest-checkout:
+ *   post:
+ *     summary: Place order as a guest (no authentication)
+ *     description: |
+ *       Creates an order WITHOUT a logged-in account. Line items are sent in the body
+ *       (guests have no server-side cart) along with an inline `shippingAddress`
+ *       (recipient `fullName` + `phone` + address are required) and an optional `email`.
+ *
+ *       Payment is always Cash on Delivery. Pricing, region/currency, promo codes,
+ *       inventory reservation and the order-status workflow are identical to the
+ *       authenticated `/orders/checkout`. If the guest later signs up / signs in with the
+ *       same `email`, the order is back-linked to their account automatically.
+ *     tags: [Orders]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [items, shippingAddress]
+ *             properties:
+ *               items:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [productId, quantity]
+ *                   properties:
+ *                     productId: { type: string, format: uuid }
+ *                     quantity: { type: integer, minimum: 1 }
+ *                     message: { type: string }
+ *               shippingAddress:
+ *                 type: object
+ *                 required: [fullName, phone, streetAddress, city]
+ *                 properties:
+ *                   fullName: { type: string }
+ *                   phone: { type: string }
+ *                   streetAddress: { type: string }
+ *                   apartment: { type: string }
+ *                   city: { type: string }
+ *                   state: { type: string }
+ *                   postalCode: { type: string }
+ *                   country: { type: string }
+ *               email: { type: string, format: email }
+ *               orderMessage: { type: string }
+ *               promoCode: { type: string }
+ *     responses:
+ *       201: { description: Order placed }
+ *       400: { description: Validation / availability / promo error }
+ */
+const guestCheckoutBody = [
+  body('items').isArray({ min: 1 }).withMessage('items must be a non-empty array'),
+  body('items.*.productId').isUUID().withMessage('Each item needs a valid productId'),
+  body('items.*.quantity').isInt({ min: 1 }).withMessage('Each item quantity must be a positive integer'),
+  body('items.*.message').optional({ nullable: true }).trim(),
+  body('email').optional({ nullable: true }).trim().isEmail().withMessage('A valid email is required'),
+  body('orderMessage').optional({ nullable: true }).trim(),
+  body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
+  body('shippingAddress').isObject().withMessage('shippingAddress is required'),
+  body('shippingAddress.fullName').trim().notEmpty().withMessage('Full name is required'),
+  body('shippingAddress.phone').trim().notEmpty().withMessage('Phone number is required'),
+  body('shippingAddress.streetAddress').trim().notEmpty().withMessage('Address is required'),
+  body('shippingAddress.apartment').optional({ nullable: true }).trim(),
+  body('shippingAddress.city').trim().notEmpty().withMessage('City is required'),
+  body('shippingAddress.state').optional({ nullable: true }).trim(),
+  body('shippingAddress.postalCode').optional({ nullable: true }).trim(),
+  body('shippingAddress.country').optional({ nullable: true }).trim(),
+];
+
+router.post(
+  '/guest-checkout',
+  authLimiter,
+  guestCheckoutBody,
+  handleValidationErrors,
+  orderController.createGuestOrder
+);
+
+/**
+ * @swagger
  * /orders/buy-now:
  *   post:
  *     summary: Buy a single product directly (Buy Now — does NOT use the cart)

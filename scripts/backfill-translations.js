@@ -1,307 +1,230 @@
 #!/usr/bin/env node
 /**
- * Backfill bilingual fields for rows created before auto-translation was enabled.
+ * Generate the missing Arabic (or English) twin for EVERY bilingual field the
+ * admin manages — products, categories, sections, promo codes, regions,
+ * product descriptions/options, and historical order-item title snapshots.
  *
- * Scans Section, Category, Product, ProductDescription, ProductOption, PromoCode for rows
- * where one of the en/_ar twins is filled and the other is null/empty, then fills the
- * missing side via Azure Translator. Idempotent — safe to re-run after partial failures.
+ * Never overwrites existing content: only fills the empty side of a pair
+ * (empty = null OR blank string). Idempotent — safe to re-run any time.
+ *
+ * Rate-limit aware: the translation util swallows provider errors (a Google
+ * per-minute 403 would otherwise silently leave rows untranslated), so this
+ * script VERIFIES each row actually got filled and retries with backoff.
  *
  * Usage:
- *   node scripts/backfill-translations.js                # backfill everything
- *   node scripts/backfill-translations.js --dry-run      # report only, no DB writes
- *   node scripts/backfill-translations.js --model Product  # one table only
- *   node scripts/backfill-translations.js --limit 50     # cap rows per table
+ *   node scripts/backfill-translations.js                 # fill everything
+ *   node scripts/backfill-translations.js --dry-run       # report only (no API calls, no writes)
+ *   node scripts/backfill-translations.js --model Product # one model only
+ *   node scripts/backfill-translations.js --limit 50      # cap rows per model
+ *   node scripts/backfill-translations.js --sleep 500     # ms between rows (default 300)
+ *
+ * Against production: DATABASE_URL="postgresql://...prod..." node scripts/backfill-translations.js
  */
 
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 
 const prisma = require('../src/config/db');
-const { autoTranslate, autoTranslateMany } = require('../src/utils/bilingual');
+const { autoTranslate } = require('../src/utils/bilingual');
 const { isEnabled, getStatus } = require('../src/services/translation.service');
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
 const modelArg = readFlag('--model');
 const limitArg = readFlag('--limit');
-const limit = limitArg ? Math.max(1, parseInt(limitArg, 10)) : null;
+const sleepMs = Math.max(0, parseInt(readFlag('--sleep') ?? '300', 10) || 300);
+const limit = limitArg ? Math.max(1, parseInt(limitArg, 10)) : Infinity;
 
 function readFlag(name) {
   const i = argv.indexOf(name);
   return i !== -1 ? argv[i + 1] : null;
 }
 
-function shouldRun(model) {
-  return !modelArg || modelArg.toLowerCase() === model.toLowerCase();
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const blank = (v) => v == null || (typeof v === 'string' && v.trim() === '');
+const filledStr = (v) => !blank(v);
 
-function missingTwin(row, src, dst) {
-  const a = row[src];
-  const b = row[dst];
-  return (a && !b) || (!a && b);
-}
+// ---------------------------------------------------------------------------
+// Every bilingual model in the schema. `pairs` mirrors the autoTranslate schema
+// used by the live create/update paths, so backfilled rows come out identical
+// to rows the admin saves today.
+// ---------------------------------------------------------------------------
+const MODELS = [
+  {
+    name: 'Category',
+    client: () => prisma.category,
+    pairs: [
+      { src: 'title', dst: 'title_ar' },
+      { src: 'description', dst: 'description_ar' },
+    ],
+  },
+  {
+    name: 'Section',
+    client: () => prisma.section,
+    pairs: [{ src: 'title', dst: 'title_ar' }],
+  },
+  {
+    name: 'Product',
+    client: () => prisma.product,
+    pairs: [
+      { src: 'title', dst: 'title_ar' },
+      { src: 'subtitle', dst: 'subtitle_ar' },
+    ],
+  },
+  {
+    name: 'ProductDescription',
+    client: () => prisma.productDescription,
+    pairs: [
+      { src: 'title', dst: 'title_ar' },
+      { src: 'description', dst: 'description_ar' },
+    ],
+  },
+  {
+    name: 'ProductOption',
+    client: () => prisma.productOption,
+    pairs: [
+      { src: 'title', dst: 'title_ar' },
+      { src: 'options', dst: 'options_ar', kind: 'arrayOfString' },
+    ],
+  },
+  {
+    name: 'PromoCode',
+    client: () => prisma.promoCode,
+    pairs: [
+      { src: 'name', dst: 'name_ar' },
+      { src: 'description', dst: 'description_ar' },
+    ],
+  },
+  {
+    name: 'Region',
+    client: () => prisma.region,
+    pairs: [{ src: 'name', dst: 'name_ar' }],
+  },
+  {
+    // Historical snapshot titles on order lines (kept readable after a product
+    // is deleted). Usually few rows; included so "everything" really is everything.
+    name: 'OrderItem',
+    client: () => prisma.orderItem,
+    pairs: [{ src: 'productTitle', dst: 'productTitle_ar' }],
+  },
+];
 
-const stats = {
-  scanned: 0,
-  translated: 0,
-  skipped: 0,
-  failed: 0,
-  byModel: {},
-};
-
-function track(model, key) {
-  if (!stats.byModel[model]) stats.byModel[model] = { translated: 0, scanned: 0 };
-  stats.byModel[model][key]++;
-}
-
-async function backfillCategories() {
-  if (!shouldRun('Category')) return;
-  const rows = await prisma.category.findMany({
-    where: {
-      OR: [
-        { AND: [{ title: { not: null } }, { title_ar: null }] },
-        { AND: [{ title_ar: { not: null } }, { title: null }] },
-        { AND: [{ description: { not: null } }, { description_ar: null }] },
-        { AND: [{ description_ar: { not: null } }, { description: null }] },
-      ],
-    },
-    take: limit ?? undefined,
-  });
-  console.log(`[backfill] Category: ${rows.length} candidate rows`);
-  for (const row of rows) {
-    track('Category', 'scanned');
-    stats.scanned++;
-    const draft = {
-      title: row.title, title_ar: row.title_ar,
-      description: row.description, description_ar: row.description_ar,
-    };
-    try {
-      await autoTranslate(draft, [
-        { src: 'title', dst: 'title_ar' },
-        { src: 'description', dst: 'description_ar' },
-      ]);
-      if (!dryRun) {
-        await prisma.category.update({
-          where: { id: row.id },
-          data: {
-            title: draft.title, title_ar: draft.title_ar,
-            description: draft.description, description_ar: draft.description_ar,
-          },
-        });
-      }
-      track('Category', 'translated'); stats.translated++;
-    } catch (e) {
-      console.error(`[backfill] Category ${row.id} failed:`, e.message);
-      stats.failed++;
-    }
+// A pair still needs work when exactly one side has content. Array pairs need
+// work when one array has fewer usable entries than the other.
+function pairIncomplete(row, pair) {
+  if (pair.kind === 'arrayOfString') {
+    const a = Array.isArray(row[pair.src]) ? row[pair.src].filter(filledStr) : [];
+    const b = Array.isArray(row[pair.dst]) ? row[pair.dst].filter(filledStr) : [];
+    return (a.length > 0 && b.length < a.length) || (b.length > 0 && a.length < b.length);
   }
+  return (filledStr(row[pair.src]) && blank(row[pair.dst]))
+      || (blank(row[pair.src]) && filledStr(row[pair.dst]));
 }
 
-async function backfillSections() {
-  if (!shouldRun('Section')) return;
-  const rows = await prisma.section.findMany({
-    where: {
-      OR: [
-        { AND: [{ title: { not: null } }, { title_ar: null }] },
-        { AND: [{ title_ar: { not: null } }, { title: null }] },
-      ],
-    },
-    take: limit ?? undefined,
-  });
-  console.log(`[backfill] Section: ${rows.length} candidate rows`);
-  for (const row of rows) {
-    track('Section', 'scanned'); stats.scanned++;
-    const draft = { title: row.title, title_ar: row.title_ar };
-    try {
-      await autoTranslate(draft, [{ src: 'title', dst: 'title_ar' }]);
-      if (!dryRun) {
-        await prisma.section.update({ where: { id: row.id }, data: draft });
-      }
-      track('Section', 'translated'); stats.translated++;
-    } catch (e) {
-      console.error(`[backfill] Section ${row.id} failed:`, e.message);
-      stats.failed++;
+const rowIncomplete = (row, pairs) => pairs.some((p) => pairIncomplete(row, p));
+
+function pairFields(pairs) {
+  return pairs.flatMap((p) => [p.src, p.dst]);
+}
+
+// Provider errors are swallowed inside autoTranslate, so a rate-limited call
+// looks like "nothing happened". Retry with growing waits (Google's limit is
+// per-minute, so the later waits let the quota window reset).
+const RETRY_WAITS_MS = [0, 5_000, 20_000, 65_000];
+
+async function translateRowWithRetry(pairs, draft) {
+  for (let attempt = 0; attempt < RETRY_WAITS_MS.length; attempt++) {
+    if (RETRY_WAITS_MS[attempt] > 0) {
+      console.log(`    …provider didn't fill the row (rate limit?) — waiting ${RETRY_WAITS_MS[attempt] / 1000}s and retrying`);
+      await sleep(RETRY_WAITS_MS[attempt]);
     }
+    await autoTranslate(draft, pairs);
+    if (!rowIncomplete(draft, pairs)) return true;
   }
+  return false;
 }
 
-async function backfillProducts() {
-  if (!shouldRun('Product')) return;
-  const rows = await prisma.product.findMany({
-    where: {
-      OR: [
-        { AND: [{ title: { not: null } }, { title_ar: null }] },
-        { AND: [{ title_ar: { not: null } }, { title: null }] },
-        { AND: [{ subtitle: { not: null } }, { subtitle_ar: null }] },
-        { AND: [{ subtitle_ar: { not: null } }, { subtitle: null }] },
-      ],
-    },
-    take: limit ?? undefined,
-  });
-  console.log(`[backfill] Product: ${rows.length} candidate rows`);
-  for (const row of rows) {
-    track('Product', 'scanned'); stats.scanned++;
-    const draft = {
-      title: row.title, title_ar: row.title_ar,
-      subtitle: row.subtitle, subtitle_ar: row.subtitle_ar,
-    };
-    try {
-      await autoTranslate(draft, [
-        { src: 'title', dst: 'title_ar' },
-        { src: 'subtitle', dst: 'subtitle_ar' },
-      ]);
-      if (!dryRun) {
-        await prisma.product.update({ where: { id: row.id }, data: draft });
-      }
-      track('Product', 'translated'); stats.translated++;
-    } catch (e) {
-      console.error(`[backfill] Product ${row.id} failed:`, e.message);
-      stats.failed++;
+const stats = {};
+function bump(model, key, n = 1) {
+  if (!stats[model]) stats[model] = { candidates: 0, translated: 0, written: 0, stillMissing: 0 };
+  stats[model][key] += n;
+}
+
+async function backfillModel(model) {
+  if (modelArg && modelArg.toLowerCase() !== model.name.toLowerCase()) return;
+
+  const fields = pairFields(model.pairs);
+  const select = { id: true };
+  for (const f of fields) select[f] = true;
+
+  // Fetch all rows and filter in JS — catches empty-string twins that a
+  // `{ field: null }` WHERE clause would miss. All these tables are small.
+  const rows = (await model.client().findMany({ select })).filter((r) =>
+    rowIncomplete(r, model.pairs)
+  );
+  const todo = rows.slice(0, limit);
+  console.log(`[backfill] ${model.name}: ${rows.length} row(s) missing a translation${todo.length < rows.length ? ` (processing ${todo.length})` : ''}`);
+
+  if (dryRun) {
+    bump(model.name, 'candidates', rows.length);
+    for (const r of todo.slice(0, 5)) {
+      const preview = model.pairs
+        .filter((p) => pairIncomplete(r, p))
+        .map((p) => `${p.src}=${JSON.stringify(r[p.src])} → ${p.dst} (missing)`)
+        .join('; ');
+      console.log(`    would translate ${r.id}: ${preview}`);
     }
+    return;
   }
-}
 
-async function backfillProductDescriptions() {
-  if (!shouldRun('ProductDescription')) return;
-  const rows = await prisma.productDescription.findMany({
-    where: {
-      OR: [
-        { AND: [{ title: { not: null } }, { title_ar: null }] },
-        { AND: [{ title_ar: { not: null } }, { title: null }] },
-        { AND: [{ description: { not: null } }, { description_ar: null }] },
-        { AND: [{ description_ar: { not: null } }, { description: null }] },
-      ],
-    },
-    take: limit ?? undefined,
-  });
-  console.log(`[backfill] ProductDescription: ${rows.length} candidate rows`);
-  if (rows.length === 0) return;
-  // Group rows together for a single batched call when reasonable (50 at a time).
-  const CHUNK = 50;
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const batch = rows.slice(i, i + CHUNK);
-    const drafts = batch.map((row) => ({
-      _id: row.id,
-      title: row.title, title_ar: row.title_ar,
-      description: row.description, description_ar: row.description_ar,
-    }));
-    try {
-      await autoTranslateMany(drafts, [
-        { src: 'title', dst: 'title_ar' },
-        { src: 'description', dst: 'description_ar' },
-      ]);
-      for (const d of drafts) {
-        track('ProductDescription', 'scanned'); stats.scanned++;
-        if (!dryRun) {
-          await prisma.productDescription.update({
-            where: { id: d._id },
-            data: {
-              title: d.title, title_ar: d.title_ar,
-              description: d.description, description_ar: d.description_ar,
-            },
-          });
-        }
-        track('ProductDescription', 'translated'); stats.translated++;
-      }
-    } catch (e) {
-      console.error('[backfill] ProductDescription chunk failed:', e.message);
-      stats.failed += batch.length;
-    }
-  }
-}
+  for (const row of todo) {
+    bump(model.name, 'candidates');
+    const draft = {};
+    for (const f of fields) draft[f] = row[f];
 
-async function backfillProductOptions() {
-  if (!shouldRun('ProductOption')) return;
-  const rows = await prisma.productOption.findMany({
-    where: {
-      OR: [
-        { AND: [{ title: { not: null } }, { title_ar: null }] },
-        { AND: [{ title_ar: { not: null } }, { title: null }] },
-      ],
-    },
-    take: limit ?? undefined,
-  });
-  console.log(`[backfill] ProductOption: ${rows.length} candidate rows`);
-  for (const row of rows) {
-    track('ProductOption', 'scanned'); stats.scanned++;
-    const draft = {
-      title: row.title, title_ar: row.title_ar,
-      options: row.options, options_ar: row.options_ar,
-    };
-    try {
-      await autoTranslate(draft, [
-        { src: 'title', dst: 'title_ar' },
-        { src: 'options', dst: 'options_ar', kind: 'arrayOfString' },
-      ]);
-      if (!dryRun) {
-        await prisma.productOption.update({ where: { id: row.id }, data: draft });
-      }
-      track('ProductOption', 'translated'); stats.translated++;
-    } catch (e) {
-      console.error(`[backfill] ProductOption ${row.id} failed:`, e.message);
-      stats.failed++;
-    }
-  }
-}
+    const complete = await translateRowWithRetry(model.pairs, draft);
 
-async function backfillPromoCodes() {
-  if (!shouldRun('PromoCode')) return;
-  const rows = await prisma.promoCode.findMany({
-    where: {
-      OR: [
-        { AND: [{ name: { not: null } }, { name_ar: null }] },
-        { AND: [{ name_ar: { not: null } }, { name: null }] },
-        { AND: [{ description: { not: null } }, { description_ar: null }] },
-        { AND: [{ description_ar: { not: null } }, { description: null }] },
-      ],
-    },
-    take: limit ?? undefined,
-  });
-  console.log(`[backfill] PromoCode: ${rows.length} candidate rows`);
-  for (const row of rows) {
-    track('PromoCode', 'scanned'); stats.scanned++;
-    const draft = {
-      name: row.name, name_ar: row.name_ar,
-      description: row.description, description_ar: row.description_ar,
-    };
-    try {
-      await autoTranslate(draft, [
-        { src: 'name', dst: 'name_ar' },
-        { src: 'description', dst: 'description_ar' },
-      ]);
-      if (!dryRun) {
-        await prisma.promoCode.update({ where: { id: row.id }, data: draft });
-      }
-      track('PromoCode', 'translated'); stats.translated++;
-    } catch (e) {
-      console.error(`[backfill] PromoCode ${row.id} failed:`, e.message);
-      stats.failed++;
+    // Persist whatever DID get filled, even on a partial fill — a re-run
+    // finishes the rest (idempotent).
+    const data = {};
+    for (const f of fields) {
+      if (JSON.stringify(draft[f]) !== JSON.stringify(row[f])) data[f] = draft[f];
     }
+    if (Object.keys(data).length > 0) {
+      await model.client().update({ where: { id: row.id }, data });
+      bump(model.name, 'written');
+      const label = draft[model.pairs[0].src] ?? row.id;
+      console.log(`    ✓ ${JSON.stringify(label)} → ${JSON.stringify(draft[model.pairs[0].dst] ?? '')}`);
+    }
+    if (complete) bump(model.name, 'translated');
+    else {
+      bump(model.name, 'stillMissing');
+      console.warn(`    ✗ ${row.id} still missing after retries — re-run the script later`);
+    }
+
+    await sleep(sleepMs); // gentle on the per-minute translation quota
   }
 }
 
 async function main() {
-  console.log('[backfill] Translation provider status:', getStatus());
-  if (!isEnabled()) {
-    console.error('[backfill] Translation provider is disabled — set TRANSLATION_PROVIDER=azure and AZURE_TRANSLATOR_KEY in env, then re-run.');
+  console.log('[backfill] Translation provider:', getStatus());
+  if (!dryRun && !isEnabled()) {
+    console.error('[backfill] Translation provider is disabled — set TRANSLATION_PROVIDER (google|azure) and the matching API key in env, then re-run.');
     process.exit(1);
   }
-  if (dryRun) console.log('[backfill] DRY-RUN: no DB writes will occur.');
+  if (dryRun) console.log('[backfill] DRY-RUN: reporting only — no API calls, no DB writes.\n');
 
   const t0 = Date.now();
-  await backfillCategories();
-  await backfillSections();
-  await backfillProducts();
-  await backfillProductDescriptions();
-  await backfillProductOptions();
-  await backfillPromoCodes();
-  const ms = Date.now() - t0;
+  for (const model of MODELS) {
+    await backfillModel(model);
+  }
 
-  console.log('\n[backfill] DONE');
-  console.log(`  total scanned:    ${stats.scanned}`);
-  console.log(`  total translated: ${stats.translated}`);
-  console.log(`  total failed:     ${stats.failed}`);
-  console.log(`  elapsed:          ${ms} ms`);
-  console.log('  by model:        ', stats.byModel);
+  console.log('\n[backfill] DONE in', Math.round((Date.now() - t0) / 1000), 's');
+  console.table(stats);
+  const missing = Object.values(stats).reduce((s, m) => s + (m.stillMissing ?? 0), 0);
+  if (missing > 0) {
+    console.warn(`[backfill] ${missing} row(s) could not be translated (provider quota). Re-run the script to finish them.`);
+    process.exitCode = 2;
+  }
 }
 
 main()

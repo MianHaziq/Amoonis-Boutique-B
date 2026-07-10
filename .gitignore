@@ -11,3 +11,7 @@ temp_interactive_push.bat
 
 .report-previews/
 config.bat
+
+# Database dumps / backups — never commit (may contain production data)
+backups/
+*.dump

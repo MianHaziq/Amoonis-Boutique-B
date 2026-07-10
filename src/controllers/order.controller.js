@@ -16,6 +16,20 @@ async function createOrder(req, res, next) {
   }
 }
 
+// POST /orders/guest-checkout — place an order without authentication (guest checkout).
+// Public route: line items + inline shippingAddress + optional email come in the body.
+async function createGuestOrder(req, res, next) {
+  try {
+    const { order, error: errMsg } = await orderService.createGuestOrder(req.body, {
+      regionCode: req.headers['x-region'],
+    });
+    if (errMsg) return error(res, errMsg, 400);
+    return success(res, order, 'Order placed successfully', 201);
+  } catch (err) {
+    next(err);
+  }
+}
+
 // POST /orders/buy-now — order a single product directly (Apple Pay / COD) without using the cart.
 async function buyNow(req, res, next) {
   try {
@@ -318,6 +332,7 @@ async function paymentWebhook(req, res) {
 
 module.exports = {
   createOrder,
+  createGuestOrder,
   buyNow,
   getOrderById,
   getAllOrdersAdmin,

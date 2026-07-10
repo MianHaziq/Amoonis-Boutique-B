@@ -138,6 +138,11 @@ async function validatePromoCode(req, res, next) {
 
     let items = Array.isArray(bodyItems) ? bodyItems : null;
     if (!items) {
+      // No body items to preview against. Guests (no userId) have no server cart,
+      // so they must send items in the body.
+      if (!req.userId) {
+        return error(res, 'Send the cart items to validate a promo code', 400);
+      }
       const cart = await prisma.cart.findUnique({
         where: { userId: req.userId },
         include: {

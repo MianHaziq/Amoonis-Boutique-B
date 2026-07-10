@@ -7,6 +7,7 @@ const { OAuth2Client } = require('google-auth-library');
 const { verifyAppleToken } = require('../services/appleAuth.service');
 const refreshTokenService = require('../services/refreshToken.service');
 const regionService = require('../services/region.service');
+const orderService = require('../services/order.service');
 const notify = require('../notifications/notify');
 const { invalidateCachedUser } = require('../middleware/auth');
 const { success, error } = require('../utils/response');
@@ -82,6 +83,19 @@ function authSessionUserFields(user) {
   return base;
 }
 
+/**
+ * Back-link guest orders (placed with the same email) to a just-authenticated
+ * account. Best-effort: a linking failure must never break signup/signin/OAuth,
+ * so it's swallowed with a log.
+ */
+async function linkGuestOrders(userId, email) {
+  try {
+    await orderService.linkGuestOrdersToUser(userId, email);
+  } catch (err) {
+    console.error('linkGuestOrdersToUser failed', { userId, message: err?.message });
+  }
+}
+
 // Signup
 const signup = async (req, res, next) => {
   try {
@@ -110,6 +124,10 @@ const signup = async (req, res, next) => {
       },
       select: { id: true, email: true, fullName: true, role: true, status: true, tokenVersion: true, regionId: true, createdAt: true },
     });
+
+    // Back-link any orders this person placed as a guest with the same email so
+    // they show up in their new account. Best-effort — never fail signup over it.
+    await linkGuestOrders(created.id, created.email);
 
     const { accessToken, refreshToken, refreshTokenExpiresAt } = await issueAuthTokens(created, req);
     const responseData = {
@@ -157,6 +175,9 @@ const signin = async (req, res, next) => {
     if (user.status === 'INACTIVE') {
       return error(res, 'Your account has been deactivated. Please contact support.', 403);
     }
+
+    // Claim any guest orders placed with this email since the account was created.
+    await linkGuestOrders(user.id, user.email);
 
     const { accessToken, refreshToken, refreshTokenExpiresAt } = await issueAuthTokens(user, req);
     const responseData = {
@@ -305,6 +326,9 @@ const googleLogin = async (req, res, next) => {
     if (user.status === 'INACTIVE') {
       return error(res, 'Your account has been deactivated. Please contact support.', 403);
     }
+
+    // Claim guest orders placed with this email before the account existed.
+    await linkGuestOrders(user.id, user.email);
 
     // Renamed locals here only — the request body already destructured a Google
     // `accessToken` (the OAuth bearer the client passed us). We need a different
@@ -464,6 +488,9 @@ const appleLogin = async (req, res, next) => {
     if (user.status === 'INACTIVE') {
       return error(res, 'Your account has been deactivated. Please contact support.', 403);
     }
+
+    // Claim guest orders placed with this email before the account existed.
+    await linkGuestOrders(user.id, user.email);
 
     const { accessToken, refreshToken, refreshTokenExpiresAt } = await issueAuthTokens(user, req);
     const responseData = {

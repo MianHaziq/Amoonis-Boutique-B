@@ -82,6 +82,11 @@ function toOrderResponsePayload(order) {
     id: order.id,
     orderNumber: order.orderNumber ?? null,
     userId: order.userId,
+    // Guest (unauthenticated) contact snapshot — null for normal orders. Lets
+    // admin surfaces show who placed a guest order (no linked user account).
+    guestName: order.guestName ?? null,
+    guestPhone: order.guestPhone ?? null,
+    guestEmail: order.guestEmail ?? null,
     orderMessage: order.orderMessage,
     totalAmount: decimalToNumber(order.totalAmount),
     discountAmount: decimalToNumber(order.discountAmount),
@@ -166,7 +171,13 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     paymentMethod = 'COD',
     promoCode,
     clearCart = true,
+    // Guest (unauthenticated) checkout contact snapshot. Present only when userId
+    // is null; stamped onto the order and used to back-link it to an account later.
+    guestContact = null,
   } = params;
+
+  // A guest order (userId === null) is identified by the absence of a user row.
+  const isGuest = !userId;
 
   if (!Array.isArray(lineItems) || lineItems.length === 0) {
     return { order: null, error: 'No items to order' };
@@ -187,10 +198,14 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // checkout payload doesn't need to re-collect what we already have from signup.
   // Falls back to whatever the address row carries (old saved addresses still have
   // name/phone populated and we don't want to wipe that on their orders).
-  const userRow = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { fullName: true, phone: true, regionId: true, createdAt: true },
-  });
+  // Guests have no profile row — recipient identity then comes from the inline
+  // shippingAddress / guestContact instead (handled below).
+  const userRow = userId
+    ? await prisma.user.findUnique({
+        where: { id: userId },
+        select: { fullName: true, phone: true, regionId: true, createdAt: true },
+      })
+    : null;
   const profileFullName = (userRow?.fullName && userRow.fullName.trim()) || null;
   const profilePhone = userRow?.phone || null;
 
@@ -223,7 +238,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // Resolve the shipping address: a saved addressId or an inline shippingAddress.
   let resolvedAddress = null;
 
-  if (addressId) {
+  if (addressId && userId) {
     const saved = await prisma.address.findFirst({ where: { id: addressId, userId } });
     if (!saved) return { order: null, error: 'Address not found' };
     resolvedAddress = {
@@ -420,8 +435,12 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       // rules (active/window/global cap/per-user cap/new-users-only) in one place. Race
       // window on the per-user cap is narrowed but not fully closed without a unique index;
       // the global cap is closed by the atomic conditional UPDATE below.
+      // Per-user cap is only meaningful for a signed-in user. For guests (userId
+      // null) it can't be tracked across orders, so we skip the count and let
+      // assertPromoUsable apply the non-user rules; a `newUsersOnly` code still
+      // rejects a guest because userRow.createdAt is null (isWithinNewUserWindow).
       const userPriorUsage =
-        livePromo.usageLimitPerUser != null
+        livePromo.usageLimitPerUser != null && userId
           ? await tx.promoCodeUsage.count({ where: { promoCodeId: promoId, userId } })
           : 0;
       promoCodeService.assertPromoUsable(livePromo, {
@@ -456,7 +475,10 @@ async function createOrderCore(userId, params = {}, opts = {}) {
 
     const orderRecord = await tx.order.create({
       data: {
-        userId,
+        userId: userId ?? null,
+        guestName: isGuest ? guestContact?.fullName ?? resolvedAddress.fullName ?? null : null,
+        guestPhone: isGuest ? guestContact?.phone ?? resolvedAddress.phone ?? null : null,
+        guestEmail: isGuest ? guestContact?.email ?? null : null,
         orderMessage: orderMessage ?? null,
         clearCartOnPayment: clearCart,
         totalAmount: finalTotal,
@@ -535,7 +557,9 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       // Clear the cart only for a cart checkout (clearCart) paid up front (COD). Online
       // orders keep the cart until paid (cleared in confirmOrderPayment, also gated on
       // clearCartOnPayment). Buy Now (clearCart=false) never touches the cart.
-      ...(!isOnlinePayment && clearCart
+      // Guests have no server-side cart (clearCart is false for guest orders anyway),
+      // so only touch the cart for a signed-in user's cart checkout.
+      ...(!isOnlinePayment && clearCart && userId
         ? [
             tx.cartItem.deleteMany({ where: { cart: { userId } } }),
             tx.cart.updateMany({ where: { userId }, data: { orderMessage: null } }),
@@ -592,14 +616,19 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // Online payment isn't placed yet — defer the "order placed" notifications to payment
   // success. Both push and email go through the job queue (retried, off the request path).
   if (!isOnlinePayment) {
-    notify.orderPlaced(userId, createdOrderId);
+    // Push goes to the buyer's registered devices — only for signed-in users.
+    if (userId) notify.orderPlaced(userId, createdOrderId);
     notify.adminNewOrder({
       orderId: createdOrderId,
       orderNumber: payload.orderNumber,
       totalAmount: payload.totalAmount,
-      buyerId: userId,
+      buyerId: userId ?? null,
     });
-    notify.orderConfirmationEmail({ orderId: createdOrderId, to: order.user?.email });
+    // Confirmation email: user's account email, or the guest's provided email.
+    notify.orderConfirmationEmail({
+      orderId: createdOrderId,
+      to: order.user?.email || (isGuest ? guestContact?.email : null) || null,
+    });
   }
 
   return { order: payload, error: null };
@@ -673,6 +702,108 @@ async function buyNow(userId, input = {}, opts = {}) {
   );
 }
 
+/**
+ * Guest checkout: place an order WITHOUT an authenticated user. Line items come
+ * straight from the request body (guests have no server-side cart), and the
+ * recipient identity comes from the inline shippingAddress + email. Runs through
+ * the SAME createOrderCore as authed checkout, so pricing, region/currency,
+ * promo, inventory reservation and the order-status workflow are all identical —
+ * the only differences are userId is null and the contact is snapshotted into
+ * guest* fields (so the order can be back-linked to an account later).
+ *
+ * Payment is always COD for guests: online payment reconciliation
+ * (confirmOrderPayment) is scoped to a user, so there is no post-payment account
+ * to settle an anonymous online order against.
+ */
+async function createGuestOrder(guestInput = {}, opts = {}) {
+  const { items, orderMessage, shippingAddress, promoCode, email } = guestInput;
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return { order: null, error: 'No items to order' };
+  }
+  const lineItems = [];
+  for (const it of items) {
+    const qty = Number(it?.quantity);
+    if (!it || typeof it.productId !== 'string' || !Number.isInteger(qty) || qty < 1) {
+      return { order: null, error: 'Each item needs a productId and a positive quantity' };
+    }
+    lineItems.push({ productId: it.productId, quantity: qty, message: it.message ?? null });
+  }
+
+  if (!shippingAddress || typeof shippingAddress !== 'object') {
+    return { order: null, error: 'A shipping address is required' };
+  }
+  const guestFullName = trimOrNullStr(shippingAddress.fullName);
+  const guestPhone = trimOrNullStr(shippingAddress.phone);
+  if (!guestFullName) return { order: null, error: 'Full name is required' };
+  if (!guestPhone) return { order: null, error: 'Phone number is required' };
+  if (!trimOrNullStr(shippingAddress.streetAddress)) return { order: null, error: 'Address is required' };
+  if (!trimOrNullStr(shippingAddress.city)) return { order: null, error: 'City is required' };
+
+  // Products come straight from the client — only PUBLISHED items may be bought
+  // (mirrors the Buy Now guard; createOrderCore additionally checks stock).
+  const productIds = [...new Set(lineItems.map((it) => it.productId))];
+  const products = await prisma.product.findMany({
+    where: { id: { in: productIds } },
+    select: { id: true, status: true },
+  });
+  const statusById = new Map(products.map((p) => [p.id, p.status]));
+  for (const id of productIds) {
+    if (statusById.get(id) !== 'PUBLISHED') {
+      return { order: null, error: 'A product in your order is no longer available' };
+    }
+  }
+
+  const guestContact = {
+    fullName: guestFullName,
+    phone: guestPhone,
+    // Normalized to match auth's email handling so linkGuestOrdersToUser matches.
+    email: email ? String(email).trim().toLowerCase() || null : null,
+  };
+
+  return createOrderCore(
+    null,
+    {
+      lineItems,
+      orderMessage: orderMessage ?? null,
+      shippingAddress,
+      paymentMethod: 'COD',
+      promoCode,
+      clearCart: false,
+      guestContact,
+    },
+    opts
+  );
+}
+
+/**
+ * Back-link guest orders to a user account by matching guestEmail. Called after
+ * signup / signin / OAuth so a customer who checked out as a guest (with the same
+ * email) sees those orders in their history. Idempotent — only touches orders
+ * that are still unlinked (userId null). Best-effort; never throws to the caller.
+ */
+async function linkGuestOrdersToUser(userId, email) {
+  if (!userId || !email) return { linked: 0 };
+  const normalized = String(email).trim().toLowerCase();
+  if (!normalized) return { linked: 0 };
+
+  const res = await prisma.order.updateMany({
+    where: { userId: null, guestEmail: normalized },
+    data: { userId },
+  });
+
+  if (res.count > 0) {
+    // Re-point any promo-usage rows on the just-linked orders so per-user promo
+    // limits and usage history stay consistent now that the orders have an owner.
+    await prisma.promoCodeUsage.updateMany({
+      where: { userId: null, order: { userId, guestEmail: normalized } },
+      data: { userId },
+    });
+  }
+
+  return { linked: res.count };
+}
+
 async function getOrderById(orderId, userId = null) {
   const where = { id: orderId };
   if (userId) where.userId = userId;
@@ -714,6 +845,9 @@ async function getAllOrdersAdmin(page = 1, limit = 10, status = null, regionId =
     id: o.id,
     userId: o.userId,
     user: o.user,
+    guestName: o.guestName ?? null,
+    guestPhone: o.guestPhone ?? null,
+    guestEmail: o.guestEmail ?? null,
     orderMessage: o.orderMessage,
     totalAmount: decimalToNumber(o.totalAmount),
     currency: o.currency ?? 'AED',
@@ -737,6 +871,9 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
   const base = {
     id: order.id,
     userId: order.userId,
+    guestName: order.guestName ?? null,
+    guestPhone: order.guestPhone ?? null,
+    guestEmail: order.guestEmail ?? null,
     orderMessage: order.orderMessage,
     totalAmount: decimalToNumber(order.totalAmount),
     currency: order.currency ?? 'AED',
@@ -1465,6 +1602,8 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
 
 module.exports = {
   createOrder,
+  createGuestOrder,
+  linkGuestOrdersToUser,
   buyNow,
   getOrderById,
   getAllOrdersAdmin,

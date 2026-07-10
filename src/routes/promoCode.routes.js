@@ -3,7 +3,7 @@ const { body, param, query } = require('express-validator');
 const router = express.Router();
 
 const promoCodeController = require('../controllers/promoCode.controller');
-const { verifyToken } = require('../middleware/auth');
+const { verifyToken, optionalAuth } = require('../middleware/auth');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors, requireEitherBilingual } = require('../middleware/validate');
 const { publicLimiter, authLimiter } = require('../middleware/rateLimit');
@@ -223,10 +223,13 @@ router.get(
  *       401: { description: Unauthorized }
  *       404: { description: Promo code not found }
  */
+// Optional auth: signed-in customers get their per-user/new-user promo rules
+// applied; guests (no token) can still preview a code against body `items` for
+// guest checkout. Behavior for authenticated requests is unchanged.
 router.post(
   '/validate',
   authLimiter,
-  verifyToken,
+  optionalAuth,
   resolveRegion,
   validateCodeValidation,
   handleValidationErrors,
