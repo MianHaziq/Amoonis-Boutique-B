@@ -795,10 +795,18 @@ async function linkGuestOrdersToUser(userId, email) {
   if (res.count > 0) {
     // Re-point any promo-usage rows on the just-linked orders so per-user promo
     // limits and usage history stay consistent now that the orders have an owner.
-    await prisma.promoCodeUsage.updateMany({
-      where: { userId: null, order: { userId, guestEmail: normalized } },
-      data: { userId },
+    // PromoCodeUsage has no `order` relation — look up the order IDs first.
+    const linkedOrders = await prisma.order.findMany({
+      where: { userId, guestEmail: normalized },
+      select: { id: true },
     });
+    const orderIds = linkedOrders.map((o) => o.id);
+    if (orderIds.length > 0) {
+      await prisma.promoCodeUsage.updateMany({
+        where: { userId: null, orderId: { in: orderIds } },
+        data: { userId },
+      });
+    }
   }
 
   return { linked: res.count };
