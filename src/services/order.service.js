@@ -1,3 +1,4 @@
+const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
 const cartService = require('../services/cart.service');
 const notify = require('../notifications/notify');
@@ -5,6 +6,7 @@ const promoCodeService = require('../services/promoCode.service');
 const paymentService = require('../services/payment.service');
 const regionService = require('../services/region.service');
 const productService = require('../services/product.service');
+const vatService = require('../services/vat.service');
 
 function decimalToNumber(v) {
   return v == null ? null : Number(v);
@@ -77,6 +79,9 @@ function toOrderResponsePayload(order) {
     quantity: i.quantity,
     perProductMessage: i.perProductMessage,
     price: decimalToNumber(i.price),
+    vatRatePercent: decimalToNumber(i.vatRatePercent) ?? 0,
+    vatAmount: decimalToNumber(i.vatAmount) ?? 0,
+    selectedOptions: i.selectedOptions ?? null,
   }));
   return {
     id: order.id,
@@ -90,6 +95,14 @@ function toOrderResponsePayload(order) {
     orderMessage: order.orderMessage,
     totalAmount: decimalToNumber(order.totalAmount),
     discountAmount: decimalToNumber(order.discountAmount),
+    // Pre-VAT, pre-discount line sum (null for legacy orders placed before VAT).
+    subtotalAmount: decimalToNumber(order.subtotalAmount),
+    // Total VAT. For EXCLUSIVE VAT this is included in totalAmount; for INCLUSIVE VAT it's
+    // the portion already inside the prices. 0 when no VAT applied.
+    taxAmount: decimalToNumber(order.taxAmount) ?? 0,
+    vatAmount: decimalToNumber(order.taxAmount) ?? 0,
+    vatRatePercent: decimalToNumber(order.vatRatePercent),
+    vatInclusive: Boolean(order.vatInclusive),
     appliedPromoCode: order.appliedPromoCode ?? null,
     paymentMethod: order.paymentMethod ?? 'COD',
     paymentStatus: order.paymentStatus ?? 'UNPAID',
@@ -463,7 +476,23 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       finalDiscount = Math.round(Math.min(Number(finalDiscount), txSubtotal) * 100) / 100;
     }
 
-    const finalTotal = Math.round(Math.max(0, txSubtotal - (finalDiscount ?? 0)) * 100) / 100;
+    // VAT (server-trusted): resolve the live config inside the tx, SCOPED TO THIS ORDER'S
+    // REGION (each region has its own rate/inclusive/scope), and compute tax on the net
+    // (post-discount) taxable lines. For EXCLUSIVE VAT this adds to the total; for INCLUSIVE
+    // VAT the total is unchanged and we only record the tax portion. Uses the same live tx
+    // prices as the subtotal/discount above, so nothing drifts.
+    const vatConfig = await vatService.resolveConfigForOrder(orderRegionId, tx);
+    const vatLines = lineItems.map((item) => ({
+      productId: item.productId,
+      categoryId: productById.get(item.productId)?.categoryId ?? null,
+      quantity: item.quantity,
+      unitPrice: itemPriceById.get(item.productId) ?? 0,
+    }));
+    // vat.lines is aligned 1:1 with lineItems (same order), so index into it directly —
+    // keying by productId would collapse two lines of the same product with different options.
+    const vat = vatService.computeOrderVat(vatLines, finalDiscount ?? 0, vatConfig);
+
+    const finalTotal = vat.total;
 
     // Online payment cannot charge a 0 (or negative) amount — MyFatoorah rejects it. If a
     // promo wipes the entire total, the customer must use Cash on Delivery instead.
@@ -483,6 +512,10 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         clearCartOnPayment: clearCart,
         totalAmount: finalTotal,
         discountAmount: finalDiscount,
+        subtotalAmount: vat.subtotal,
+        taxAmount: vat.vatAmount,
+        vatRatePercent: vat.applied ? vat.ratePercent : null,
+        vatInclusive: vat.applied ? vat.inclusive : false,
         appliedPromoCode: promoResult?.promoCode.code ?? null,
         appliedPromoCodeId: promoResult?.promoCode.id ?? null,
         paymentMethod,
@@ -544,7 +577,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // server-trusted total above.
     await Promise.all([
       tx.orderItem.createMany({
-        data: lineItems.map((item) => ({
+        data: lineItems.map((item, idx) => ({
           orderId: orderRecord.id,
           productId: item.productId,
           productTitle: productById.get(item.productId)?.title ?? null,
@@ -552,6 +585,14 @@ async function createOrderCore(userId, params = {}, opts = {}) {
           quantity: item.quantity,
           perProductMessage: item.message ?? null,
           price: itemPriceById.get(item.productId) ?? 0,
+          vatRatePercent: vat.lines[idx]?.vatRatePercent ?? 0,
+          vatAmount: vat.lines[idx]?.vatAmount ?? 0,
+          // Json? column: Prisma requires the explicit DbNull sentinel (not JS
+          // null) to mean "store SQL NULL" rather than a JSON null literal.
+          selectedOptions:
+            item.selectedOptions && Object.keys(item.selectedOptions).length > 0
+              ? item.selectedOptions
+              : Prisma.DbNull,
         })),
       }),
       // Clear the cart only for a cart checkout (clearCart) paid up front (COD). Online
@@ -650,6 +691,7 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
     productId: it.productId,
     quantity: it.quantity,
     message: it.message ?? null,
+    selectedOptions: it.selectedOptions ?? null,
   }));
 
   return createOrderCore(
@@ -667,7 +709,7 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
  * because it runs through the same createOrderCore.
  */
 async function buyNow(userId, input = {}, opts = {}) {
-  const { productId, quantity = 1, addressId, shippingAddress, paymentMethod = 'COD', promoCode, message } = input;
+  const { productId, quantity = 1, addressId, shippingAddress, paymentMethod = 'COD', promoCode, message, selectedOptions } = input;
 
   if (!productId || typeof productId !== 'string') {
     return { order: null, error: 'productId is required' };
@@ -690,7 +732,7 @@ async function buyNow(userId, input = {}, opts = {}) {
   return createOrderCore(
     userId,
     {
-      lineItems: [{ productId, quantity: qty, message: message ?? null }],
+      lineItems: [{ productId, quantity: qty, message: message ?? null, selectedOptions: selectedOptions ?? null }],
       orderMessage: null,
       addressId,
       shippingAddress,
@@ -727,7 +769,12 @@ async function createGuestOrder(guestInput = {}, opts = {}) {
     if (!it || typeof it.productId !== 'string' || !Number.isInteger(qty) || qty < 1) {
       return { order: null, error: 'Each item needs a productId and a positive quantity' };
     }
-    lineItems.push({ productId: it.productId, quantity: qty, message: it.message ?? null });
+    lineItems.push({
+      productId: it.productId,
+      quantity: qty,
+      message: it.message ?? null,
+      selectedOptions: it.selectedOptions ?? null,
+    });
   }
 
   if (!shippingAddress || typeof shippingAddress !== 'object') {
@@ -858,6 +905,11 @@ async function getAllOrdersAdmin(page = 1, limit = 10, status = null, regionId =
     guestEmail: o.guestEmail ?? null,
     orderMessage: o.orderMessage,
     totalAmount: decimalToNumber(o.totalAmount),
+    subtotalAmount: decimalToNumber(o.subtotalAmount),
+    taxAmount: decimalToNumber(o.taxAmount) ?? 0,
+    vatAmount: decimalToNumber(o.taxAmount) ?? 0,
+    vatRatePercent: decimalToNumber(o.vatRatePercent),
+    vatInclusive: Boolean(o.vatInclusive),
     currency: o.currency ?? 'AED',
     status: o.status,
     region: o.region ? { id: o.region.id, code: o.region.code, name: o.region.name } : null,
@@ -884,6 +936,12 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
     guestEmail: order.guestEmail ?? null,
     orderMessage: order.orderMessage,
     totalAmount: decimalToNumber(order.totalAmount),
+    subtotalAmount: decimalToNumber(order.subtotalAmount),
+    discountAmount: decimalToNumber(order.discountAmount),
+    taxAmount: decimalToNumber(order.taxAmount) ?? 0,
+    vatAmount: decimalToNumber(order.taxAmount) ?? 0,
+    vatRatePercent: decimalToNumber(order.vatRatePercent),
+    vatInclusive: Boolean(order.vatInclusive),
     currency: order.currency ?? 'AED',
     status: order.status,
     createdAt: order.createdAt,
@@ -910,6 +968,9 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
       perProductMessage: i.perProductMessage,
       price: decimalToNumber(i.price),
       lineTotal: decimalToNumber(i.price) * i.quantity,
+      vatRatePercent: decimalToNumber(i.vatRatePercent) ?? 0,
+      vatAmount: decimalToNumber(i.vatAmount) ?? 0,
+      selectedOptions: i.selectedOptions ?? null,
       product: mapOrderItemProduct(i),
       createdAt: i.createdAt,
       updatedAt: i.updatedAt,

@@ -13,11 +13,12 @@ async function currencyFromReq(req) {
 async function addToCart(req, res, next) {
   try {
     const userId = req.userId;
-    const { productId, quantity, message } = req.body;
+    const { productId, quantity, message, selectedOptions } = req.body;
     const { cart, error: errMsg } = await cartService.addToCart(userId, {
       productId,
       quantity,
       message,
+      selectedOptions,
     });
     if (errMsg) return error(res, errMsg, 404);
     const data = await cartService.getCart(userId, await currencyFromReq(req));

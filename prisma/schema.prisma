@@ -39,6 +39,7 @@ model Region {
   promoCodes PromoCodeRegion[]
   users      User[]
   orders     Order[]
+  vatConfig  VatConfig?
 
   @@index([isActive])
   @@index([sortOrder])
@@ -257,6 +258,60 @@ model Settings {
 }
 
 // ============================================
+// VAT / TAX
+// ============================================
+
+/// Per-region VAT configuration — ONE ROW PER REGION (UAE 5%, KSA 15%, ...). The admin picks a
+/// region and sets its rate, whether it applies to ALL products / SPECIFIC_CATEGORIES /
+/// SPECIFIC_PRODUCTS, and whether prices are VAT-inclusive. When `inclusive` is true the
+/// catalogue price already contains the tax (nothing is added at checkout — the VAT portion is
+/// only extracted for reporting); when false the VAT is added on top of the (discounted) price
+/// at checkout. A region with no row here has VAT disabled (treated as a zero/disabled config).
+model VatConfig {
+  id          String       @id @default(uuid())
+  regionId    String       @unique
+  /// Master switch. When false, no VAT is ever applied regardless of the other fields.
+  enabled     Boolean      @default(false)
+  /// VAT rate in percent (0–100), e.g. 5.00 for UAE, 15.00 for KSA.
+  ratePercent Decimal      @default(0) @db.Decimal(5, 2)
+  /// True = catalogue prices already include this VAT (no addition at checkout).
+  inclusive   Boolean      @default(false)
+  appliesTo   VatAppliesTo @default(ALL_PRODUCTS)
+  updatedAt   DateTime     @updatedAt
+
+  region     Region              @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  products   VatConfigProduct[]
+  categories VatConfigCategory[]
+}
+
+/// Products the VAT applies to when appliesTo = SPECIFIC_PRODUCTS.
+model VatConfigProduct {
+  vatConfigId String
+  productId   String
+  createdAt   DateTime @default(now())
+
+  vatConfig VatConfig @relation(fields: [vatConfigId], references: [id], onDelete: Cascade)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([vatConfigId, productId])
+  @@index([productId])
+}
+
+/// Categories the VAT applies to when appliesTo = SPECIFIC_CATEGORIES. A product is taxed
+/// when its own category is listed here.
+model VatConfigCategory {
+  vatConfigId String
+  categoryId  String
+  createdAt   DateTime @default(now())
+
+  vatConfig VatConfig @relation(fields: [vatConfigId], references: [id], onDelete: Cascade)
+  category  Category  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([vatConfigId, categoryId])
+  @@index([categoryId])
+}
+
+// ============================================
 // CONTACT
 // ============================================
 
@@ -297,6 +352,7 @@ model Category {
   products            Product[]
   sectionCategories   SectionCategory[]
   promoCodeCategories PromoCodeCategory[]
+  vatConfigCategories VatConfigCategory[]
   regions             CategoryRegion[]
 
   @@index([title])
@@ -304,11 +360,11 @@ model Category {
 }
 
 model Product {
-  id              String        @id @default(uuid())
-  title           String
-  title_ar        String?
-  subtitle        String?
-  subtitle_ar     String?
+  id                 String        @id @default(uuid())
+  title              String
+  title_ar           String?
+  subtitle           String?
+  subtitle_ar        String?
   price              Decimal       @db.Decimal(10, 2)
   discountedPrice    Decimal?      @db.Decimal(10, 2)
   // Optional Saudi Riyal price override, entered manually by the admin (no
@@ -316,14 +372,14 @@ model Product {
   // pricing falls back to the AED price above for a Saudi-region request.
   priceSar           Decimal?      @db.Decimal(10, 2)
   discountedPriceSar Decimal?      @db.Decimal(10, 2)
-  quantity        Int           @default(0)
-  categoryId      String?
-  status          PublishStatus @default(DRAFT)
+  quantity           Int           @default(0)
+  categoryId         String?
+  status             PublishStatus @default(DRAFT)
   // Admin-controlled display order (drag-and-drop). Defaults to 0 so existing
   // products keep their createdAt-desc order until an admin reorders them.
-  sortOrder       Int           @default(0)
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  sortOrder          Int           @default(0)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
 
   category          Category?            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   images            ProductImage[]
@@ -333,6 +389,7 @@ model Product {
   orderItems        OrderItem[]
   sectionProducts   SectionProduct[]
   promoCodeProducts PromoCodeProduct[]
+  vatConfigProducts VatConfigProduct[]
   regions           ProductRegion[]
 
   @@index([categoryId])
@@ -345,29 +402,29 @@ model Product {
 }
 
 model ProductOption {
-  id         String   @id @default(uuid())
-  productId  String
-  title      String
-  title_ar   String?
-  options    String[]
-  options_ar String[] @default([])
+  id              String   @id @default(uuid())
+  productId       String
+  title           String
+  title_ar        String?
+  options         String[]
+  options_ar      String[] @default([])
   // Optional per-value image URLs, aligned by index with `options` (e.g. a
   // "Colour" option maps Blue/Pink/White to specific product photos). Empty by
   // default — purely additive, so existing API consumers (the mobile app) are
   // unaffected. An entry may be "" when a value has no dedicated image.
-  optionImages String[] @default([])
+  optionImages    String[] @default([])
   // Optional per-value swatch colours (CSS hex, e.g. "#c2185b" for a custom
   // "dark pink"), aligned by index with `options`. Let admins pick an exact
   // colour instead of relying on name→swatch guessing. Empty by default and
   // purely additive, so the mobile app (which doesn't read it) is unaffected.
-  optionColors String[] @default([])
+  optionColors    String[] @default([])
   // Optional per-value image SETS: a JSON array-of-arrays aligned by index with
   // `options`, so a value (e.g. a colour) can carry several photos. The first of
   // each set is mirrored into `optionImages` above, which the mobile app keeps
   // reading — so this is purely additive and mobile-safe. Null when unused.
   optionImageSets Json?
-  sortOrder  Int      @default(0)
-  createdAt  DateTime @default(now())
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
@@ -449,13 +506,16 @@ model Cart {
 }
 
 model CartItem {
-  id        String   @id @default(uuid())
-  cartId    String
-  productId String
-  quantity  Int      @default(1)
-  message   String?  @db.Text
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id              String   @id @default(uuid())
+  cartId          String
+  productId       String
+  quantity        Int      @default(1)
+  message         String?  @db.Text
+  /// Chosen variant, e.g. {"Colour":"Pink","Size":"M"} — keyed by the product's
+  /// ProductOption.title. Carried through to OrderItem.selectedOptions at checkout.
+  selectedOptions Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   cart    Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -488,6 +548,17 @@ model Order {
   orderMessage          String?       @db.Text
   totalAmount           Decimal       @db.Decimal(10, 2)
   discountAmount        Decimal?      @db.Decimal(10, 2)
+  /// Total VAT for this order (order currency). For EXCLUSIVE VAT this is added on top of the
+  /// net (discounted) amount and is part of totalAmount; for INCLUSIVE VAT it is the tax
+  /// portion already inside the line prices and is NOT added to totalAmount. 0 when no VAT.
+  taxAmount             Decimal       @default(0) @db.Decimal(10, 2)
+  /// Pre-VAT, pre-discount sum of live line prices (order currency). Null for legacy orders.
+  subtotalAmount        Decimal?      @db.Decimal(10, 2)
+  /// VAT rate snapshot (percent) applied at checkout. Null when no VAT applied.
+  vatRatePercent        Decimal?      @db.Decimal(5, 2)
+  /// Whether prices were VAT-inclusive at checkout (tax already inside the price). When true,
+  /// taxAmount is the portion inside totalAmount; when false it was added on top of the net.
+  vatInclusive          Boolean       @default(false)
   appliedPromoCode      String?
   appliedPromoCodeId    String?
   paymentMethod         PaymentMethod @default(COD)
@@ -550,6 +621,15 @@ model OrderItem {
   quantity          Int
   perProductMessage String?  @db.Text
   price             Decimal  @db.Decimal(10, 2)
+  /// VAT rate applied to this line (percent). 0/null when the line is untaxed (outside the
+  /// VAT scope, or VAT disabled).
+  vatRatePercent    Decimal? @db.Decimal(5, 2)
+  /// VAT amount for the whole line (quantity included), order currency. For inclusive VAT
+  /// this is the portion already inside `price`; for exclusive it was added on top.
+  vatAmount         Decimal? @db.Decimal(10, 2)
+  /// Variant chosen at add-to-cart time, snapshotted onto the order line (e.g.
+  /// {"Colour":"Pink"}). Null for orders placed before this was captured.
+  selectedOptions   Json?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -785,6 +865,13 @@ enum ManagerPermission {
 enum DiscountType {
   PERCENTAGE
   FIXED
+}
+
+/// Scope selector for the store-wide VAT config (mirrors PromoAppliesTo).
+enum VatAppliesTo {
+  ALL_PRODUCTS
+  SPECIFIC_PRODUCTS
+  SPECIFIC_CATEGORIES
 }
 
 enum PromoAppliesTo {

@@ -84,7 +84,7 @@ async function getOrCreateCart(userId) {
   return cart;
 }
 
-async function addToCart(userId, { productId, quantity = 1, message = null }) {
+async function addToCart(userId, { productId, quantity = 1, message = null, selectedOptions = undefined }) {
   const product = await prisma.product.findUnique({ where: { id: productId } });
   if (!product) return { cart: null, error: 'Product not found' };
 
@@ -117,6 +117,12 @@ async function addToCart(userId, { productId, quantity = 1, message = null }) {
       data: {
         quantity: existing.quantity + qty,
         ...(message !== undefined && { message: message || null }),
+        // Cart lines are still one-per-product (@@unique([cartId, productId])),
+        // not variant-aware — adding a different variant of an already-cart'd
+        // product overwrites the selection on that single line (last wins).
+        ...(selectedOptions !== undefined && {
+          selectedOptions: selectedOptions && Object.keys(selectedOptions).length > 0 ? selectedOptions : Prisma.DbNull,
+        }),
       },
     });
   } else {
@@ -126,6 +132,7 @@ async function addToCart(userId, { productId, quantity = 1, message = null }) {
         productId,
         quantity: qty,
         message: message || null,
+        selectedOptions: selectedOptions && Object.keys(selectedOptions).length > 0 ? selectedOptions : Prisma.DbNull,
       },
     });
   }
@@ -220,6 +227,7 @@ async function getCart(userId, currency = 'AED') {
     product: productService.applyRegionCurrency(productService.mapProduct(i.product), currency),
     quantity: i.quantity,
     message: i.message,
+    selectedOptions: i.selectedOptions ?? null,
     lineTotal: effectivePrice(i.product, currency) * i.quantity,
   }));
   const totalAmount = items.reduce((sum, i) => sum + i.lineTotal, 0);

@@ -774,6 +774,162 @@ async function getCategorySalesAnalytics(params) {
   };
 }
 
+/**
+ * Net revenue/quantity by product (excludes cancelled orders) — the same
+ * grouping convention as fetchCategorySales, one level down to product. Used
+ * to derive best/least-selling product rankings for the Analytics Export.
+ */
+async function fetchProductSales(range) {
+  return prisma.$queryRaw`
+    SELECT
+      p.id AS "productId",
+      p.title AS "productTitle",
+      COUNT(DISTINCT o.id)::int AS "orderCount",
+      COALESCE(SUM(oi.quantity * oi.price), 0) AS "revenue",
+      COALESCE(SUM(oi.quantity), 0)::bigint AS "unitsSold"
+    FROM "Order" o
+    INNER JOIN "OrderItem" oi ON oi."orderId" = o.id
+    INNER JOIN "Product" p ON p.id = oi."productId"
+    ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status <> 'CANCELLED'`] })}
+    GROUP BY p.id, p.title
+    ORDER BY COALESCE(SUM(oi.quantity * oi.price), 0) DESC NULLS LAST
+  `;
+}
+
+/**
+ * Best/least selling products over a date range. Mirrors getCategorySalesAnalytics's
+ * shape/conventions (same range resolution, same "excludes cancelled" rule).
+ */
+async function getProductSalesAnalytics(params) {
+  const w = resolveAnalyticsWindow(params);
+  if (w.error) return { error: w.error };
+  await attachRegionFilter(w.range, params);
+
+  const limit = Math.min(50, Math.max(1, parseInt(params?.limit, 10) || 10));
+  const rows = await fetchProductSales(w.range);
+  const list = (rows || []).map((row) => ({
+    productId: row.productId,
+    productTitle: row.productTitle || '(deleted product)',
+    orderCount: num(row.orderCount),
+    revenue: Math.round(num(row.revenue) * 100) / 100,
+    unitsSold: num(row.unitsSold),
+  }));
+
+  return {
+    preset: w.preset,
+    presetLabel: w.presetLabel,
+    range: rangeMetaPayload(w.range),
+    note: 'Revenue is the sum of line totals on non-cancelled orders only, same rule as category sales.',
+    bestSellers: list.slice(0, limit),
+    leastSellers: [...list].reverse().slice(0, limit),
+  };
+}
+
+/**
+ * Live catalog snapshot (no date range) — total sellable stock, low-stock and
+ * out-of-stock published products. Reuses the exact LOW_STOCK_THRESHOLD
+ * convention from report.service.buildStockReport (the daily digest email) so
+ * "low stock" means the same thing everywhere in the system.
+ */
+async function getInventoryAnalytics() {
+  const threshold = Math.max(0, parseInt(process.env.LOW_STOCK_THRESHOLD || '5', 10));
+
+  const [totalRow, lowStock, outOfStock] = await Promise.all([
+    prisma.product.aggregate({
+      where: { status: 'PUBLISHED' },
+      _sum: { quantity: true },
+      _count: { _all: true },
+    }),
+    prisma.product.findMany({
+      where: { status: 'PUBLISHED', quantity: { gt: 0, lte: threshold } },
+      select: { id: true, title: true, quantity: true },
+      orderBy: { quantity: 'asc' },
+      take: 200,
+    }),
+    prisma.product.findMany({
+      where: { status: 'PUBLISHED', quantity: 0 },
+      select: { id: true, title: true },
+      take: 200,
+    }),
+  ]);
+
+  return {
+    totalPublishedProducts: totalRow._count._all,
+    totalInventoryCount: totalRow._sum.quantity ?? 0,
+    lowStockThreshold: threshold,
+    lowStockProducts: lowStock,
+    outOfStockProducts: outOfStock,
+  };
+}
+
+/**
+ * Extended order KPIs over the range for the Analytics EXPORT (not shown on the
+ * live dashboard): highest/lowest order value, avg items per order, paid vs
+ * unpaid, COD vs online, unique + repeat customers, cancelled %. SQL aggregates
+ * (the range can be all_time / huge, so no in-memory scan). Uses the same
+ * buildOrderWhere scoping every other analytics query uses.
+ */
+async function getOrderInsights(params) {
+  const w = resolveAnalyticsWindow(params);
+  if (w.error) return { error: w.error };
+  await attachRegionFilter(w.range, params);
+  const range = w.range;
+
+  const [totalsRows, itemsRows, custRows] = await Promise.all([
+    prisma.$queryRaw`
+      SELECT
+        MAX("totalAmount") FILTER (WHERE status <> 'CANCELLED') AS "highest",
+        MIN("totalAmount") FILTER (WHERE status <> 'CANCELLED') AS "lowest",
+        COUNT(*) FILTER (WHERE "paymentStatus" = 'PAID')::int AS "paid",
+        COUNT(*) FILTER (WHERE "paymentStatus" = 'UNPAID')::int AS "unpaid",
+        COUNT(*) FILTER (WHERE "paymentStatus" = 'FAILED')::int AS "failed",
+        COUNT(*) FILTER (WHERE "paymentMethod" = 'COD')::int AS "cod",
+        COUNT(*) FILTER (WHERE "paymentMethod" = 'MYFATOORAH')::int AS "online",
+        COUNT(*)::int AS "totalAll",
+        COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelled"
+      FROM "Order"
+      ${buildOrderWhere(range)}
+    `,
+    prisma.$queryRaw`
+      SELECT COALESCE(SUM(oi.quantity), 0)::bigint AS "units", COUNT(DISTINCT o.id)::int AS "orders"
+      FROM "Order" o
+      INNER JOIN "OrderItem" oi ON oi."orderId" = o.id
+      ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status <> 'CANCELLED'`] })}
+    `,
+    prisma.$queryRaw`
+      SELECT COUNT(*)::int AS "unique", COUNT(*) FILTER (WHERE c > 1)::int AS "repeat"
+      FROM (
+        SELECT COALESCE("userId", "guestEmail", "guestPhone") AS k, COUNT(*) AS c
+        FROM "Order"
+        ${buildOrderWhere(range, { extra: [Prisma.sql`status <> 'CANCELLED'`, Prisma.sql`COALESCE("userId", "guestEmail", "guestPhone") IS NOT NULL`] })}
+        GROUP BY 1
+      ) t
+    `,
+  ]);
+
+  const t = totalsRows[0] || {};
+  const items = itemsRows[0] || {};
+  const cust = custRows[0] || {};
+  const orders = Number(items.orders) || 0;
+  const units = Number(items.units) || 0;
+  const totalAll = num(t.totalAll);
+
+  return {
+    highestOrderValue: num(t.highest),
+    lowestOrderValue: num(t.lowest),
+    averageItemsPerOrder: orders > 0 ? Math.round((units / orders) * 100) / 100 : 0,
+    paidOrders: num(t.paid),
+    unpaidOrders: num(t.unpaid),
+    failedOrders: num(t.failed),
+    codOrders: num(t.cod),
+    onlineOrders: num(t.online),
+    uniqueCustomers: num(cust.unique),
+    repeatCustomers: num(cust.repeat),
+    cancelledOrders: num(t.cancelled),
+    cancelledOrderPercentage: totalAll > 0 ? Math.round((num(t.cancelled) / totalAll) * 10000) / 100 : 0,
+  };
+}
+
 function listPresetDefinitions() {
   return Object.entries(PRESETS).map(([key, v]) => ({
     key,
@@ -787,6 +943,9 @@ module.exports = {
   getKpiAnalytics,
   getCategorySalesAnalytics,
   getDailySalesAnalytics,
+  getProductSalesAnalytics,
+  getInventoryAnalytics,
+  getOrderInsights,
   PRESETS: Object.keys(PRESETS),
   listPresetDefinitions,
 };

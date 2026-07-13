@@ -34,6 +34,7 @@ const userRoutes = require('./src/routes/user.routes');
 const userProfileRoutes = require('./src/routes/userProfile.routes');
 const contactRoutes = require('./src/routes/contact.routes');
 const settingsRoutes = require('./src/routes/settings.routes');
+const vatRoutes = require('./src/routes/vat.routes');
 const uploadRoutes = require('./src/routes/upload.routes');
 const categoryRoutes = require('./src/routes/category.routes');
 const productRoutes = require('./src/routes/product.routes');
@@ -70,7 +71,12 @@ app.use(helmet({
 }));
 app.use(cors({
   origin: true,
-  credentials: true
+  credentials: true,
+  // Exposes the export routes' filename to the browser — without this the
+  // JS response object hides Content-Disposition on cross-origin requests
+  // (frontend/backend run on different ports), even though the raw HTTP
+  // response carries it.
+  exposedHeaders: ['Content-Disposition'],
 }));
 // Capture the raw request body (used to verify the MyFatoorah webhook HMAC signature).
 app.use(express.json({
@@ -141,6 +147,7 @@ v1Router.use('/user', userProfileRoutes);
 v1Router.use('/users', userRoutes);
 v1Router.use('/contact', contactRoutes);
 v1Router.use('/settings', settingsRoutes);
+v1Router.use('/vat', vatRoutes);
 v1Router.use('/upload', uploadRoutes);
 v1Router.use('/categories', categoryRoutes);
 v1Router.use('/products', productRoutes);
@@ -163,6 +170,7 @@ app.use('/api/user', userProfileRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/vat', vatRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/products', productRoutes);

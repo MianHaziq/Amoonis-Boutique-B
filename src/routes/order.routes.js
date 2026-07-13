@@ -222,6 +222,7 @@ const guestCheckoutBody = [
   body('items.*.productId').isUUID().withMessage('Each item needs a valid productId'),
   body('items.*.quantity').isInt({ min: 1 }).withMessage('Each item quantity must be a positive integer'),
   body('items.*.message').optional({ nullable: true }).trim(),
+  body('items.*.selectedOptions').optional({ nullable: true }).isObject().withMessage('selectedOptions must be an object'),
   body('email').optional({ nullable: true }).trim().isEmail().withMessage('A valid email is required'),
   body('orderMessage').optional({ nullable: true }).trim(),
   body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
@@ -286,6 +287,7 @@ const buyNowBody = [
   body('shippingAddress').optional().isObject().withMessage('shippingAddress must be an object'),
   body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
   body('message').optional().trim(),
+  body('selectedOptions').optional({ nullable: true }).isObject().withMessage('selectedOptions must be an object'),
 ];
 router.post(
   '/buy-now',
@@ -567,6 +569,61 @@ router.get(
   ],
   handleValidationErrors,
   orderController.getAdminOrderHistory
+);
+
+/**
+ * @swagger
+ * /orders/export:
+ *   get:
+ *     summary: Export orders as Excel or PDF (admin/manager, ORDERS permission)
+ *     description: |
+ *       Streams a report of orders matching the filter directly as the response
+ *       body (`Content-Disposition: attachment`) — Excel (.xlsx, 3 sheets:
+ *       Summary/Orders/Order Items) or a landscape PDF (KPI cards + order-level
+ *       table + financial summary). `dateFrom`/`dateTo` are required; capped at
+ *       10,000 matching orders — narrow the range if exceeded.
+ *     tags: [Orders]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: query
+ *         name: dateFrom
+ *         required: true
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: dateTo
+ *         required: true
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, CANCELLED] }
+ *       - in: query
+ *         name: paymentStatus
+ *         schema: { type: string, enum: [UNPAID, PAID, FAILED] }
+ *       - in: query
+ *         name: region
+ *         schema: { type: string }
+ *       - in: query
+ *         name: format
+ *         required: true
+ *         schema: { type: string, enum: [xlsx, pdf, csv] }
+ *     responses:
+ *       200: { description: File stream (xlsx or pdf) }
+ *       400: { description: Missing/invalid filter, no matching orders, or too many matching orders }
+ */
+router.get(
+  '/export',
+  verifyAdminOrManager,
+  requireManagerPermission('ORDERS'),
+  [
+    query('dateFrom').isISO8601().withMessage('dateFrom is required (ISO 8601)'),
+    query('dateTo').isISO8601().withMessage('dateTo is required (ISO 8601)'),
+    query('status').optional().isIn(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']),
+    query('paymentStatus').optional().isIn(['UNPAID', 'PAID', 'FAILED']),
+    query('region').optional().isString().trim(),
+    query('format').isIn(['xlsx', 'pdf', 'csv']).withMessage('format must be xlsx, pdf or csv'),
+  ],
+  handleValidationErrors,
+  orderController.exportOrders
 );
 
 /**

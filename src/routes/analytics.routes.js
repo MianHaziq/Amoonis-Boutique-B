@@ -253,4 +253,56 @@ router.get(
   analyticsController.getDailySales
 );
 
+/**
+ * @swagger
+ * /admin/analytics/export:
+ *   get:
+ *     summary: Export the analytics dashboard as Excel or PDF (admin/manager, ANALYTICS permission)
+ *     description: |
+ *       Streams a report directly as the response body (`Content-Disposition:
+ *       attachment`) — Excel (.xlsx, sheets: Summary/Revenue/Sales by
+ *       Day/Categories/Products/Inventory/Orders by Status) or a landscape PDF
+ *       (KPI cards + hand-drawn revenue/category charts + summary tables).
+ *       Uses the same preset/from-to/region resolution as the other analytics
+ *       routes.
+ *     tags: [Admin analytics]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: query
+ *         name: preset
+ *         schema:
+ *           type: string
+ *           enum: [all_time, today, last_3_days, week, month, last_3_months, last_6_months, year, last_3_years]
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: region
+ *         schema: { type: string, example: SA }
+ *       - in: query
+ *         name: format
+ *         required: true
+ *         schema: { type: string, enum: [xlsx, pdf, csv] }
+ *     responses:
+ *       200: { description: File stream (xlsx or pdf) }
+ *       400: { description: Invalid preset or range }
+ */
+router.get(
+  '/export',
+  verifyAdminOrManager,
+  requireManagerPermission('ANALYTICS'),
+  [
+    query('preset').optional().isIn(presetValues),
+    query('from').optional().trim().isString(),
+    query('to').optional().trim().isString(),
+    query('region').optional().trim().isString(),
+    query('format').isIn(['xlsx', 'pdf', 'csv']).withMessage('format must be xlsx, pdf or csv'),
+  ],
+  handleValidationErrors,
+  analyticsController.exportAnalytics
+);
+
 module.exports = router;

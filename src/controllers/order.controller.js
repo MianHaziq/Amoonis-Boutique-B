@@ -1,6 +1,11 @@
 const orderService = require('../services/order.service');
 const paymentService = require('../services/payment.service');
 const regionService = require('../services/region.service');
+const { getOrdersForExport } = require('../services/export/orderExport.service');
+const { renderOrdersExcel } = require('../services/export/orderExcel.service');
+const { renderOrdersPdf } = require('../services/export/orderPdf.service');
+const { renderOrdersCsv } = require('../services/export/orderCsv.service');
+const { ordersFilename } = require('../services/export/filename.util');
 const { success, error } = require('../utils/response');
 
 async function createOrder(req, res, next) {
@@ -52,6 +57,33 @@ async function getOrderById(req, res, next) {
     const order = await orderService.getOrderById(id, canViewAnyOrder ? null : userId);
     if (!order) return error(res, 'Order not found', 404);
     return success(res, order, 'Order fetched successfully');
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /orders/export — admin/manager only (ORDERS permission). Streams an
+// Excel or PDF report of the filtered orders directly as the response body.
+async function exportOrders(req, res, next) {
+  try {
+    const { dateFrom, dateTo, status, paymentStatus, region, format } = req.query;
+    const result = await getOrdersForExport({
+      dateFrom,
+      dateTo,
+      status: status || undefined,
+      paymentStatus: paymentStatus || undefined,
+      regionCode: region || undefined,
+    });
+    if (result.error) return error(res, result.error, 400);
+
+    const filename = ordersFilename(format);
+    if (format === 'xlsx') {
+      await renderOrdersExcel(res, result, filename);
+    } else if (format === 'csv') {
+      renderOrdersCsv(res, result, filename);
+    } else {
+      await renderOrdersPdf(res, result, filename);
+    }
   } catch (err) {
     next(err);
   }
@@ -335,6 +367,7 @@ module.exports = {
   createGuestOrder,
   buyNow,
   getOrderById,
+  exportOrders,
   getAllOrdersAdmin,
   getMyOrderHistory,
   getAdminOrderHistory,

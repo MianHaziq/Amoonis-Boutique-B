@@ -20,6 +20,7 @@ const addValidation = [
   body('productId').isUUID().withMessage('Valid productId is required'),
   body('quantity').optional().isInt({ min: 1 }),
   body('message').optional().trim(),
+  body('selectedOptions').optional({ nullable: true }).isObject().withMessage('selectedOptions must be an object'),
 ];
 
 const updateQtyValidation = [
