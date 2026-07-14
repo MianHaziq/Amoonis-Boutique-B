@@ -534,6 +534,29 @@ router.get('/search', publicLimiter, attachStaffIfPresent, resolveRegion, search
 
 /**
  * @swagger
+ * /products/best-sellers:
+ *   get:
+ *     summary: List best-selling products (paginated)
+ *     description: Ranks products by units sold from non-cancelled orders in the requesting region. Falls back to the "Gift Boxes" showcase category, then the plain catalogue, so the result is never empty. Public, rate-limited. Honors the X-Region header (storefront) and region/status filters (staff).
+ *     tags: [Products]
+ *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 10 }
+ *       - $ref: '#/components/parameters/RegionFilterQuery'
+ *       - $ref: '#/components/parameters/StatusFilterQuery'
+ *     responses:
+ *       200:
+ *         description: Paginated best-selling products
+ */
+router.get('/best-sellers', publicLimiter, attachStaffIfPresent, resolveRegion, pagination, handleValidationErrors, productController.getBestSellers);
+
+/**
+ * @swagger
  * /products/category/{categoryId}:
  *   get:
  *     summary: List products by category (paginated)

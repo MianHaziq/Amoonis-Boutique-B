@@ -1,3 +1,4 @@
+const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
 const { autoTranslate, autoTranslateMany, fillBilingualGapsFromTwin } = require('../utils/bilingual');
 const regionService = require('./region.service');
@@ -654,6 +655,111 @@ async function getProductsByCategory(categoryId, page = 1, limit = 10, visibilit
   return getAllProducts(page, limit, categoryId, visibility);
 }
 
+// Best Sellers ranks products by real units sold (non-cancelled orders) in the
+// requesting region. Bounds how many candidate ids we ever assemble across the
+// ranked-sales + fallback tiers below — plenty for any realistic catalog size
+// while keeping the query cost bounded.
+const BEST_SELLERS_CANDIDATE_CAP = 300;
+
+/** Product ids ranked by total units sold (non-cancelled orders), most-sold first.
+ *  Scoped to a region when one is given; combined across all regions otherwise
+ *  (staff/admin reads). Capped at BEST_SELLERS_CANDIDATE_CAP rows. */
+async function getBestSellingProductIds(regionId) {
+  const regionFilter = regionId ? Prisma.sql`AND o."regionId" = ${regionId}` : Prisma.empty;
+  const rows = await prisma.$queryRaw`
+    SELECT oi."productId" AS "productId"
+    FROM "OrderItem" oi
+    INNER JOIN "Order" o ON o.id = oi."orderId"
+    WHERE o.status <> 'CANCELLED' AND oi."productId" IS NOT NULL ${regionFilter}
+    GROUP BY oi."productId"
+    ORDER BY SUM(oi.quantity) DESC
+    LIMIT ${BEST_SELLERS_CANDIDATE_CAP}
+  `;
+  return rows.map((r) => r.productId);
+}
+
+/**
+ * "Best Selling" product feed for the storefront filter. Ranked by real sales first;
+ * falls back so the result is never empty even for a brand-new store or region with
+ * no orders yet:
+ *   1. Products ranked by units sold (non-cancelled orders) in this region.
+ *   2. The "Gift Boxes" showcase category — the same one the homepage's Best
+ *      Sellers section falls back to — filling any remaining slots.
+ *   3. The plain catalogue in its standard default order, filling whatever's left.
+ * Each tier excludes ids already picked by an earlier tier, so the merged id list
+ * has no duplicates. Paginates over that merged, deterministic id list exactly
+ * like getAllProducts, so "load more" behaves the same as every other source.
+ */
+async function getBestSellers(page = 1, limit = 10, visibility = {}) {
+  const safePage = Math.min(MAX_PAGE, Math.max(1, page));
+  const take = Math.min(100, Math.max(1, limit));
+  const skip = (safePage - 1) * take;
+  const where = buildVisibilityWhere(visibility);
+
+  const candidateIds = await getBestSellingProductIds(visibility.regionId ?? null);
+  const seen = new Set(candidateIds);
+
+  if (candidateIds.length < BEST_SELLERS_CANDIDATE_CAP) {
+    const giftCategory = await prisma.category.findFirst({
+      where: { title: { contains: 'gift box', mode: 'insensitive' } },
+      select: { id: true },
+    });
+    if (giftCategory) {
+      const fallbackProducts = await prisma.product.findMany({
+        where: { ...where, categoryId: giftCategory.id, id: { notIn: [...seen] } },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+        select: { id: true },
+        take: BEST_SELLERS_CANDIDATE_CAP - candidateIds.length,
+      });
+      for (const p of fallbackProducts) {
+        candidateIds.push(p.id);
+        seen.add(p.id);
+      }
+    }
+  }
+
+  if (candidateIds.length < BEST_SELLERS_CANDIDATE_CAP) {
+    const rest = await prisma.product.findMany({
+      where: { ...where, id: { notIn: [...seen] } },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+      select: { id: true },
+      take: BEST_SELLERS_CANDIDATE_CAP - candidateIds.length,
+    });
+    for (const p of rest) {
+      candidateIds.push(p.id);
+      seen.add(p.id);
+    }
+  }
+
+  const total = candidateIds.length;
+  const pageIds = candidateIds.slice(skip, skip + take);
+
+  let items = [];
+  if (pageIds.length > 0) {
+    const products = await prisma.product.findMany({
+      where: { ...where, id: { in: pageIds } },
+      include: {
+        category: { select: { id: true, title: true } },
+        images: { orderBy: { sortOrder: 'asc' } },
+        descriptions: { orderBy: { sortOrder: 'asc' } },
+        productOptions: { orderBy: { sortOrder: 'asc' } },
+        ...(visibility.isStaff ? REGION_INCLUDE : {}),
+      },
+    });
+    const orderIndex = new Map(pageIds.map((id, i) => [id, i]));
+    products.sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
+    items = products.map(mapProduct);
+  }
+
+  return {
+    items: visibility.isStaff ? items : items.map((p) => applyRegionCurrency(p, visibility.currency)),
+    total,
+    page: safePage,
+    limit: take,
+    totalPages: Math.ceil(total / take),
+  };
+}
+
 // Cap the search term length so a pathological 10k-char query can't build a huge
 // ILIKE pattern. Anything past this can't add meaningful signal for a catalog search.
 const MAX_SEARCH_LEN = 100;
@@ -750,6 +856,7 @@ module.exports = {
   reorderProducts,
   getAllProducts,
   getProductsByCategory,
+  getBestSellers,
   searchProducts,
   getProductById,
   mapProduct,
