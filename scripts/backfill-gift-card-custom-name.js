@@ -96,11 +96,17 @@ const SKIP_TITLES = new Set(['test01']);
       process.exit(0);
     }
 
-    await prisma.$transaction(
-      updates.map((u) => prisma.product.update({ where: { id: u.id }, data: u.data }))
-    );
+    // Independent per-row updates (no cross-row invariant), each already atomic
+    // on its own — avoids Prisma's interactive-transaction timeout, which is too
+    // tight for a batch of sequential updates over a remote (Railway) connection.
+    // Idempotent script, so a partial run is safe to just re-run.
+    let updated = 0;
+    for (const u of updates) {
+      await prisma.product.update({ where: { id: u.id }, data: u.data });
+      updated += 1;
+    }
 
-    console.log(`✓ Updated ${updates.length}/${products.length} products.`);
+    console.log(`✓ Updated ${updated}/${products.length} products.`);
     if (assumed.length > 0) {
       console.log(`⚠ Assumed (no confident client-site match, please double-check): ${assumed.join(', ')}`);
     }
