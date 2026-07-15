@@ -21,6 +21,8 @@ const addValidation = [
   body('quantity').optional().isInt({ min: 1 }),
   body('message').optional().trim(),
   body('selectedOptions').optional({ nullable: true }).isObject().withMessage('selectedOptions must be an object'),
+  body('giftCardSelected').optional().isBoolean().withMessage('giftCardSelected must be a boolean'),
+  body('customName').optional({ nullable: true }).trim().isLength({ max: 120 }).withMessage('customName must be 120 characters or fewer'),
 ];
 
 const updateQtyValidation = [

@@ -144,6 +144,18 @@ const createValidation = [
     .custom(isTwoDecimals).withMessage('discountedPriceSar supports at most 2 decimal places').bail()
     .custom((val, { req }) => req.body.priceSar == null || Number(val) <= Number(req.body.priceSar))
     .withMessage('discountedPriceSar cannot exceed priceSar'),
+  // Gift card add-on — free personalized message, toggled per product.
+  body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
+  body('giftCardExtraPrice')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('giftCardExtraPrice must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('giftCardExtraPrice supports at most 2 decimal places'),
+  // Custom name add-on — customer types a name at add-to-cart time for this extra fee.
+  body('customNameEnabled').optional().isBoolean().withMessage('customNameEnabled must be a boolean'),
+  body('customNamePrice')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('customNamePrice must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('customNamePrice supports at most 2 decimal places'),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
   body('categoryId').optional({ values: 'null' }).isUUID().withMessage('categoryId must be a valid UUID when provided'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
@@ -216,6 +228,18 @@ const updateValidation = [
     .custom(isTwoDecimals).withMessage('discountedPriceSar supports at most 2 decimal places').bail()
     .custom((val, { req }) => req.body.priceSar == null || Number(val) <= Number(req.body.priceSar))
     .withMessage('discountedPriceSar cannot exceed priceSar'),
+  // Gift card add-on — free personalized message, toggled per product.
+  body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
+  body('giftCardExtraPrice')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('giftCardExtraPrice must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('giftCardExtraPrice supports at most 2 decimal places'),
+  // Custom name add-on — customer types a name at add-to-cart time for this extra fee.
+  body('customNameEnabled').optional().isBoolean().withMessage('customNameEnabled must be a boolean'),
+  body('customNamePrice')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('customNamePrice must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('customNamePrice supports at most 2 decimal places'),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
   // CAT-3: optional optimistic-concurrency token. When the admin panel sends the
   // updatedAt it last read, a stale overwrite (someone else edited meanwhile, or stock

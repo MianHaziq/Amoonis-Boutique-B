@@ -679,6 +679,10 @@ const options = {
             },
             price: { type: 'number', example: 49.99 },
             discountedPrice: { type: 'number', nullable: true, example: 39.99 },
+            giftCardEnabled: { type: 'boolean', example: true, description: 'Offer a free gift-card message add-on at add-to-cart time.' },
+            giftCardExtraPrice: { type: 'number', nullable: true, example: 0, description: 'Extra charge for the gift card add-on (usually 0/free).' },
+            customNameEnabled: { type: 'boolean', example: false, description: 'Offer a paid "add a custom name" add-on at add-to-cart time.' },
+            customNamePrice: { type: 'number', nullable: true, example: 10, description: 'Extra charge when the custom name add-on is selected.' },
             quantity: { type: 'integer', minimum: 0, example: 10, description: 'Stock quantity for admin tracking' },
             categoryId: {
               type: 'string',

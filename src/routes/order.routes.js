@@ -198,6 +198,8 @@ router.post(
  *                     productId: { type: string, format: uuid }
  *                     quantity: { type: integer, minimum: 1 }
  *                     message: { type: string }
+ *                     giftCardSelected: { type: boolean, description: 'Only charged/kept if the product has giftCardEnabled.' }
+ *                     customName: { type: string, description: 'Only charged/kept if the product has customNameEnabled.' }
  *               shippingAddress:
  *                 type: object
  *                 required: [fullName, phone, streetAddress, city]
@@ -223,6 +225,8 @@ const guestCheckoutBody = [
   body('items.*.quantity').isInt({ min: 1 }).withMessage('Each item quantity must be a positive integer'),
   body('items.*.message').optional({ nullable: true }).trim(),
   body('items.*.selectedOptions').optional({ nullable: true }).isObject().withMessage('selectedOptions must be an object'),
+  body('items.*.giftCardSelected').optional().isBoolean().withMessage('giftCardSelected must be a boolean'),
+  body('items.*.customName').optional({ nullable: true }).trim().isLength({ max: 120 }).withMessage('customName must be 120 characters or fewer'),
   body('email').optional({ nullable: true }).trim().isEmail().withMessage('A valid email is required'),
   body('orderMessage').optional({ nullable: true }).trim(),
   body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
@@ -275,6 +279,8 @@ router.post(
  *               shippingAddress: { type: object }
  *               promoCode: { type: string }
  *               message: { type: string }
+ *               giftCardSelected: { type: boolean, description: 'Only charged/kept if the product has giftCardEnabled.' }
+ *               customName: { type: string, description: 'Only charged/kept if the product has customNameEnabled.' }
  *     responses:
  *       201: { description: Order placed (or AWAITING_PAYMENT for online) }
  *       400: { description: Validation / availability error }
@@ -288,6 +294,8 @@ const buyNowBody = [
   body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
   body('message').optional().trim(),
   body('selectedOptions').optional({ nullable: true }).isObject().withMessage('selectedOptions must be an object'),
+  body('giftCardSelected').optional().isBoolean().withMessage('giftCardSelected must be a boolean'),
+  body('customName').optional({ nullable: true }).trim().isLength({ max: 120 }).withMessage('customName must be 120 characters or fewer'),
 ];
 router.post(
   '/buy-now',

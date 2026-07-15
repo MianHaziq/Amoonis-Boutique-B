@@ -84,7 +84,14 @@ async function getOrCreateCart(userId) {
   return cart;
 }
 
-async function addToCart(userId, { productId, quantity = 1, message = null, selectedOptions = undefined }) {
+async function addToCart(userId, {
+  productId,
+  quantity = 1,
+  message = null,
+  selectedOptions = undefined,
+  giftCardSelected = undefined,
+  customName = undefined,
+}) {
   const product = await prisma.product.findUnique({ where: { id: productId } });
   if (!product) return { cart: null, error: 'Product not found' };
 
@@ -111,6 +118,13 @@ async function addToCart(userId, { productId, quantity = 1, message = null, sele
     };
   }
 
+  // Only honor gift-card/custom-name selections the product actually offers — a
+  // tampered request claiming an add-on the product doesn't have is silently dropped.
+  const effectiveGiftCardSelected =
+    giftCardSelected !== undefined ? !!giftCardSelected && !!product.giftCardEnabled : undefined;
+  const effectiveCustomName =
+    customName !== undefined ? (product.customNameEnabled ? (String(customName || '').trim() || null) : null) : undefined;
+
   if (existing) {
     await prisma.cartItem.update({
       where: { id: existing.id },
@@ -123,6 +137,8 @@ async function addToCart(userId, { productId, quantity = 1, message = null, sele
         ...(selectedOptions !== undefined && {
           selectedOptions: selectedOptions && Object.keys(selectedOptions).length > 0 ? selectedOptions : Prisma.DbNull,
         }),
+        ...(effectiveGiftCardSelected !== undefined && { giftCardSelected: effectiveGiftCardSelected }),
+        ...(effectiveCustomName !== undefined && { customName: effectiveCustomName }),
       },
     });
   } else {
@@ -133,6 +149,8 @@ async function addToCart(userId, { productId, quantity = 1, message = null, sele
         quantity: qty,
         message: message || null,
         selectedOptions: selectedOptions && Object.keys(selectedOptions).length > 0 ? selectedOptions : Prisma.DbNull,
+        giftCardSelected: effectiveGiftCardSelected ?? false,
+        customName: effectiveCustomName ?? null,
       },
     });
   }
@@ -228,7 +246,12 @@ async function getCart(userId, currency = 'AED') {
     quantity: i.quantity,
     message: i.message,
     selectedOptions: i.selectedOptions ?? null,
-    lineTotal: effectivePrice(i.product, currency) * i.quantity,
+    giftCardSelected: i.giftCardSelected,
+    customName: i.customName,
+    lineTotal:
+      (effectivePrice(i.product, currency) +
+        productService.optionExtraCharge(i.product, { giftCardSelected: i.giftCardSelected, customName: i.customName })) *
+      i.quantity,
   }));
   const totalAmount = items.reduce((sum, i) => sum + i.lineTotal, 0);
   return {

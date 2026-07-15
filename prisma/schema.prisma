@@ -372,6 +372,14 @@ model Product {
   // pricing falls back to the AED price above for a Saudi-region request.
   priceSar           Decimal?      @db.Decimal(10, 2)
   discountedPriceSar Decimal?      @db.Decimal(10, 2)
+  // Gift card add-on: free personalized message at add-to-cart time. Enabled per
+  // product to mirror the client site, where most (but not all) products offer it.
+  giftCardEnabled    Boolean       @default(false)
+  giftCardExtraPrice Decimal?      @db.Decimal(10, 2)
+  // Custom name add-on: customer types a name at add-to-cart time for an extra
+  // fee. Only enabled on select products (mugs/cups/boxes), never bouquets.
+  customNameEnabled  Boolean       @default(false)
+  customNamePrice    Decimal?      @db.Decimal(10, 2)
   quantity           Int           @default(0)
   categoryId         String?
   status             PublishStatus @default(DRAFT)
@@ -514,6 +522,10 @@ model CartItem {
   /// Chosen variant, e.g. {"Colour":"Pink","Size":"M"} — keyed by the product's
   /// ProductOption.title. Carried through to OrderItem.selectedOptions at checkout.
   selectedOptions Json?
+  // Gift card / custom name add-on selections. `message` above doubles as the
+  // gift card's personalized note when giftCardSelected is true.
+  giftCardSelected Boolean @default(false)
+  customName       String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -630,6 +642,10 @@ model OrderItem {
   /// Variant chosen at add-to-cart time, snapshotted onto the order line (e.g.
   /// {"Colour":"Pink"}). Null for orders placed before this was captured.
   selectedOptions   Json?
+  // Gift card / custom name add-on selections, snapshotted at order time.
+  // perProductMessage above doubles as the gift card's note when set.
+  giftCardSelected  Boolean  @default(false)
+  customName        String?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 

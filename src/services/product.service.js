@@ -79,6 +79,8 @@ function mapProduct(product) {
     discountedPrice,
     priceSar,
     discountedPriceSar,
+    giftCardExtraPrice,
+    customNamePrice,
     images,
     descriptions,
     productOptions,
@@ -98,6 +100,8 @@ function mapProduct(product) {
     // this via applyRegionCurrency, so admin reads always get both currencies raw.
     priceSar: decimalToNumber(priceSar),
     discountedPriceSar: decimalToNumber(discountedPriceSar),
+    giftCardExtraPrice: decimalToNumber(giftCardExtraPrice),
+    customNamePrice: decimalToNumber(customNamePrice),
     images: imagesList.map((i) => i.url),
     image: imagesList[0]?.url ?? null,
     descriptions: descriptionsList,
@@ -146,6 +150,22 @@ function regionPriceFromRow(row, currency) {
     price: priceSar != null ? priceSar : price,
     discountedPrice: discountedPriceSar != null ? discountedPriceSar : discountedPrice,
   };
+}
+
+// Extra charge for a cart/order line's gift-card + custom-name selections. Only
+// counts a selection if the PRODUCT actually has that option enabled — a client
+// sending giftCardSelected/customName for a product that doesn't offer it is
+// silently worth 0, never charged. Shared by cart.service and order.service so
+// the enabled-AND-selected guard lives in exactly one place.
+function optionExtraCharge(productRow, { giftCardSelected, customName } = {}) {
+  let extra = 0;
+  if (giftCardSelected && productRow.giftCardEnabled) {
+    extra += decimalToNumber(productRow.giftCardExtraPrice) ?? 0;
+  }
+  if (customName && productRow.customNameEnabled) {
+    extra += decimalToNumber(productRow.customNamePrice) ?? 0;
+  }
+  return extra;
 }
 
 function normalizeDescriptions(descriptions) {
@@ -310,6 +330,10 @@ async function createProduct(data) {
         discountedPrice: data.discountedPrice ?? null,
         priceSar: data.priceSar != null ? Number(data.priceSar) : null,
         discountedPriceSar: data.discountedPriceSar != null ? Number(data.discountedPriceSar) : null,
+        giftCardEnabled: !!data.giftCardEnabled,
+        giftCardExtraPrice: data.giftCardExtraPrice != null ? Number(data.giftCardExtraPrice) : null,
+        customNameEnabled: !!data.customNameEnabled,
+        customNamePrice: data.customNamePrice != null ? Number(data.customNamePrice) : null,
         quantity,
         status,
         ...(regionIds.length > 0
@@ -450,6 +474,14 @@ async function updateProduct(id, data) {
     }),
     ...(data.discountedPriceSar !== undefined && {
       discountedPriceSar: data.discountedPriceSar != null ? Number(data.discountedPriceSar) : null,
+    }),
+    ...(data.giftCardEnabled !== undefined && { giftCardEnabled: !!data.giftCardEnabled }),
+    ...(data.giftCardExtraPrice !== undefined && {
+      giftCardExtraPrice: data.giftCardExtraPrice != null ? Number(data.giftCardExtraPrice) : null,
+    }),
+    ...(data.customNameEnabled !== undefined && { customNameEnabled: !!data.customNameEnabled }),
+    ...(data.customNamePrice !== undefined && {
+      customNamePrice: data.customNamePrice != null ? Number(data.customNamePrice) : null,
     }),
     ...(data.quantity !== undefined && { quantity: Math.max(0, parseInt(data.quantity, 10) || 0) }),
     ...(data.categoryId !== undefined && { categoryId: data.categoryId || null }),
@@ -862,5 +894,6 @@ module.exports = {
   mapProduct,
   applyRegionCurrency,
   regionPriceFromRow,
+  optionExtraCharge,
   decimalToNumber,
 };

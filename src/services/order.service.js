@@ -82,6 +82,8 @@ function toOrderResponsePayload(order) {
     vatRatePercent: decimalToNumber(i.vatRatePercent) ?? 0,
     vatAmount: decimalToNumber(i.vatAmount) ?? 0,
     selectedOptions: i.selectedOptions ?? null,
+    giftCardSelected: i.giftCardSelected ?? false,
+    customName: i.customName ?? null,
   }));
   return {
     id: order.id,
@@ -296,9 +298,25 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       priceSar: true,
       discountedPriceSar: true,
       quantity: true,
+      giftCardEnabled: true,
+      giftCardExtraPrice: true,
+      customNameEnabled: true,
+      customNamePrice: true,
     },
   });
   const productById = new Map(productRows.map((p) => [p.id, p]));
+
+  // Only honor gift-card/custom-name selections the product actually offers — mirrors
+  // the same guard in cart.service.addToCart. Needed again here because an order can
+  // also be placed via buyNow (bypassing the cart) or from a stale cart snapshot.
+  const sanitizedLineItems = lineItems.map((item) => {
+    const p = productById.get(item.productId);
+    return {
+      ...item,
+      giftCardSelected: !!item.giftCardSelected && !!p?.giftCardEnabled,
+      customName: p?.customNameEnabled ? String(item.customName || '').trim() || null : null,
+    };
+  });
 
   // Early stock visibility check — surfaces OUT_OF_STOCK before order creation so the
   // mobile app can show a friendly message instead of completing checkout for unavailable
@@ -337,7 +355,18 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     const { price, discountedPrice } = productService.regionPriceFromRow(productRow, orderCurrency);
     return discountedPrice != null && discountedPrice < price ? discountedPrice : price;
   }
-  const livePriceById = new Map(productRows.map((p) => [p.id, livePrice(p)]));
+  // Effective per-unit price INCLUDING this line's gift-card/custom-name add-ons —
+  // depends on the line's own selection, not just the product, so it's built from
+  // lineItems (one entry per productId) rather than cached purely per-product.
+  const livePriceById = new Map(
+    sanitizedLineItems.map((item) => {
+      const p = productById.get(item.productId);
+      const extra = p
+        ? productService.optionExtraCharge(p, { giftCardSelected: item.giftCardSelected, customName: item.customName })
+        : 0;
+      return [item.productId, livePrice(p) + extra];
+    })
+  );
 
   const promoItems = lineItems.map((item) => ({
     productId: item.productId,
@@ -378,14 +407,24 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         discountedPrice: true,
         priceSar: true,
         discountedPriceSar: true,
+        giftCardEnabled: true,
+        giftCardExtraPrice: true,
+        customNameEnabled: true,
+        customNamePrice: true,
       },
     });
+    const txProductById = new Map(livePriceRows.map((p) => [p.id, p]));
     // Same effective-price rule as cart/livePrice (M2): discounted only when lower,
-    // resolved to the order's region currency (AED or the manual SAR override).
+    // resolved to the order's region currency (AED or the manual SAR override) — PLUS
+    // this line's gift-card/custom-name add-on, same as livePriceById above.
     const txPriceById = new Map(
-      livePriceRows.map((p) => {
+      sanitizedLineItems.map((item) => {
+        const p = txProductById.get(item.productId);
+        if (!p) return [item.productId, null];
         const { price, discountedPrice } = productService.regionPriceFromRow(p, orderCurrency);
-        return [p.id, discountedPrice != null && discountedPrice < price ? discountedPrice : price];
+        const base = discountedPrice != null && discountedPrice < price ? discountedPrice : price;
+        const extra = productService.optionExtraCharge(p, { giftCardSelected: item.giftCardSelected, customName: item.customName });
+        return [item.productId, base + extra];
       })
     );
 
@@ -577,7 +616,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // server-trusted total above.
     await Promise.all([
       tx.orderItem.createMany({
-        data: lineItems.map((item, idx) => ({
+        data: sanitizedLineItems.map((item, idx) => ({
           orderId: orderRecord.id,
           productId: item.productId,
           productTitle: productById.get(item.productId)?.title ?? null,
@@ -593,6 +632,8 @@ async function createOrderCore(userId, params = {}, opts = {}) {
             item.selectedOptions && Object.keys(item.selectedOptions).length > 0
               ? item.selectedOptions
               : Prisma.DbNull,
+          giftCardSelected: !!item.giftCardSelected,
+          customName: item.customName ?? null,
         })),
       }),
       // Clear the cart only for a cart checkout (clearCart) paid up front (COD). Online
@@ -692,6 +733,8 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
     quantity: it.quantity,
     message: it.message ?? null,
     selectedOptions: it.selectedOptions ?? null,
+    giftCardSelected: it.giftCardSelected ?? false,
+    customName: it.customName ?? null,
   }));
 
   return createOrderCore(
@@ -709,7 +752,18 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
  * because it runs through the same createOrderCore.
  */
 async function buyNow(userId, input = {}, opts = {}) {
-  const { productId, quantity = 1, addressId, shippingAddress, paymentMethod = 'COD', promoCode, message, selectedOptions } = input;
+  const {
+    productId,
+    quantity = 1,
+    addressId,
+    shippingAddress,
+    paymentMethod = 'COD',
+    promoCode,
+    message,
+    selectedOptions,
+    giftCardSelected,
+    customName,
+  } = input;
 
   if (!productId || typeof productId !== 'string') {
     return { order: null, error: 'productId is required' };
@@ -732,7 +786,14 @@ async function buyNow(userId, input = {}, opts = {}) {
   return createOrderCore(
     userId,
     {
-      lineItems: [{ productId, quantity: qty, message: message ?? null, selectedOptions: selectedOptions ?? null }],
+      lineItems: [{
+        productId,
+        quantity: qty,
+        message: message ?? null,
+        selectedOptions: selectedOptions ?? null,
+        giftCardSelected: giftCardSelected ?? false,
+        customName: customName ?? null,
+      }],
       orderMessage: null,
       addressId,
       shippingAddress,
@@ -774,6 +835,8 @@ async function createGuestOrder(guestInput = {}, opts = {}) {
       quantity: qty,
       message: it.message ?? null,
       selectedOptions: it.selectedOptions ?? null,
+      giftCardSelected: it.giftCardSelected ?? false,
+      customName: it.customName ?? null,
     });
   }
 
@@ -971,6 +1034,8 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
       vatRatePercent: decimalToNumber(i.vatRatePercent) ?? 0,
       vatAmount: decimalToNumber(i.vatAmount) ?? 0,
       selectedOptions: i.selectedOptions ?? null,
+      giftCardSelected: i.giftCardSelected ?? false,
+      customName: i.customName ?? null,
       product: mapOrderItemProduct(i),
       createdAt: i.createdAt,
       updatedAt: i.updatedAt,
