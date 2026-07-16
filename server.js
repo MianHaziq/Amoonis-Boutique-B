@@ -48,6 +48,7 @@ const promoCodeRoutes = require('./src/routes/promoCode.routes');
 const addressRoutes = require('./src/routes/address.routes');
 const notificationRoutes = require('./src/routes/notification.routes');
 const jobsRoutes = require('./src/routes/jobs.routes');
+const reviewRoutes = require('./src/routes/review.routes');
 const errorHandler = require('./src/middleware/errorHandler');
 const { startJobs, stopJobs } = require('./src/jobs');
 
@@ -161,6 +162,7 @@ v1Router.use('/promo-codes', promoCodeRoutes);
 v1Router.use('/user/addresses', addressRoutes);
 v1Router.use('/notifications', notificationRoutes);
 v1Router.use('/admin/jobs', jobsRoutes);
+v1Router.use('/reviews', reviewRoutes);
 
 app.use('/api/v1', v1Router);
 

@@ -19,7 +19,7 @@ const {
  * /settings/public:
  *   get:
  *     summary: Get public settings
- *     description: Returns settings needed for the frontend (e.g. hidden pages for navbar). No auth required.
+ *     description: Returns settings needed for the frontend (e.g. hidden pages for navbar, whether guest reviews are allowed). No auth required.
  *     tags: [Settings]
  *     responses:
  *       200:
@@ -28,7 +28,7 @@ const {
  *           application/json:
  *             example:
  *               success: true
- *               data: { hiddenPages: [] }
+ *               data: { hiddenPages: [], maintenanceMode: false, allowGuestReviews: true }
  */
 router.get('/public', getPublicSettings);
 
@@ -63,6 +63,10 @@ router.get('/', verifyAdminOrManager, requireManagerPermission('SETTINGS'), getS
  *             type: object
  *             properties:
  *               hiddenPages: { type: array, items: { type: string }, example: [] }
+ *               allowGuestReviews:
+ *                 type: boolean
+ *                 description: When false, only signed-in customers can submit product reviews.
+ *                 example: true
  *     responses:
  *       200:
  *         description: Settings updated

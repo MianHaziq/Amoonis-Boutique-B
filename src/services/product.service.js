@@ -136,6 +136,44 @@ function applyRegionCurrency(mapped, currency) {
 }
 
 /**
+ * Batches a single groupBy aggregate query for however many mapped products are
+ * passed in, then merges `avgRating`/`reviewCount` onto each — one round trip per
+ * page/list, never per-row. Products with no reviews get avgRating: null,
+ * reviewCount: 0. Mutates and returns the same array for convenience.
+ *
+ * Defensive: falls back to null/0 (rather than throwing) if the Review table/
+ * client isn't available yet — e.g. this code has shipped but the reviews
+ * migration hasn't been deployed to this particular environment yet. Product
+ * reads must never break because of that rollout ordering.
+ */
+async function attachRatingAggregates(mappedProducts) {
+  const ids = mappedProducts.map((p) => p.id).filter(Boolean);
+  if (ids.length === 0) return mappedProducts;
+
+  let byProductId = new Map();
+  try {
+    const groups = await prisma.review.groupBy({
+      by: ['productId'],
+      where: { productId: { in: ids } },
+      _avg: { rating: true },
+      _count: { _all: true },
+    });
+    byProductId = new Map(
+      groups.map((g) => [g.productId, { avgRating: Number(g._avg.rating.toFixed(2)), reviewCount: g._count._all }])
+    );
+  } catch (err) {
+    console.error('[reviews] rating aggregate unavailable, defaulting to null/0:', err.message);
+  }
+
+  for (const p of mappedProducts) {
+    const agg = byProductId.get(p.id);
+    p.avgRating = agg?.avgRating ?? null;
+    p.reviewCount = agg?.reviewCount ?? 0;
+  }
+  return mappedProducts;
+}
+
+/**
  * Same resolution as applyRegionCurrency, but works directly on a raw Prisma product
  * row (Decimal fields) instead of an already-mapped product — used where only the
  * numeric price is needed (order totals, cart line totals), not the full product shape.
@@ -672,6 +710,7 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null, visibilit
   ]);
 
   const mapped = items.map(mapProduct);
+  await attachRatingAggregates(mapped);
   return {
     // Storefront-only: overlay the requesting region's currency (AED/SAR) so `price`/
     // `discountedPrice` are already correct for the region. Staff/admin keep raw fields.
@@ -781,6 +820,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
     const orderIndex = new Map(pageIds.map((id, i) => [id, i]));
     products.sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
     items = products.map(mapProduct);
+    await attachRatingAggregates(items);
   }
 
   return {
@@ -853,6 +893,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
   ]);
 
   const mappedResults = items.map(mapProduct);
+  await attachRatingAggregates(mappedResults);
   return {
     items: visibility.isStaff
       ? mappedResults
@@ -878,6 +919,7 @@ async function getProductById(id, visibility = {}) {
   });
   if (!product) return null;
   const mapped = mapProduct(product);
+  await attachRatingAggregates([mapped]);
   return visibility.isStaff ? mapped : applyRegionCurrency(mapped, visibility.currency);
 }
 

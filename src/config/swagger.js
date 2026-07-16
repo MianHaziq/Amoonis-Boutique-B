@@ -45,7 +45,7 @@ const options = {
           '',
           '### Permission keys (JSON strings, uppercase)',
           '',
-          'PRODUCTS · ORDERS · CATEGORIES · SECTIONS · BANNERS · CONTACT · SETTINGS · PROMO_CODES · ANALYTICS · REGIONS',
+          'PRODUCTS · ORDERS · CATEGORIES · SECTIONS · BANNERS · CONTACT · SETTINGS · PROMO_CODES · ANALYTICS · REGIONS · REVIEWS',
           '',
           'You can assign several at once (for example orders **and** products).',
           '',
@@ -93,6 +93,16 @@ const options = {
         name: 'Contact Admin',
         description:
           'Admin / manager view of user-submitted contacts. Requires **ADMIN** or **MANAGER** with the **CONTACT** permission. **GET /contact/admin/issues** lists submissions with the sender\'s user details (name, email, phone) embedded.',
+      },
+      {
+        name: 'Reviews',
+        description:
+          'Public product star-rating + written reviews. **GET /reviews/product/:productId** — paginated list plus `avgRating`/`reviewCount`. **POST /reviews/product/:productId** — signed-in (JWT optional) or guest; guests need `guestName` + `guestEmail` and are only accepted while the admin-controlled **allowGuestReviews** setting is on.',
+      },
+      {
+        name: 'Reviews Admin',
+        description:
+          'Admin / manager moderation of customer reviews. Requires **ADMIN** or **MANAGER** with the **REVIEWS** permission. **GET /reviews/admin** lists every review across all products; **DELETE /reviews/admin/:id** removes any of them.',
       },
     ],
     components: {
@@ -174,7 +184,7 @@ const options = {
         },
         ManagerPermissionKey: {
           type: 'string',
-          enum: ['PRODUCTS', 'ORDERS', 'CATEGORIES', 'SECTIONS', 'BANNERS', 'CONTACT', 'SETTINGS', 'PROMO_CODES', 'ANALYTICS', 'REGIONS'],
+          enum: ['PRODUCTS', 'ORDERS', 'CATEGORIES', 'SECTIONS', 'BANNERS', 'CONTACT', 'SETTINGS', 'PROMO_CODES', 'ANALYTICS', 'REGIONS', 'REVIEWS'],
           description:
             'Area of the admin API this manager may access. Send these exact uppercase values in `managerPermissions` arrays. Admins bypass checks.',
         },
@@ -547,6 +557,21 @@ const options = {
               items: { type: 'object', properties: { field: { type: 'string' }, message: { type: 'string' } } },
               description: 'Validation errors when present',
             },
+          },
+        },
+        Review: {
+          type: 'object',
+          description: 'A customer star rating + written review for a product',
+          properties: {
+            id: { type: 'string', format: 'uuid' },
+            productId: { type: 'string', format: 'uuid' },
+            userId: { type: 'string', format: 'uuid', nullable: true },
+            rating: { type: 'integer', minimum: 1, maximum: 5, example: 5 },
+            comment: { type: 'string', example: 'Beautifully arranged, loved it!' },
+            reviewerName: { type: 'string', example: 'Sara Ahmed' },
+            reviewerAvatar: { type: 'string', nullable: true },
+            isGuest: { type: 'boolean' },
+            createdAt: { type: 'string', format: 'date-time' },
           },
         },
         Category: {
@@ -1482,6 +1507,7 @@ const options = {
     './src/routes/promoCode.routes.js',
     './src/routes/address.routes.js',
     './src/routes/contact.routes.js',
+    './src/routes/review.routes.js',
   ],
 };
 

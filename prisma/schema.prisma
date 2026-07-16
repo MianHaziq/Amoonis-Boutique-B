@@ -140,6 +140,7 @@ model User {
   promoCodeUsages PromoCodeUsage[]
   userContacts    UserContact[]
   refreshTokens   RefreshToken[]
+  reviews         Review[]
 
   region Region? @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
@@ -254,6 +255,10 @@ model Settings {
   currency        String   @default("USD")
   maintenanceMode Boolean  @default(false)
   hiddenPages     String[] @default([])
+  /// Master switch for the product-reviews feature. When true (default), anyone —
+  /// signed in or not — can submit a review (guests provide name + email). When
+  /// false, only signed-in customers can submit; guest submissions are rejected.
+  allowGuestReviews Boolean @default(true)
   updatedAt       DateTime @updatedAt
 }
 
@@ -399,6 +404,7 @@ model Product {
   promoCodeProducts PromoCodeProduct[]
   vatConfigProducts VatConfigProduct[]
   regions           ProductRegion[]
+  reviews           Review[]
 
   @@index([categoryId])
   @@index([title])
@@ -407,6 +413,30 @@ model Product {
   @@index([status, createdAt])
   // Serves the admin-ordered list: WHERE status=? ORDER BY sortOrder ASC, createdAt DESC.
   @@index([status, sortOrder])
+}
+
+/// A customer star-rating + written review for a product. Either `userId` is set
+/// (signed-in reviewer) or `guestName`/`guestEmail` are set (guest reviewer, only
+/// accepted when Settings.allowGuestReviews is true) — never both, never neither.
+/// Published immediately (no pending/approval state) — admins moderate after the
+/// fact by deleting any review via the admin Reviews page.
+model Review {
+  id         String   @id @default(uuid())
+  productId  String
+  userId     String?
+  guestName  String?
+  guestEmail String?
+  rating     Int
+  comment    String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([productId])
+  @@index([productId, createdAt])
+  @@index([userId])
 }
 
 model ProductOption {
@@ -876,6 +906,7 @@ enum ManagerPermission {
   PROMO_CODES
   ANALYTICS
   REGIONS
+  REVIEWS
 }
 
 enum DiscountType {

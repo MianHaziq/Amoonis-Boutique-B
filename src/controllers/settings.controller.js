@@ -31,11 +31,11 @@ const getPublicSettings = async (req, res, next) => {
   try {
     let settings = await prisma.settings.findUnique({
       where: { id: 'default' },
-      select: { hiddenPages: true, maintenanceMode: true },
+      select: { hiddenPages: true, maintenanceMode: true, allowGuestReviews: true },
     });
 
     if (!settings) {
-      settings = { hiddenPages: [], maintenanceMode: false };
+      settings = { hiddenPages: [], maintenanceMode: false, allowGuestReviews: true };
     }
 
     return success(res, settings, 'Public settings fetched successfully');
@@ -57,6 +57,7 @@ const updateSettings = async (req, res, next) => {
       currency,
       maintenanceMode,
       hiddenPages,
+      allowGuestReviews,
     } = req.body;
 
     const data = {};
@@ -66,6 +67,7 @@ const updateSettings = async (req, res, next) => {
     if (currency !== undefined) data.currency = currency;
     if (maintenanceMode !== undefined) data.maintenanceMode = maintenanceMode;
     if (hiddenPages !== undefined) data.hiddenPages = hiddenPages;
+    if (allowGuestReviews !== undefined) data.allowGuestReviews = Boolean(allowGuestReviews);
 
     const settings = await prisma.settings.upsert({
       where: { id: 'default' },
