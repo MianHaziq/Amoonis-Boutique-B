@@ -225,11 +225,17 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   const profilePhone = userRow?.phone || null;
 
   // Region the order is placed in: explicit X-Region header wins, then the user's
-  // home region, then the system default. Stamped on the order for regional analytics.
-  let orderRegionId = userRow?.regionId || null;
+  // home region (only if it's still active — a stale regionId from a since-hidden
+  // region must not get stamped onto a new order), then the system default. Stamped
+  // on the order for regional analytics.
+  let orderRegionId = null;
   if (opts.regionCode) {
     const resolved = await regionService.resolveRegion(opts.regionCode);
     if (resolved) orderRegionId = resolved.id;
+  }
+  if (!orderRegionId && userRow?.regionId) {
+    const userRegion = await regionService.getRegionById(userRow.regionId);
+    if (userRegion?.isActive) orderRegionId = userRegion.id;
   }
   if (!orderRegionId) {
     const def = await regionService.getDefaultRegion();

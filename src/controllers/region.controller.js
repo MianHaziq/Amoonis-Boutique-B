@@ -38,6 +38,7 @@ async function updateRegion(req, res, next) {
     return success(res, region, 'Region updated successfully', 200);
   } catch (err) {
     if (err.code === 'VALIDATION') return error(res, err.message, 400);
+    if (err.code === 'LAST_ACTIVE_REGION') return error(res, err.message, 409);
     if (err.code === 'P2002') return error(res, 'A region with this code already exists', 409);
     if (err.code === 'P2025') return error(res, 'Region not found', 404);
     next(err);

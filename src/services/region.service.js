@@ -189,6 +189,34 @@ async function updateRegion(id, data) {
   if (data.isActive !== undefined) payload.isActive = !!data.isActive;
   if (data.sortOrder !== undefined) payload.sortOrder = Number(data.sortOrder);
 
+  const nextActive = data.isActive !== undefined ? !!data.isActive : existing.isActive;
+  const isDeactivating = existing.isActive && !nextActive;
+
+  // Reject only a genuine contradiction: explicitly promoting a region that ISN'T
+  // already default to default while it is (or is becoming) inactive. Re-submitting
+  // the existing default flag unchanged while deactivating a region that was already
+  // default is NOT a contradiction — the admin form always echoes both checkboxes on
+  // every save, so that combination just means "hide it", and is auto-resolved below
+  // by promoting a replacement default rather than rejected.
+  if (data.isDefault === true && !existing.isDefault && !nextActive) {
+    throw Object.assign(
+      new Error('An inactive region cannot be set as the default region.'),
+      { code: 'VALIDATION' }
+    );
+  }
+
+  // A region can only be hidden while at least one other region stays visible —
+  // otherwise the storefront would have nowhere to fall back to.
+  if (isDeactivating) {
+    const otherActiveCount = await prisma.region.count({ where: { isActive: true, id: { not: id } } });
+    if (otherActiveCount === 0) {
+      throw Object.assign(
+        new Error('Cannot hide the only active region. Activate another region first.'),
+        { code: 'LAST_ACTIVE_REGION' }
+      );
+    }
+  }
+
   const region = await prisma.$transaction(async (tx) => {
     if (data.isDefault === true) {
       await tx.region.updateMany({ data: { isDefault: false }, where: { isDefault: true, id: { not: id } } });
@@ -196,6 +224,41 @@ async function updateRegion(id, data) {
     } else if (data.isDefault === false) {
       payload.isDefault = false;
     }
+
+    if (isDeactivating) {
+      // A default region can never sit inactive — if this one was default, promote a
+      // replacement (lowest sortOrder among the remaining active regions) before it
+      // loses isActive. Overrides whatever the Case A/B logic above set.
+      if (existing.isDefault) {
+        payload.isDefault = false;
+        const replacement = await tx.region.findFirst({
+          where: { isActive: true, id: { not: id } },
+          orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+        });
+        if (!replacement) {
+          // Race: another request deactivated the last other region between our
+          // pre-check above and here — abort, the transaction rolls back atomically.
+          throw Object.assign(
+            new Error('Cannot hide the only active region. Activate another region first.'),
+            { code: 'LAST_ACTIVE_REGION' }
+          );
+        }
+        await tx.region.update({ where: { id: replacement.id }, data: { isDefault: true } });
+      }
+
+      // Anyone whose home region is the one being hidden moves to wherever the
+      // default now lands — never leave a user pointed at an invisible region.
+      const currentDefault =
+        (await tx.region.findFirst({ where: { isDefault: true, isActive: true, id: { not: id } } })) ??
+        (await tx.region.findFirst({
+          where: { isActive: true, id: { not: id } },
+          orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }],
+        }));
+      if (currentDefault) {
+        await tx.user.updateMany({ where: { regionId: id }, data: { regionId: currentDefault.id } });
+      }
+    }
+
     return tx.region.update({ where: { id }, data: payload, select: REGION_SELECT });
   });
   invalidateCache();

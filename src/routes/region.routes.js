@@ -134,7 +134,7 @@ router.post(
  *                 message: { type: string }
  *                 data: { $ref: '#/components/schemas/Region' }
  *       404: { description: Region not found }
- *       409: { description: Code already in use }
+ *       409: { description: Code already in use, or hiding this region would leave zero active regions }
  */
 router.put(
   '/:id',

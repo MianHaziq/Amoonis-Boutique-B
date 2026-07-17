@@ -22,6 +22,7 @@
     "test:promo-verify": "node scripts/promo-verify.js",
     "test:vat": "node scripts/vat-verify.js",
     "test:vat-integration": "node scripts/vat-integration-test.js",
+    "test:region-hide": "node scripts/region-hide-verify.js",
     "kill-port-5000": "powershell -ExecutionPolicy Bypass -File scripts/kill-port-5000.ps1",
     "migrate:fix-p3009": "node scripts/fix-p3009-ecommerce-migration.js"
   },
