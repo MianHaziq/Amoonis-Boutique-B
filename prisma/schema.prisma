@@ -26,6 +26,11 @@ model Region {
   // Drives storefront price display, order currency, and which orders are
   // eligible for online payment (see payment.service's configured currency).
   currency  String   @default("AED")
+  // Legal entity name shown in the storefront footer's copyright line for this
+  // region (e.g. "AMOON BLOOM Trading L.L.C S.O.C™"). Null falls back to the
+  // frontend's default siteConfig.legalEntity, so existing regions keep working
+  // without an admin having to backfill this.
+  legalEntity String?
   isDefault Boolean  @default(false)
   isActive  Boolean  @default(true)
   sortOrder Int      @default(0)

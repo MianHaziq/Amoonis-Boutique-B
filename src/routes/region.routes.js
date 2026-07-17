@@ -20,6 +20,8 @@ const createValidation = [
   body('name_ar').optional().isString().trim(),
   body('currency').optional().isString().trim().isLength({ min: 3, max: 3 })
     .withMessage('currency must be a 3-letter ISO code (e.g. AED, SAR)'),
+  body('legalEntity').optional({ nullable: true }).isString().trim().isLength({ max: 200 })
+    .withMessage('legalEntity must be a string up to 200 characters'),
   body('isDefault').optional().isBoolean(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),
@@ -32,6 +34,8 @@ const updateValidation = [
   body('name_ar').optional().isString().trim(),
   body('currency').optional().isString().trim().isLength({ min: 3, max: 3 })
     .withMessage('currency must be a 3-letter ISO code (e.g. AED, SAR)'),
+  body('legalEntity').optional({ nullable: true }).isString().trim().isLength({ max: 200 })
+    .withMessage('legalEntity must be a string up to 200 characters'),
   body('isDefault').optional().isBoolean(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),
