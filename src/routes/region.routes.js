@@ -24,6 +24,8 @@ const createValidation = [
     .withMessage('legalEntity must be a string up to 200 characters'),
   body('shippingFlatRate').optional({ nullable: true }).isFloat({ min: 0 })
     .withMessage('shippingFlatRate must be a non-negative number'),
+  body('iso2').optional({ nullable: true }).isString().trim().isLength({ min: 2, max: 2 })
+    .withMessage('iso2 must be a 2-letter country code (e.g. AE, SA)'),
   body('isDefault').optional().isBoolean(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),
@@ -40,6 +42,8 @@ const updateValidation = [
     .withMessage('legalEntity must be a string up to 200 characters'),
   body('shippingFlatRate').optional({ nullable: true }).isFloat({ min: 0 })
     .withMessage('shippingFlatRate must be a non-negative number'),
+  body('iso2').optional({ nullable: true }).isString().trim().isLength({ min: 2, max: 2 })
+    .withMessage('iso2 must be a 2-letter country code (e.g. AE, SA)'),
   body('isDefault').optional().isBoolean(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),

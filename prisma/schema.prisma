@@ -35,6 +35,11 @@ model Region {
   // no fee has been configured yet — orders ship free until an admin sets one
   // (matches the pre-existing de-facto behavior, so nothing regresses).
   shippingFlatRate Decimal? @db.Decimal(10, 2)
+  // ISO 3166-1 alpha-2 code (e.g. "AE", "SA") — renders the region's flag in the
+  // storefront's country/region pickers. Null shows a neutral placeholder until
+  // an admin sets it (deliberately not required — regions worked without a flag
+  // before this field existed).
+  iso2 String? @db.VarChar(2)
   isDefault Boolean  @default(false)
   isActive  Boolean  @default(true)
   sortOrder Int      @default(0)

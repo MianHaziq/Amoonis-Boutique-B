@@ -22,6 +22,7 @@ const REGION_SELECT = {
   currency: true,
   legalEntity: true,
   shippingFlatRate: true,
+  iso2: true,
   isDefault: true,
   isActive: true,
   sortOrder: true,
@@ -41,6 +42,16 @@ function parseShippingFlatRate(value) {
     throw Object.assign(new Error('shippingFlatRate must be a non-negative number'), { code: 'VALIDATION' });
   }
   return n;
+}
+
+/** Blank/null/undefined -> null (no flag configured yet); otherwise exactly 2 letters. */
+function parseIso2(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const normalized = String(value).trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(normalized)) {
+    throw Object.assign(new Error('iso2 must be exactly 2 letters (e.g. "AE", "SA")'), { code: 'VALIDATION' });
+  }
+  return normalized;
 }
 
 async function loadCache(force = false) {
@@ -163,6 +174,7 @@ async function createRegion(data) {
         currency: data.currency ? String(data.currency).trim().toUpperCase() : 'AED',
         legalEntity: data.legalEntity != null ? String(data.legalEntity).trim() || null : null,
         shippingFlatRate: parseShippingFlatRate(data.shippingFlatRate),
+        iso2: parseIso2(data.iso2),
         isDefault: makeDefault,
         isActive: data.isActive === undefined ? true : !!data.isActive,
         sortOrder: data.sortOrder != null ? Number(data.sortOrder) : 0,
@@ -201,6 +213,7 @@ async function updateRegion(id, data) {
   if (data.shippingFlatRate !== undefined) {
     payload.shippingFlatRate = parseShippingFlatRate(data.shippingFlatRate);
   }
+  if (data.iso2 !== undefined) payload.iso2 = parseIso2(data.iso2);
   if (data.isActive !== undefined) payload.isActive = !!data.isActive;
   if (data.sortOrder !== undefined) payload.sortOrder = Number(data.sortOrder);
 
