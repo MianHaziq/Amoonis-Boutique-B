@@ -56,11 +56,20 @@ function mapAddress(a, profile = {}) {
     state: a.state ?? null,
     postalCode: a.postalCode ?? null,
     country: a.country ?? profile.addressCountry ?? null,
+    area: a.area ?? null,
+    deliveryZoneId: a.deliveryZoneId ?? null,
+    deliveryZone: a.deliveryZone
+      ? { id: a.deliveryZone.id, name: a.deliveryZone.name, name_ar: a.deliveryZone.name_ar ?? null }
+      : null,
     isDefault: a.isDefault,
     createdAt: a.createdAt,
     updatedAt: a.updatedAt,
   };
 }
+
+const DELIVERY_ZONE_INCLUDE = {
+  deliveryZone: { select: { id: true, name: true, name_ar: true } },
+};
 
 // Pulls the contact + region defaults from the user profile in one read.
 async function loadProfileDefaults(client, userId) {
@@ -87,6 +96,7 @@ async function listAddresses(userId) {
     prisma.address.findMany({
       where: { userId },
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
+      include: DELIVERY_ZONE_INCLUDE,
     }),
     loadProfileDefaults(prisma, userId),
   ]);
@@ -95,14 +105,14 @@ async function listAddresses(userId) {
 
 async function getAddressById(userId, addressId) {
   const [row, profile] = await Promise.all([
-    prisma.address.findFirst({ where: { id: addressId, userId } }),
+    prisma.address.findFirst({ where: { id: addressId, userId }, include: DELIVERY_ZONE_INCLUDE }),
     loadProfileDefaults(prisma, userId),
   ]);
   return row ? mapAddress(row, profile) : null;
 }
 
 async function createAddress(userId, data) {
-  const { label, fullName, phone, streetAddress, apartment, city, state, postalCode, country } = data;
+  const { label, fullName, phone, streetAddress, apartment, city, state, postalCode, country, area, deliveryZoneId } = data;
   let makeDefault = Boolean(data.isDefault);
 
   return runWithDefaultRetry(() =>
@@ -142,8 +152,11 @@ async function createAddress(userId, data) {
           state: trimOrNull(state),
           postalCode: trimOrNull(postalCode),
           country: countryFinal,
+          area: trimOrNull(area),
+          deliveryZoneId: trimOrNull(deliveryZoneId),
           isDefault: makeDefault,
         },
+        include: DELIVERY_ZONE_INCLUDE,
       });
 
       return mapAddress(row, profile);
@@ -152,7 +165,7 @@ async function createAddress(userId, data) {
 }
 
 async function updateAddress(userId, addressId, data) {
-  const { label, fullName, phone, streetAddress, apartment, city, state, postalCode, country, isDefault } = data;
+  const { label, fullName, phone, streetAddress, apartment, city, state, postalCode, country, area, deliveryZoneId, isDefault } = data;
 
   const patch = {};
   if (label !== undefined) patch.label = trimOrNull(label);
@@ -164,6 +177,8 @@ async function updateAddress(userId, addressId, data) {
   if (state !== undefined) patch.state = trimOrNull(state);
   if (postalCode !== undefined) patch.postalCode = trimOrNull(postalCode);
   if (country !== undefined) patch.country = trimOrNull(country);
+  if (area !== undefined) patch.area = trimOrNull(area);
+  if (deliveryZoneId !== undefined) patch.deliveryZoneId = trimOrNull(deliveryZoneId);
   if (isDefault !== undefined) patch.isDefault = Boolean(isDefault);
 
   if (Object.keys(patch).length === 0) return null;
@@ -181,7 +196,7 @@ async function updateAddress(userId, addressId, data) {
         });
         if (result.count === 0) return null;
         const [row, profile] = await Promise.all([
-          tx.address.findUnique({ where: { id: addressId } }),
+          tx.address.findUnique({ where: { id: addressId }, include: DELIVERY_ZONE_INCLUDE }),
           loadProfileDefaults(tx, userId),
         ]);
         return row ? mapAddress(row, profile) : null;
@@ -235,7 +250,7 @@ async function setDefault(userId, addressId) {
 
         await tx.address.updateMany({ where: { userId }, data: { isDefault: false } });
         const [row, profile] = await Promise.all([
-          tx.address.update({ where: { id: addressId }, data: { isDefault: true } }),
+          tx.address.update({ where: { id: addressId }, data: { isDefault: true }, include: DELIVERY_ZONE_INCLUDE }),
           loadProfileDefaults(tx, userId),
         ]);
         return mapAddress(row, profile);

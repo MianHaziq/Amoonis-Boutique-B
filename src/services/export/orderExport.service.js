@@ -24,6 +24,8 @@ function decimalToNumber(v) {
 
 function formatShippingAddress(order) {
   const parts = [
+    order.shippingArea,
+    order.shippingZoneName,
     order.shippingStreetAddress,
     order.shippingApartment,
     order.shippingCity,
@@ -121,6 +123,7 @@ async function getOrdersForExport(filters = {}) {
     const totalAmount = decimalToNumber(order.totalAmount);
     const discountAmount = decimalToNumber(order.discountAmount);
     const taxAmount = decimalToNumber(order.taxAmount);
+    const shippingAmount = decimalToNumber(order.shippingAmount) || 0;
     const itemCount = order.items.reduce((s, i) => s + i.quantity, 0);
 
     totalRevenue += totalAmount;
@@ -142,12 +145,14 @@ async function getOrdersForExport(filters = {}) {
       customerName: customerName(order),
       customerPhone: customerPhone(order),
       customerEmail: customerEmail(order),
-      city: order.shippingCity || '',
+      // Area replaced city as the primary location field — fall back to the
+      // legacy city column for orders placed before that change.
+      city: order.shippingArea || order.shippingCity || '',
       shippingAddress: formatShippingAddress(order),
       paymentMethod: order.paymentMethod,
       paymentStatus: order.paymentStatus,
       status: order.status,
-      deliveryCharges: 0, // Free delivery is a real store rule, not a placeholder.
+      deliveryCharges: shippingAmount,
       discountAmount,
       taxAmount, // Reserved for the upcoming VAT phase — always 0 until then.
       totalAmount,

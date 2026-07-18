@@ -27,6 +27,8 @@ const addressBody = [
   body('apartment').optional({ checkFalsy: true }).trim(),
   body('state').optional({ checkFalsy: true }).trim(),
   body('postalCode').optional({ checkFalsy: true }).trim(),
+  body('area').optional({ checkFalsy: true }).trim(),
+  body('deliveryZoneId').optional({ checkFalsy: true }).isUUID().withMessage('deliveryZoneId must be a valid id'),
   body('isDefault').optional().isBoolean().withMessage('isDefault must be a boolean'),
 ];
 
@@ -40,6 +42,8 @@ const addressPatchBody = [
   body('apartment').optional({ checkFalsy: true }).trim(),
   body('state').optional({ checkFalsy: true }).trim(),
   body('postalCode').optional({ checkFalsy: true }).trim(),
+  body('area').optional({ checkFalsy: true }).trim(),
+  body('deliveryZoneId').optional({ checkFalsy: true }).isUUID().withMessage('deliveryZoneId must be a valid id'),
   body('isDefault').optional().isBoolean().withMessage('isDefault must be a boolean'),
 ];
 

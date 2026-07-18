@@ -13,6 +13,7 @@ const MANAGER_PERMISSION_VALUES = Object.freeze([
   'ANALYTICS',
   'REGIONS',
   'REVIEWS',
+  'DELIVERY_ZONES',
 ]);
 
 const MANAGER_PERMISSION_CATALOG = Object.freeze([
@@ -27,6 +28,7 @@ const MANAGER_PERMISSION_CATALOG = Object.freeze([
   { key: 'ANALYTICS', label: 'Analytics', description: 'View region-wise sales, revenue, and KPI dashboards' },
   { key: 'REGIONS', label: 'Regions', description: 'Create, update, and delete delivery regions' },
   { key: 'REVIEWS', label: 'Reviews', description: 'View and delete customer product reviews' },
+  { key: 'DELIVERY_ZONES', label: 'Delivery zones', description: 'Create, update, and delete delivery zones (e.g. emirates) within a region' },
 ]);
 
 /** Permissions that imply a need to upload images (logos, product images, etc.) */

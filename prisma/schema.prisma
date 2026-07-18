@@ -31,23 +31,50 @@ model Region {
   // frontend's default siteConfig.legalEntity, so existing regions keep working
   // without an admin having to backfill this.
   legalEntity String?
+  // Flat shipping fee charged on every order placed in this region. Null means
+  // no fee has been configured yet — orders ship free until an admin sets one
+  // (matches the pre-existing de-facto behavior, so nothing regresses).
+  shippingFlatRate Decimal? @db.Decimal(10, 2)
   isDefault Boolean  @default(false)
   isActive  Boolean  @default(true)
   sortOrder Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  products   ProductRegion[]
-  categories CategoryRegion[]
-  banners    BannerRegion[]
-  sections   SectionRegion[]
-  promoCodes PromoCodeRegion[]
-  users      User[]
-  orders     Order[]
-  vatConfig  VatConfig?
+  products      ProductRegion[]
+  categories    CategoryRegion[]
+  banners       BannerRegion[]
+  sections      SectionRegion[]
+  promoCodes    PromoCodeRegion[]
+  users         User[]
+  orders        Order[]
+  vatConfig     VatConfig?
+  deliveryZones DeliveryZone[]
 
   @@index([isActive])
   @@index([sortOrder])
+}
+
+/// Admin-managed delivery sub-areas within a region (e.g. UAE's emirates:
+/// Dubai, Abu Dhabi, Sharjah, ...). Scoped per-region (not a global list) so a
+/// different region can have its own list later with no schema change —
+/// mirrors the Region -> VatConfig relationship.
+model DeliveryZone {
+  id        String   @id @default(uuid())
+  regionId  String
+  name      String
+  name_ar   String?
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  region    Region    @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  addresses Address[]
+
+  @@unique([regionId, name])
+  @@index([regionId])
+  @@index([isActive])
 }
 
 /// Join: which regions a product is visible in. A row per (product, region) pair —
@@ -520,15 +547,21 @@ model Address {
   state         String?
   postalCode    String?
   country       String?
+  // Free-text neighborhood/community, e.g. "Al Barsha" — replaces streetAddress
+  // as the primary location detail in the current checkout form.
+  area           String?
+  deliveryZoneId String?
   isDefault     Boolean  @default(false)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  orders Order[]
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders       Order[]
+  deliveryZone DeliveryZone? @relation(fields: [deliveryZoneId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([userId, isDefault])
+  @@index([deliveryZoneId])
 }
 
 // ============================================
@@ -627,6 +660,14 @@ model Order {
   shippingState         String?
   shippingPostalCode    String?
   shippingCountry       String?
+  /// Area/neighborhood free text, snapshot from the address used at checkout.
+  shippingArea          String?
+  /// Delivery zone (e.g. emirate) NAME snapshot — not an FK, so renaming/deleting
+  /// the zone later never alters historical orders (same reasoning as vatRatePercent).
+  shippingZoneName      String?
+  /// Flat shipping fee charged on this order, snapshot from Region.shippingFlatRate
+  /// at checkout time. Null/0 = free (no rate configured for the region at the time).
+  shippingAmount        Decimal?      @db.Decimal(10, 2)
   /// When true, Product.quantity has been reduced for this order’s line items (set on PENDING→CONFIRMED; cleared on cancel/revert).
   inventoryDeducted     Boolean       @default(false)
   /// Whether placing this order should clear the user's cart. True for normal cart checkout;

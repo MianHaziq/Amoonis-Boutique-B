@@ -21,6 +21,7 @@ const REGION_SELECT = {
   name_ar: true,
   currency: true,
   legalEntity: true,
+  shippingFlatRate: true,
   isDefault: true,
   isActive: true,
   sortOrder: true,
@@ -30,6 +31,16 @@ const REGION_SELECT = {
 
 function normalizeCode(code) {
   return String(code ?? '').trim().toUpperCase();
+}
+
+/** Blank/null/undefined -> null (no fee configured); otherwise a non-negative number. */
+function parseShippingFlatRate(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) {
+    throw Object.assign(new Error('shippingFlatRate must be a non-negative number'), { code: 'VALIDATION' });
+  }
+  return n;
 }
 
 async function loadCache(force = false) {
@@ -151,6 +162,7 @@ async function createRegion(data) {
         name_ar: data.name_ar != null ? String(data.name_ar).trim() || null : null,
         currency: data.currency ? String(data.currency).trim().toUpperCase() : 'AED',
         legalEntity: data.legalEntity != null ? String(data.legalEntity).trim() || null : null,
+        shippingFlatRate: parseShippingFlatRate(data.shippingFlatRate),
         isDefault: makeDefault,
         isActive: data.isActive === undefined ? true : !!data.isActive,
         sortOrder: data.sortOrder != null ? Number(data.sortOrder) : 0,
@@ -185,6 +197,9 @@ async function updateRegion(id, data) {
   }
   if (data.legalEntity !== undefined) {
     payload.legalEntity = data.legalEntity != null ? String(data.legalEntity).trim() || null : null;
+  }
+  if (data.shippingFlatRate !== undefined) {
+    payload.shippingFlatRate = parseShippingFlatRate(data.shippingFlatRate);
   }
   if (data.isActive !== undefined) payload.isActive = !!data.isActive;
   if (data.sortOrder !== undefined) payload.sortOrder = Number(data.sortOrder);

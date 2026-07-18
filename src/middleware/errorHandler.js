@@ -3,7 +3,7 @@ const { error } = require('../utils/response');
 /**
  * Global error handler. Logs errors and returns consistent JSON.
  * Format: { success: false, message, errors? }
- * Prisma P2002 → 409, P2025 → 404; preserves status and errors array.
+ * Prisma P2002 → 409, P2025 → 404, P2003 → 400; preserves status and errors array.
  */
 function errorHandler(err, req, res, next) {
   const status = err.status || err.statusCode || 500;
@@ -15,6 +15,10 @@ function errorHandler(err, req, res, next) {
 
   if (err.code === 'P2025') {
     return error(res, 'Record not found', 404);
+  }
+
+  if (err.code === 'P2003') {
+    return error(res, 'Referenced record does not exist', 400);
   }
 
   if (!isProd) {

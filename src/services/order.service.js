@@ -5,6 +5,7 @@ const notify = require('../notifications/notify');
 const promoCodeService = require('../services/promoCode.service');
 const paymentService = require('../services/payment.service');
 const regionService = require('../services/region.service');
+const deliveryZoneService = require('../services/deliveryZone.service');
 const productService = require('../services/product.service');
 const vatService = require('../services/vat.service');
 
@@ -97,6 +98,9 @@ function toOrderResponsePayload(order) {
     orderMessage: order.orderMessage,
     totalAmount: decimalToNumber(order.totalAmount),
     discountAmount: decimalToNumber(order.discountAmount),
+    // Flat shipping fee charged on this order, snapshot from Region.shippingFlatRate
+    // at checkout time. 0 for legacy orders placed before this field existed.
+    shippingAmount: decimalToNumber(order.shippingAmount) ?? 0,
     // Pre-VAT, pre-discount line sum (null for legacy orders placed before VAT).
     subtotalAmount: decimalToNumber(order.subtotalAmount),
     // Total VAT. For EXCLUSIVE VAT this is included in totalAmount; for INCLUSIVE VAT it's
@@ -119,6 +123,7 @@ function toOrderResponsePayload(order) {
       || order.shippingStreetAddress
       || order.shippingCity
       || order.shippingCountry
+      || order.shippingArea
         ? {
             fullName: order.shippingFullName ?? null,
             phone: order.shippingPhone ?? null,
@@ -128,6 +133,8 @@ function toOrderResponsePayload(order) {
             state: order.shippingState ?? null,
             postalCode: order.shippingPostalCode ?? null,
             country: order.shippingCountry ?? null,
+            area: order.shippingArea ?? null,
+            deliveryZoneName: order.shippingZoneName ?? null,
           }
         : null,
     inventoryDeducted: Boolean(order.inventoryDeducted),
@@ -153,7 +160,7 @@ function listStatusFilter(status) {
 // address payload only needs the location bits, and even those are now soft.
 function validateShippingAddress(addr) {
   if (!addr || typeof addr !== 'object') return 'shippingAddress is required';
-  if (!addr.streetAddress || !String(addr.streetAddress).trim()) return 'shippingAddress.streetAddress is required';
+  if (!addr.area || !String(addr.area).trim()) return 'shippingAddress.area is required';
   return null;
 }
 
@@ -258,6 +265,13 @@ async function createOrderCore(userId, params = {}, opts = {}) {
 
   // Resolve the shipping address: a saved addressId or an inline shippingAddress.
   let resolvedAddress = null;
+  // A saved address's zone may have gone stale in the background (deactivated,
+  // reassigned) without the customer touching it this session — that must degrade
+  // gracefully (drop the zone name, keep checking out), same philosophy as the
+  // stale-regionId fallback above. A FRESH inline submission is validated strictly:
+  // the dropdown only ever offers valid/active zones, so a mismatch here means
+  // stale client state or a tampered request worth surfacing as a real error.
+  let zoneValidationIsStrict = false;
 
   if (addressId && userId) {
     const saved = await prisma.address.findFirst({ where: { id: addressId, userId } });
@@ -272,10 +286,15 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       state: saved.state ?? null,
       postalCode: saved.postalCode ?? null,
       country: saved.country ?? null,
+      // May be null for addresses saved before this feature existed — that's fine,
+      // this branch never runs validateShippingAddress (see below).
+      area: saved.area ?? null,
+      deliveryZoneId: saved.deliveryZoneId ?? null,
     };
   } else if (shippingAddress) {
     const addrError = validateShippingAddress(shippingAddress);
     if (addrError) return { order: null, error: addrError };
+    zoneValidationIsStrict = true;
     resolvedAddress = {
       addressId: null,
       fullName: profileFullName ?? trimOrNullStr(shippingAddress.fullName),
@@ -286,9 +305,28 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       state: trimOrNullStr(shippingAddress.state),
       postalCode: trimOrNullStr(shippingAddress.postalCode),
       country: trimOrNullStr(shippingAddress.country),
+      area: trimOrNullStr(shippingAddress.area),
+      deliveryZoneId: trimOrNullStr(shippingAddress.deliveryZoneId),
     };
   } else {
     return { order: null, error: 'A shipping address is required. Provide addressId or shippingAddress.' };
+  }
+
+  // Validate the zone belongs to this order's region and is still active — guards
+  // against a stale id from a region switch mid-checkout or a tampered request.
+  // Not required: a region may genuinely have zero zones configured.
+  let shippingZoneName = null;
+  if (resolvedAddress.deliveryZoneId) {
+    try {
+      const zone = await deliveryZoneService.assertValidZone(resolvedAddress.deliveryZoneId, orderRegionId);
+      shippingZoneName = zone.name;
+    } catch (err) {
+      if (!['ZONE_NOT_FOUND', 'ZONE_INACTIVE', 'ZONE_WRONG_REGION'].includes(err.code)) throw err;
+      if (zoneValidationIsStrict) return { order: null, error: err.message };
+      // Saved-address path: degrade gracefully — proceed without a zone name
+      // rather than blocking checkout over a reference that went stale in the
+      // background. The order simply carries no zone snapshot for this line.
+    }
   }
 
   const productIds = lineItems.map((it) => it.productId);
@@ -537,7 +575,11 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // keying by productId would collapse two lines of the same product with different options.
     const vat = vatService.computeOrderVat(vatLines, finalDiscount ?? 0, vatConfig);
 
-    const finalTotal = vat.total;
+    // Flat shipping fee for this order's region — snapshot the amount actually
+    // charged (Region.shippingFlatRate may change later; historical orders must not).
+    const shippingAmount = Math.round(Number(orderRegion?.shippingFlatRate ?? 0) * 100) / 100;
+
+    const finalTotal = vat.total + shippingAmount;
 
     // Online payment cannot charge a 0 (or negative) amount — MyFatoorah rejects it. If a
     // promo wipes the entire total, the customer must use Cash on Delivery instead.
@@ -561,6 +603,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         taxAmount: vat.vatAmount,
         vatRatePercent: vat.applied ? vat.ratePercent : null,
         vatInclusive: vat.applied ? vat.inclusive : false,
+        shippingAmount,
         appliedPromoCode: promoResult?.promoCode.code ?? null,
         appliedPromoCodeId: promoResult?.promoCode.id ?? null,
         paymentMethod,
@@ -573,6 +616,8 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         shippingState: resolvedAddress.state,
         shippingPostalCode: resolvedAddress.postalCode,
         shippingCountry: resolvedAddress.country,
+        shippingArea: resolvedAddress.area,
+        shippingZoneName,
         regionId: orderRegionId,
         currency: orderCurrency,
         status: initialStatus,
@@ -853,8 +898,7 @@ async function createGuestOrder(guestInput = {}, opts = {}) {
   const guestPhone = trimOrNullStr(shippingAddress.phone);
   if (!guestFullName) return { order: null, error: 'Full name is required' };
   if (!guestPhone) return { order: null, error: 'Phone number is required' };
-  if (!trimOrNullStr(shippingAddress.streetAddress)) return { order: null, error: 'Address is required' };
-  if (!trimOrNullStr(shippingAddress.city)) return { order: null, error: 'City is required' };
+  if (!trimOrNullStr(shippingAddress.area)) return { order: null, error: 'Area is required' };
 
   // Products come straight from the client — only PUBLISHED items may be bought
   // (mirrors the Buy Now guard; createOrderCore additionally checks stock).

@@ -123,7 +123,7 @@ async function main() {
     {
       productId: product.id,
       quantity: 1,
-      shippingAddress: { streetAddress: '1 Test St', city: 'Dubai', country: 'UAE' },
+      shippingAddress: { area: 'Al Barsha' },
       paymentMethod: 'COD',
     },
     {} // no X-Region header — exercises the stale-fallback path being hardened

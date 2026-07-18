@@ -33,7 +33,7 @@ const statusBody = [
  *     description: |
  *       Creates an order from the current user's cart, then clears the cart. Requires user JWT.
  *
- *       **Address** — provide either `addressId` (a saved address UUID) **or** an inline `shippingAddress` object. Inline form requires only `streetAddress`; `city` / `country` etc. are optional.
+ *       **Address** — provide either `addressId` (a saved address UUID) **or** an inline `shippingAddress` object. Inline form requires only `area`; `deliveryZoneId` and the legacy street/city/state/postal/country fields are all optional.
  *
  *       **Recipient name & phone** — **do not send them**. The server reads `fullName` and `phone` from the user profile (collected at signup / Google / Apple) and stamps them onto the order's `shippingAddress` snapshot automatically.
  *
@@ -63,15 +63,17 @@ const statusBody = [
  *               shippingAddress:
  *                 type: object
  *                 description: |
- *                   Inline address used when `addressId` is not provided. **`streetAddress` is the only required field.** Recipient `fullName` / `phone` are server-filled from the user profile and should be omitted.
- *                 required: [streetAddress]
+ *                   Inline address used when `addressId` is not provided. **`area` is the only required field.** Recipient `fullName` / `phone` are server-filled from the user profile and should be omitted.
+ *                 required: [area]
  *                 properties:
- *                   streetAddress: { type: string, example: "Villa 14, Al Wasl Road" }
+ *                   area: { type: string, example: "Al Barsha", description: "Neighborhood/community free text" }
+ *                   deliveryZoneId: { type: string, format: uuid, nullable: true, description: "Emirate/zone selected from GET /delivery-zones" }
+ *                   streetAddress: { type: string, nullable: true, example: null }
  *                   apartment: { type: string, nullable: true, example: null }
- *                   city: { type: string, nullable: true, example: "Dubai" }
- *                   state: { type: string, nullable: true, example: "Dubai" }
+ *                   city: { type: string, nullable: true, example: null }
+ *                   state: { type: string, nullable: true, example: null }
  *                   postalCode: { type: string, nullable: true, example: null }
- *                   country: { type: string, nullable: true, example: "United Arab Emirates" }
+ *                   country: { type: string, nullable: true, example: null }
  *                   fullName: { type: string, nullable: true, description: "Optional / ignored — sourced from user profile" }
  *                   phone: { type: string, nullable: true, description: "Optional / ignored — sourced from user profile" }
  *               paymentMethod:
@@ -155,6 +157,8 @@ const checkoutBody = [
   body('shippingAddress.state').optional().trim(),
   body('shippingAddress.postalCode').optional().trim(),
   body('shippingAddress.country').optional().trim(),
+  body('shippingAddress.area').optional().trim(),
+  body('shippingAddress.deliveryZoneId').optional({ checkFalsy: true }).isUUID().withMessage('deliveryZoneId must be a valid id'),
 ];
 
 router.post(
@@ -202,10 +206,12 @@ router.post(
  *                     customName: { type: string, description: 'Only charged/kept if the product has customNameEnabled.' }
  *               shippingAddress:
  *                 type: object
- *                 required: [fullName, phone, streetAddress, city]
+ *                 required: [fullName, phone, area]
  *                 properties:
  *                   fullName: { type: string }
  *                   phone: { type: string }
+ *                   area: { type: string, description: 'Neighborhood/community free text' }
+ *                   deliveryZoneId: { type: string, format: uuid, description: 'Emirate/zone selected from GET /delivery-zones' }
  *                   streetAddress: { type: string }
  *                   apartment: { type: string }
  *                   city: { type: string }
@@ -233,12 +239,14 @@ const guestCheckoutBody = [
   body('shippingAddress').isObject().withMessage('shippingAddress is required'),
   body('shippingAddress.fullName').trim().notEmpty().withMessage('Full name is required'),
   body('shippingAddress.phone').trim().notEmpty().withMessage('Phone number is required'),
-  body('shippingAddress.streetAddress').trim().notEmpty().withMessage('Address is required'),
+  body('shippingAddress.streetAddress').optional({ nullable: true }).trim(),
   body('shippingAddress.apartment').optional({ nullable: true }).trim(),
-  body('shippingAddress.city').trim().notEmpty().withMessage('City is required'),
+  body('shippingAddress.city').optional({ nullable: true }).trim(),
   body('shippingAddress.state').optional({ nullable: true }).trim(),
   body('shippingAddress.postalCode').optional({ nullable: true }).trim(),
   body('shippingAddress.country').optional({ nullable: true }).trim(),
+  body('shippingAddress.area').trim().notEmpty().withMessage('Area is required'),
+  body('shippingAddress.deliveryZoneId').optional({ checkFalsy: true }).isUUID().withMessage('deliveryZoneId must be a valid id'),
 ];
 
 router.post(

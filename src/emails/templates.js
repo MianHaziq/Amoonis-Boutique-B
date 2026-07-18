@@ -102,6 +102,7 @@ function renderOrderConfirmation(order) {
   const ship = [
     order.shippingFullName,
     order.shippingPhone,
+    [order.shippingArea, order.shippingZoneName].filter(Boolean).join(', '),
     [order.shippingStreetAddress, order.shippingApartment].filter(Boolean).join(', '),
     [order.shippingCity, order.shippingState, order.shippingPostalCode].filter(Boolean).join(', '),
     order.shippingCountry,
