@@ -29,7 +29,7 @@ const verifyAdminOrManager = async (req, res, next) => {
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },
-      select: { id: true, role: true, status: true, managerPermissions: true },
+      select: { id: true, role: true, status: true, tokenVersion: true, managerPermissions: true },
     });
 
     if (!user) {
@@ -37,6 +37,13 @@ const verifyAdminOrManager = async (req, res, next) => {
     }
     if (user.status !== 'ACTIVE') {
       return error(res, 'Account is inactive.', 403);
+    }
+    // Honor token-version revocation, same as verifyToken/verifyAdmin. Without this,
+    // a "sign out everywhere" / password change (which bumps tokenVersion) would NOT
+    // invalidate already-issued admin/manager tokens on any staff-guarded route.
+    // Legacy tokens with no `tv` claim are still accepted during the rollout window.
+    if (decoded.tv != null && decoded.tv !== user.tokenVersion) {
+      return error(res, 'Session expired. Please login again.', 401);
     }
 
     if (user.role === 'ADMIN') {

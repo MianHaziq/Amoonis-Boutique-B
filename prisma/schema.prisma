@@ -965,6 +965,9 @@ enum ManagerPermission {
   ANALYTICS
   REGIONS
   REVIEWS
+  DELIVERY_ZONES
+  VAT
+  NOTIFICATIONS
 }
 
 enum DiscountType {

@@ -62,7 +62,7 @@ router.get('/public', resolveRegion, getPublicVatConfig);
  *       200:
  *         description: All regions with their VAT config
  */
-router.get('/', verifyAdminOrManager, requireManagerPermission('SETTINGS'), listVatConfigs);
+router.get('/', verifyAdminOrManager, requireManagerPermission('VAT'), listVatConfigs);
 
 /**
  * @swagger
@@ -86,7 +86,7 @@ router.get('/', verifyAdminOrManager, requireManagerPermission('SETTINGS'), list
 router.get(
   '/:regionId',
   verifyAdminOrManager,
-  requireManagerPermission('SETTINGS'),
+  requireManagerPermission('VAT'),
   regionIdParam,
   handleValidationErrors,
   getVatConfig
@@ -128,7 +128,7 @@ router.get(
 router.put(
   '/:regionId',
   verifyAdminOrManager,
-  requireManagerPermission('SETTINGS'),
+  requireManagerPermission('VAT'),
   regionIdParam,
   handleValidationErrors,
   updateVatConfig

@@ -112,7 +112,12 @@ const swaggerOptions = {
     }
   `,
 };
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerOptions));
+// Swagger UI publishes the full API surface. Serve it everywhere EXCEPT production,
+// where exposing the interactive docs is unnecessary information disclosure. Set
+// ENABLE_API_DOCS=true to force it on in production if an operator explicitly needs it.
+if (process.env.NODE_ENV !== 'production' || process.env.ENABLE_API_DOCS === 'true') {
+  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerOptions));
+}
 
 // Health
 app.get('/', (req, res) => {

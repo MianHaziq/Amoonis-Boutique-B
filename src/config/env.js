@@ -13,6 +13,7 @@ const optional = [
   'PORT',
   'HOST',
   'ALLOWED_ORIGINS',
+  'ENABLE_API_DOCS', // 'true' forces Swagger UI on in production (off by default there)
   'GOOGLE_CLIENT_ID',
   'APPLE_CLIENT_ID',
   'JWT_EXPIRES_IN',
@@ -78,6 +79,10 @@ const optional = [
   'PROMO_ARCHIVE_CRON',
 ];
 
+// A JWT signing secret shorter than this is trivially brute-forceable, which would
+// let an attacker forge tokens for any user (including ADMIN). Enforce a floor.
+const MIN_JWT_SECRET_LENGTH = 32;
+
 function validateEnv() {
   const missing = required.filter((key) => !process.env[key] || process.env[key].trim() === '');
   if (missing.length > 0 && process.env.NODE_ENV === 'production') {
@@ -87,6 +92,19 @@ function validateEnv() {
   if (missing.length > 0) {
     console.warn('[ENV] Missing optional-for-dev variables (required in production):', missing.join(', '));
   }
+
+  // Guard against a weak/placeholder JWT secret. Fatal in production; a warning in
+  // dev so local work isn't blocked.
+  const jwtSecret = process.env.JWT_SECRET || '';
+  if (jwtSecret && jwtSecret.trim().length < MIN_JWT_SECRET_LENGTH) {
+    const msg = `JWT_SECRET is too short (${jwtSecret.trim().length} chars); use at least ${MIN_JWT_SECRET_LENGTH} random characters`;
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[ENV]', msg);
+      throw new Error(msg);
+    }
+    console.warn('[ENV]', msg);
+  }
+
   return { required: required.filter((k) => process.env[k]), optional };
 }
 

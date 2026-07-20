@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const jobsController = require('../controllers/jobs.controller');
-const { verifyAdminOrManager, requireAnyManagerPermission } = require('../middleware/managerAuth');
+const { verifyAdminOrManager, requireAnyManagerPermission, requireManagerPermission } = require('../middleware/managerAuth');
 
 /**
  * @swagger
@@ -14,7 +14,15 @@ const { verifyAdminOrManager, requireAnyManagerPermission } = require('../middle
 // with an admin token entered by the operator, so nothing sensitive is served here.
 router.get('/ui', jobsController.ui);
 
+// Job-engine status + manual re-runs: an operational concern, kept on the
+// broad SETTINGS/ORDERS guard (this is the standalone /admin/jobs ops tool,
+// not a delegatable admin-panel nav area).
 const adminGuard = [verifyAdminOrManager, requireAnyManagerPermission(['SETTINGS', 'ORDERS'])];
+
+// Broadcasting a push reaches the entire customer base, so it has its own
+// dedicated permission — an order-processing manager must not be able to send
+// marketing blasts just because they can also see the job engine.
+const broadcastGuard = [verifyAdminOrManager, requireManagerPermission('NOTIFICATIONS')];
 
 /**
  * @swagger
@@ -34,6 +42,7 @@ router.get('/', adminGuard, jobsController.status);
  * /admin/jobs/broadcast:
  *   post:
  *     summary: Broadcast a promotion/announcement push
+ *     description: Enqueue a push broadcast to customers. **Admin** or **manager (NOTIFICATIONS)**.
  *     tags: [Background jobs]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -52,7 +61,7 @@ router.get('/', adminGuard, jobsController.status);
  *     responses:
  *       202: { description: Broadcast queued }
  */
-router.post('/broadcast', adminGuard, jobsController.broadcast);
+router.post('/broadcast', broadcastGuard, jobsController.broadcast);
 
 /**
  * @swagger
