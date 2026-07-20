@@ -10,10 +10,16 @@
 const { enqueue } = require('../jobs/queue');
 const { QUEUES } = require('../jobs/queues');
 
-/** Order placed (checkout for COD, or payment success for online). */
-function orderPlaced(userId, orderId) {
+/**
+ * Order placed (checkout for COD, or payment success for online). Exactly one
+ * of `userId`/`guestEmail` should be set — a guest order gets an inbox row
+ * (no device to push to) that `linkGuestOrdersToUser` claims on signup/login.
+ */
+function orderPlaced({ userId, guestEmail, orderId } = {}) {
+  if (!userId && !guestEmail) return Promise.resolve(null);
   return enqueue(QUEUES.PUSH_SEND, {
-    userId,
+    userId: userId || undefined,
+    guestEmail: userId ? undefined : guestEmail,
     prefKey: 'orderStatus',
     type: 'ORDER_PLACED',
     copyKey: 'ORDER_PLACED',
@@ -21,12 +27,17 @@ function orderPlaced(userId, orderId) {
   });
 }
 
-/** Order moved to a new lifecycle status by staff (CONFIRMED…CANCELLED). */
-function orderStatusChange(userId, orderId, status) {
+/**
+ * Order moved to a new lifecycle status by staff (CONFIRMED…CANCELLED). Same
+ * userId/guestEmail contract as orderPlaced above.
+ */
+function orderStatusChange({ userId, guestEmail, orderId, status } = {}) {
   // PENDING is already covered by the "order placed" push.
   if (status === 'PENDING') return Promise.resolve(null);
+  if (!userId && !guestEmail) return Promise.resolve(null);
   return enqueue(QUEUES.PUSH_SEND, {
-    userId,
+    userId: userId || undefined,
+    guestEmail: userId ? undefined : guestEmail,
     prefKey: 'orderStatus',
     type: 'ORDER_STATUS',
     status,
@@ -61,9 +72,32 @@ function orderConfirmationEmail({ orderId, to } = {}) {
   return enqueue(QUEUES.EMAIL_SEND, { template: 'order-confirmation', orderId, to });
 }
 
+// Only these lifecycle transitions get a customer-facing status email — matches the
+// site's three "moments that matter": placed (orderConfirmationEmail, above), shipped,
+// delivered. CONFIRMED/PROCESSING/CANCELLED are covered by push/in-app only.
+const STATUS_EMAIL_STATUSES = new Set(['SHIPPED', 'DELIVERED']);
+
+/**
+ * Order status-change email (Shipped / Delivered). No `to` here — the email.send job
+ * resolves the recipient itself (user's account email, or the guest's email) so this
+ * fires the same way for a guest order as a signed-in one; the job silently no-ops if
+ * the order somehow has neither.
+ */
+function orderStatusEmail(orderId, status) {
+  if (!orderId || !STATUS_EMAIL_STATUSES.has(status)) return Promise.resolve(null);
+  return enqueue(QUEUES.EMAIL_SEND, { template: 'order-status', orderId, status });
+}
+
 /** Generic transactional email (e.g. password reset). */
 function email(to, subject, html) {
   return enqueue(QUEUES.EMAIL_SEND, { to, subject, html });
 }
 
-module.exports = { orderPlaced, orderStatusChange, adminNewOrder, orderConfirmationEmail, email };
+module.exports = {
+  orderPlaced,
+  orderStatusChange,
+  adminNewOrder,
+  orderConfirmationEmail,
+  orderStatusEmail,
+  email,
+};

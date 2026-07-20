@@ -64,6 +64,16 @@ function drawTable(doc, columns, rows, opts = {}) {
   }
 
   let y = opts.startY ?? doc.y;
+  // Guard the header's own placement the same way each data row already is
+  // below — without this, a header drawn too close to the bottom margin gets
+  // every one of its per-column text() calls implicitly repaginated by
+  // pdfkit (explicit x/y coordinates don't exempt a call from its overflow
+  // check, and the stale absolute y stays "past the bottom" on every
+  // subsequent page too), producing one spurious extra page per column.
+  if (y + rowHeight > bottomLimit) {
+    doc.addPage();
+    y = opts.onPageBreak ? opts.onPageBreak(doc) : doc.page.margins.top;
+  }
   y = drawHeader(y);
 
   rows.forEach((row, i) => {

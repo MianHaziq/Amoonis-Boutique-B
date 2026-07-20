@@ -3,18 +3,26 @@
  *
  * Data shape (built by src/notifications/notify.js):
  *   {
- *     userId, prefKey,                 // prefKey: orderStatus|promotions|announcements
- *     type,                            // stored on the inbox row + data.type
- *     copyKey?,                        // key into the i18n copy table
- *     status?,                         // for ORDER_STATUS → localized per-status copy
- *     title?, body?,                   // explicit override (promotions/announcements)
- *     data?,                           // FCM data payload (deep-link info)
+ *     userId, guestEmail,               // exactly one is set — see below
+ *     prefKey,                          // prefKey: orderStatus|promotions|announcements
+ *     type,                             // stored on the inbox row + data.type
+ *     copyKey?,                         // key into the i18n copy table
+ *     status?,                          // for ORDER_STATUS → localized per-status copy
+ *     title?, body?,                    // explicit override (promotions/announcements)
+ *     data?,                            // FCM data payload (deep-link info)
  *   }
  *
  * Inbox vs device push are deliberately decoupled: we ALWAYS persist the notification
  * (so the in-app history/badge is complete), but only deliver an FCM push if the user's
  * preference for that channel is on (sendToUser enforces this). Throwing triggers a
  * pg-boss retry, e.g. when FCM is briefly unreachable.
+ *
+ * GUEST orders (no account yet): `userId` is absent and `guestEmail` carries the
+ * checkout contact instead — there's no device to push to and no
+ * UserNotificationPreferences row possible (it's keyed by userId), so we skip
+ * straight to writing the inbox row with `guestEmail` set. `linkGuestOrdersToUser`
+ * (order.service.js) re-points these rows to the real account on signup/login,
+ * matching Order's existing guest-linking pattern.
  */
 
 const prisma = require('../../config/db');
@@ -44,9 +52,21 @@ function resolveCopy(data, lang) {
 }
 
 async function handle(data) {
-  const { userId, prefKey = 'orderStatus', type = 'GENERAL', data: payload = {} } = data;
+  const { userId, guestEmail, prefKey = 'orderStatus', type = 'GENERAL', data: payload = {} } = data;
+  if (!userId && !guestEmail) {
+    console.warn('[jobs] push.send skipped — no userId or guestEmail');
+    return;
+  }
+
   if (!userId) {
-    console.warn('[jobs] push.send skipped — no userId');
+    // Guest: no device to push to, no preferences row possible — just write the
+    // inbox row (best-effort) so it exists to be claimed on signup/login.
+    const { title, body } = resolveCopy(data, 'en');
+    try {
+      await notificationService.create({ guestEmail, type, title, body, data: payload });
+    } catch (err) {
+      console.error('[jobs] push.send guest inbox persist failed:', err.message);
+    }
     return;
   }
 

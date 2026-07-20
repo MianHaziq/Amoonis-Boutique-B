@@ -9,9 +9,23 @@
 
 const prisma = require('../config/db');
 
-async function create({ userId, type, title, body, data = null }) {
+/**
+ * `userId` XOR `guestEmail` — a guest order's status-change notification is
+ * written with `userId: null, guestEmail` set (normalized, matching
+ * Order.guestEmail's convention) so it can be claimed later; see
+ * order.service.js's `linkGuestOrdersToUser`, which re-points these rows to
+ * the account on signup/login.
+ */
+async function create({ userId, guestEmail, type, title, body, data = null }) {
   return prisma.notification.create({
-    data: { userId, type, title, body, data: data || undefined },
+    data: {
+      userId: userId || null,
+      guestEmail: userId ? null : guestEmail ? String(guestEmail).trim().toLowerCase() : null,
+      type,
+      title,
+      body,
+      data: data || undefined,
+    },
   });
 }
 

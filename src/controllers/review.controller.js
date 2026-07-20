@@ -25,29 +25,39 @@ function mapReview(review) {
 const getProductReviews = async (req, res, next) => {
   try {
     const { productId } = req.params;
-    const { page = 1, limit = 10 } = req.query;
+    const { page = 1, limit = 10, rating } = req.query;
     const parsedPage = parseInt(page);
     const parsedLimit = parseInt(limit);
     const safePage = Number.isNaN(parsedPage) || parsedPage < 1 ? 1 : parsedPage;
     const safeLimit = Math.min(50, Math.max(1, Number.isNaN(parsedLimit) ? 10 : parsedLimit));
     const skip = (safePage - 1) * safeLimit;
+    const parsedRating = parseInt(rating);
+    const ratingFilter = Number.isInteger(parsedRating) && parsedRating >= 1 && parsedRating <= 5 ? parsedRating : null;
 
-    const [reviews, total, aggregate] = await Promise.all([
+    const where = { productId, ...(ratingFilter ? { rating: ratingFilter } : {}) };
+
+    const [reviews, total, aggregate, breakdownRows] = await Promise.all([
       prisma.review.findMany({
-        where: { productId },
+        where,
         skip,
         take: safeLimit,
         orderBy: { createdAt: 'desc' },
         include: { user: { select: REVIEWER_SELECT } },
       }),
-      prisma.review.count({ where: { productId } }),
-      prisma.review.aggregate({
-        where: { productId },
-        _avg: { rating: true },
-      }),
+      prisma.review.count({ where }),
+      // Summary stats (avg/count/breakdown) always reflect the WHOLE product,
+      // never the `rating` filter — otherwise the star-breakdown bars would
+      // shift/collapse as soon as the customer clicks one, which is confusing.
+      prisma.review.aggregate({ where: { productId }, _avg: { rating: true }, _count: true }),
+      prisma.review.groupBy({ by: ['rating'], where: { productId }, _count: true }),
     ]);
 
     const totalPages = Math.ceil(total / safeLimit);
+    const ratingBreakdown = [5, 4, 3, 2, 1].map((star) => ({
+      rating: star,
+      count: breakdownRows.find((r) => r.rating === star)?._count ?? 0,
+    }));
+
     return success(
       res,
       reviews.map(mapReview),
@@ -63,7 +73,8 @@ const getProductReviews = async (req, res, next) => {
           hasPrev: safePage > 1,
         },
         avgRating: aggregate._avg.rating != null ? Number(aggregate._avg.rating.toFixed(2)) : null,
-        reviewCount: total,
+        reviewCount: aggregate._count,
+        ratingBreakdown,
       }
     );
   } catch (err) {

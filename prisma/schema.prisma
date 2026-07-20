@@ -771,7 +771,13 @@ model UserNotificationPreferences {
 /// data payload (e.g. { type, orderId, status }) for deep-linking from the inbox.
 model Notification {
   id        String    @id @default(uuid())
-  userId    String
+  /// Null for a notification created before the recipient had an account (see
+  /// guestEmail below) — same nullable-then-claimed pattern as Order.userId.
+  userId    String?
+  /// Guest checkout contact snapshot (only set when userId is NULL), normalized
+  /// (trim+lowercase) like Order.guestEmail. linkGuestOrdersToUser re-points
+  /// these rows to the new account on signup/login, matching the same email.
+  guestEmail String?
   type      String
   title     String
   body      String
@@ -779,11 +785,12 @@ model Notification {
   readAt    DateTime?
   createdAt DateTime  @default(now())
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // Inbox query: a user's notifications, newest first, optionally unread-only.
   @@index([userId, createdAt])
   @@index([userId, readAt])
+  @@index([guestEmail])
 }
 
 // ============================================

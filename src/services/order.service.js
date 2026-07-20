@@ -749,8 +749,10 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // Online payment isn't placed yet — defer the "order placed" notifications to payment
   // success. Both push and email go through the job queue (retried, off the request path).
   if (!isOnlinePayment) {
-    // Push goes to the buyer's registered devices — only for signed-in users.
-    if (userId) notify.orderPlaced(userId, createdOrderId);
+    // Push goes to the buyer's registered devices for a signed-in user; a guest
+    // gets an inbox row instead (no device to push to) — see notify.orderPlaced.
+    const guestEmailForNotify = isGuest ? guestContact?.email || null : null;
+    notify.orderPlaced({ userId: userId || null, guestEmail: guestEmailForNotify, orderId: createdOrderId });
     notify.adminNewOrder({
       orderId: createdOrderId,
       orderNumber: payload.orderNumber,
@@ -760,7 +762,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // Confirmation email: user's account email, or the guest's provided email.
     notify.orderConfirmationEmail({
       orderId: createdOrderId,
-      to: order.user?.email || (isGuest ? guestContact?.email : null) || null,
+      to: order.user?.email || guestEmailForNotify || null,
     });
   }
 
@@ -941,6 +943,12 @@ async function createGuestOrder(guestInput = {}, opts = {}) {
  * signup / signin / OAuth so a customer who checked out as a guest (with the same
  * email) sees those orders in their history. Idempotent — only touches orders
  * that are still unlinked (userId null). Best-effort; never throws to the caller.
+ *
+ * Also claims any Notification rows created while the customer was still a guest
+ * (order-status pushes have no device to deliver to pre-account, so they're
+ * written as inbox-only rows with guestEmail set — see push.job.js) — independent
+ * of the order-linking above (same guestEmail key, but not nested inside it),
+ * so notifications still migrate even in the edge case where no order exists to link.
  */
 async function linkGuestOrdersToUser(userId, email) {
   if (!userId || !email) return { linked: 0 };
@@ -968,6 +976,11 @@ async function linkGuestOrdersToUser(userId, email) {
       });
     }
   }
+
+  await prisma.notification.updateMany({
+    where: { userId: null, guestEmail: normalized },
+    data: { userId, guestEmail: null },
+  });
 
   return { linked: res.count };
 }
@@ -1393,7 +1406,7 @@ async function updateOrderStatus(orderId, status) {
 
         const prev = await tx.order.findUnique({
           where: { id: orderId },
-          select: { status: true, userId: true, inventoryDeducted: true },
+          select: { status: true, userId: true, guestEmail: true, inventoryDeducted: true },
         });
         if (!prev) return { notFound: true };
 
@@ -1446,6 +1459,7 @@ async function updateOrderStatus(orderId, status) {
           payload: toOrderResponsePayload(updated),
           notify: true,
           notifyUserId: prev.userId,
+          notifyGuestEmail: prev.userId ? null : prev.guestEmail,
           notifyStatus: status,
         };
       },
@@ -1453,8 +1467,20 @@ async function updateOrderStatus(orderId, status) {
     );
 
     if (result.notFound) return null;
-    if (result.notify && result.notifyUserId && result.notifyStatus) {
-      notify.orderStatusChange(result.notifyUserId, orderId, result.notifyStatus);
+    // Push/inbox fires for a guest order too (inbox row only, no device to push
+    // to) — see notify.orderStatusChange.
+    if (result.notify && result.notifyStatus && (result.notifyUserId || result.notifyGuestEmail)) {
+      notify.orderStatusChange({
+        userId: result.notifyUserId,
+        guestEmail: result.notifyGuestEmail,
+        orderId,
+        status: result.notifyStatus,
+      });
+    }
+    // Email (Shipped/Delivered only — see notify.orderStatusEmail) fires regardless of
+    // userId, so a guest order gets the same status emails a signed-in customer does.
+    if (result.notify && result.notifyStatus) {
+      notify.orderStatusEmail(orderId, result.notifyStatus);
     }
     return result.payload;
   } catch (err) {
@@ -1654,7 +1680,10 @@ async function finalizePaidOrder(order, { firstPlacement } = {}) {
         totalAmount: Number(order.totalAmount),
         buyerId: order.userId,
       });
-      notify.orderConfirmationEmail({ orderId, to: order.user?.email });
+      // Confirmation email: user's account email, or the guest's provided email
+      // (mirrors the COD path in createOrderCore — an online-paid guest order must
+      // get a receipt too, not just COD guest orders).
+      notify.orderConfirmationEmail({ orderId, to: order.user?.email || order.guestEmail || null });
     }
   }
 
@@ -1699,6 +1728,7 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
       paymentStatus: true,
       clearCartOnPayment: true,
       inventoryDeducted: true,
+      guestEmail: true,
       user: { select: { email: true } },
     },
   });

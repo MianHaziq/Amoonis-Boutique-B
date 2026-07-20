@@ -2,15 +2,34 @@
  * Branded HTML email templates (Amoon Bloom). Pure rendering — no DB, no transport.
  * Job handlers load the data and pass plain objects in; email.service.deliver() sends
  * the returned HTML. Keeping rendering here (not inline in handlers) means one place owns
- * the look, and the same layout wraps order confirmations and admin reports.
+ * the look, and the same layout wraps order confirmations, status updates, and admin reports.
  *
  * Inline styles only — email clients ignore <style>/external CSS.
  */
 
 const BRAND = 'Amoon Bloom';
+const LEGAL_ENTITY = 'AMOON BLOOM Trading L.L.C S.O.C™';
+const SUPPORT_EMAIL = 'management@amoonbloom.com';
+// Hosted on the same Bunny CDN used for product/banner images — see
+// src/emails/assets/logo-email.png (rasterized from the storefront's logo.svg;
+// email clients, especially desktop Outlook, don't reliably render inline SVG).
+const LOGO_URL = 'https://ammon-pull-zone.b-cdn.net/email-assets/amoon-bloom-logo.png';
+
 const INK = '#1f2937';
 const MUTED = '#6b7280';
-const BORDER = '#e5e7eb';
+const BORDER = '#e9dfe3';
+const CREAM = '#f7f6f3';
+const BLOOM = '#d4316d';
+const BLOOM_DARK = '#b32257';
+const BLOOM_TINT = '#fdf2f6';
+
+function frontendUrl() {
+  return (process.env.FRONTEND_URL || 'https://amoonis-boutique.com').replace(/\/+$/, '');
+}
+
+function orderTrackUrl(orderId) {
+  return `${frontendUrl()}/order/status?id=${encodeURIComponent(orderId)}`;
+}
 
 function esc(v) {
   if (v == null) return '';
@@ -27,23 +46,39 @@ function money(amount, currency = 'AED') {
   return `${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
 }
 
-/** Shared shell: dark brand header + white card. `subtitle` is optional. */
+function formatDate(d) {
+  try {
+    return new Date(d).toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' });
+  } catch {
+    return '';
+  }
+}
+
+/** Shared shell: branded logo header + white card + contact footer. `subtitle` is optional. */
 function layout(title, bodyHtml, subtitle) {
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#f5f5f5;padding:24px;">
-  <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
-    <div style="background:#111;padding:24px 32px;text-align:center;">
-      <h1 style="margin:0;color:#fff;font-size:22px;letter-spacing:.5px;">${esc(BRAND)}</h1>
-      ${subtitle ? `<p style="margin:6px 0 0;color:rgba(255,255,255,.7);font-size:13px;">${esc(subtitle)}</p>` : ''}
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${esc(title)}</title></head>
+<body style="margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:${CREAM};padding:24px;">
+  <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 16px rgba(31,23,23,.06);border:1px solid ${BORDER};">
+    <div style="background:linear-gradient(135deg,${BLOOM_TINT} 0%,#fefaf8 100%);padding:28px 32px;text-align:center;border-bottom:3px solid ${BLOOM};">
+      <img src="${LOGO_URL}" alt="${esc(BRAND)}" width="150" style="display:inline-block;height:auto;max-width:150px;border:0;">
+      ${subtitle ? `<p style="margin:14px 0 0;color:${MUTED};font-size:13px;letter-spacing:.2px;">${esc(subtitle)}</p>` : ''}
     </div>
     <div style="padding:32px;color:${INK};font-size:15px;line-height:1.6;">
       ${bodyHtml}
     </div>
-    <div style="padding:16px 32px;background:#f9fafb;border-top:1px solid ${BORDER};">
-      <p style="margin:0;color:${MUTED};font-size:12px;text-align:center;">Sent by ${esc(BRAND)}.</p>
+    <div style="padding:20px 32px;background:${CREAM};border-top:1px solid ${BORDER};text-align:center;">
+      <p style="margin:0 0 4px;color:${INK};font-size:12px;font-weight:600;">${esc(LEGAL_ENTITY)}</p>
+      <p style="margin:0;color:${MUTED};font-size:12px;">Questions about your order? <a href="mailto:${SUPPORT_EMAIL}" style="color:${BLOOM_DARK};text-decoration:none;font-weight:600;">${SUPPORT_EMAIL}</a></p>
     </div>
   </div>
 </body></html>`;
+}
+
+/** Centered brand-pink pill CTA button. */
+function ctaButton(label, url) {
+  return `<p style="margin:28px 0 0;text-align:center;">
+    <a href="${esc(url)}" style="display:inline-block;padding:13px 34px;background:${BLOOM};color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;border-radius:999px;">${esc(label)}</a>
+  </p>`;
 }
 
 /** Coloured pill for an order/payment status. */
@@ -64,38 +99,81 @@ function paymentStatusKind(s) {
   return 'warn'; // UNPAID
 }
 
+function totalsRow(label, value, valueColor) {
+  return `<tr><td style="padding:6px 0;color:${MUTED};">${label}</td><td></td><td style="padding:6px 0;text-align:right;${valueColor ? `color:${valueColor};` : ''}">${value}</td></tr>`;
+}
+
 /* ----------------------------- Order confirmation ----------------------------- */
 
 /**
- * @param {object} order - Prisma Order with `items` (productTitle, quantity, price),
- *   shipping snapshot fields, paymentStatus, paymentMethod, totalAmount, discountAmount,
- *   appliedPromoCode, createdAt. `currency` resolved by the caller.
+ * @param {object} order - Prisma Order with `items` (productTitle, quantity, price,
+ *   selectedOptions, giftCardSelected, customName, product.image), shipping snapshot
+ *   fields, taxAmount/vatRatePercent/vatInclusive, shippingAmount, paymentStatus,
+ *   paymentMethod, totalAmount, discountAmount, appliedPromoCode, createdAt, currency.
  */
 function renderOrderConfirmation(order) {
   const currency = order.currency || 'AED';
   const items = Array.isArray(order.items) ? order.items : [];
+  const name = order.shippingFullName || order.guestName || '';
 
   const itemRows = items
     .map((it) => {
       const title = it.productTitle || it.product?.title || 'Item';
+      const image = it.product?.images?.[0]?.url;
       const qty = it.quantity ?? 1;
       const line = Number(it.price) * qty;
+      const variant =
+        it.selectedOptions && typeof it.selectedOptions === 'object' && !Array.isArray(it.selectedOptions)
+          ? Object.entries(it.selectedOptions)
+              .map(([k, v]) => `${k}: ${v}`)
+              .join(', ')
+          : '';
+      const giftLine = [it.giftCardSelected ? 'Gift card' : null, it.customName].filter(Boolean).join(' · ');
+      const thumb = image
+        ? `<img src="${esc(image)}" width="48" height="48" style="display:block;border-radius:8px;object-fit:cover;border:0;" alt="">`
+        : `<div style="width:48px;height:48px;border-radius:8px;background:${BLOOM_TINT};"></div>`;
       return `<tr>
-        <td style="padding:10px 12px 10px 0;border-bottom:1px solid ${BORDER};">${esc(title)}</td>
-        <td style="padding:10px 8px;border-bottom:1px solid ${BORDER};text-align:center;color:${MUTED};">${esc(qty)}</td>
-        <td style="padding:10px 0 10px 8px;border-bottom:1px solid ${BORDER};text-align:right;white-space:nowrap;">${esc(money(line, currency))}</td>
+        <td style="padding:12px 12px 12px 0;border-bottom:1px solid ${BORDER};vertical-align:top;">
+          <table style="border-collapse:collapse;"><tr>
+            <td style="width:48px;vertical-align:top;">${thumb}</td>
+            <td style="padding-left:12px;vertical-align:top;">
+              <p style="margin:0;font-weight:500;">${esc(title)}</p>
+              ${variant ? `<p style="margin:2px 0 0;font-size:12px;color:${MUTED};">${esc(variant)}</p>` : ''}
+              ${giftLine ? `<p style="margin:2px 0 0;font-size:12px;color:${BLOOM_DARK};">${esc(giftLine)}</p>` : ''}
+            </td>
+          </tr></table>
+        </td>
+        <td style="padding:12px 8px;border-bottom:1px solid ${BORDER};text-align:center;color:${MUTED};vertical-align:top;">${esc(qty)}</td>
+        <td style="padding:12px 0 12px 8px;border-bottom:1px solid ${BORDER};text-align:right;white-space:nowrap;vertical-align:top;">${esc(money(line, currency))}</td>
       </tr>`;
     })
     .join('');
 
-  const subtotal = items.reduce((s, it) => s + Number(it.price) * (it.quantity ?? 1), 0);
+  const subtotal =
+    order.subtotalAmount != null
+      ? Number(order.subtotalAmount)
+      : items.reduce((s, it) => s + Number(it.price) * (it.quantity ?? 1), 0);
   const discount = Number(order.discountAmount) || 0;
+  const taxAmount = Number(order.taxAmount) || 0;
+  const showVat = order.vatRatePercent != null && taxAmount > 0;
+  const shippingAmount = Number(order.shippingAmount) || 0;
 
   const totalsRows = [
-    `<tr><td style="padding:6px 0;color:${MUTED};">Subtotal</td><td></td><td style="padding:6px 0;text-align:right;">${esc(money(subtotal, currency))}</td></tr>`,
+    totalsRow('Subtotal', esc(money(subtotal, currency))),
     discount > 0
-      ? `<tr><td style="padding:6px 0;color:${MUTED};">Discount${order.appliedPromoCode ? ` (${esc(order.appliedPromoCode)})` : ''}</td><td></td><td style="padding:6px 0;text-align:right;color:#065f46;">-${esc(money(discount, currency))}</td></tr>`
+      ? totalsRow(
+          `Discount${order.appliedPromoCode ? ` (${esc(order.appliedPromoCode)})` : ''}`,
+          `-${esc(money(discount, currency))}`,
+          '#065f46'
+        )
       : '',
+    showVat
+      ? totalsRow(
+          order.vatInclusive ? `Includes VAT (${esc(Number(order.vatRatePercent))}%)` : `VAT (${esc(Number(order.vatRatePercent))}%)`,
+          order.vatInclusive ? esc(money(taxAmount, currency)) : `+ ${esc(money(taxAmount, currency))}`
+        )
+      : '',
+    totalsRow('Shipping', shippingAmount > 0 ? esc(money(shippingAmount, currency)) : 'Free'),
     `<tr><td style="padding:10px 0 0;font-weight:700;font-size:16px;">Total</td><td></td><td style="padding:10px 0 0;text-align:right;font-weight:700;font-size:16px;">${esc(money(order.totalAmount, currency))}</td></tr>`,
   ].join('');
 
@@ -111,8 +189,9 @@ function renderOrderConfirmation(order) {
   const paymentMethodLabel = order.paymentMethod === 'MYFATOORAH' ? 'Card (online)' : 'Cash on delivery';
 
   const body = `
+    ${name ? `<p style="margin:0 0 14px;color:${MUTED};">Hi ${esc(name)},</p>` : ''}
     <h2 style="margin:0 0 6px;font-size:20px;">Your order is placed successfully 🎉</h2>
-    <p style="margin:0 0 20px;color:${MUTED};">Thank you! We've received order <strong>#${esc(order.orderNumber)}</strong> and it's being prepared. You can track it any time in the app.</p>
+    <p style="margin:0 0 20px;color:${MUTED};">Thank you! We've received order <strong>#${esc(order.orderNumber)}</strong> and it's being prepared. You can track it any time using the button below.</p>
 
     <table style="width:100%;border-collapse:collapse;margin:0 0 8px;">
       <thead><tr>
@@ -137,9 +216,54 @@ function renderOrderConfirmation(order) {
           ${ship.length ? ship.map((l) => `<p style="margin:0 0 2px;">${esc(l)}</p>`).join('') : `<p style="margin:0;color:${MUTED};">—</p>`}
         </td>
       </tr>
-    </table>`;
+    </table>
+    ${ctaButton('Track your order', orderTrackUrl(order.id))}`;
 
-  return layout('Order confirmation', body, `Order #${order.orderNumber}`);
+  return layout('Order confirmation', body, `Order #${order.orderNumber} · ${formatDate(order.createdAt)}`);
+}
+
+/* ------------------------------- Order status update ------------------------------- */
+
+const STATUS_META = {
+  SHIPPED: {
+    emoji: '📦',
+    heading: 'Your order has shipped!',
+    line: "Great news — it's on its way to you.",
+  },
+  DELIVERED: {
+    emoji: '🎉',
+    heading: 'Your order has been delivered!',
+    line: 'We hope you love it. Thank you for shopping with us.',
+  },
+};
+
+/**
+ * Lighter-weight status-change email (Shipped / Delivered) — a short, celebratory
+ * update rather than re-sending the full itemised receipt every time.
+ * @param {object} order - Prisma Order (id, orderNumber, totalAmount, currency,
+ *   shippingFullName, guestName, createdAt).
+ * @param {string} status - 'SHIPPED' | 'DELIVERED'
+ */
+function renderOrderStatusUpdate(order, status) {
+  const meta = STATUS_META[status] || {
+    emoji: '📬',
+    heading: 'Order update',
+    line: `Your order status is now ${status.toLowerCase()}.`,
+  };
+  const currency = order.currency || 'AED';
+  const name = order.shippingFullName || order.guestName || '';
+
+  const body = `
+    <div style="text-align:center;">
+      <p style="margin:0 0 10px;font-size:40px;line-height:1;">${meta.emoji}</p>
+      ${name ? `<p style="margin:0 0 4px;color:${MUTED};">Hi ${esc(name)},</p>` : ''}
+      <h2 style="margin:0 0 8px;font-size:20px;">${esc(meta.heading)}</h2>
+      <p style="margin:0;color:${MUTED};">${esc(meta.line)}</p>
+      <p style="margin:18px 0 0;font-size:13px;color:${MUTED};">Order <strong style="color:${INK};">#${esc(order.orderNumber)}</strong> &middot; ${esc(money(order.totalAmount, currency))}</p>
+    </div>
+    ${ctaButton('View your order', orderTrackUrl(order.id))}`;
+
+  return layout(meta.heading, body, `Order #${order.orderNumber}`);
 }
 
 /* -------------------------------- Sales report -------------------------------- */
@@ -255,4 +379,10 @@ function renderStockReport(r) {
   return layout('Daily stock report', body);
 }
 
-module.exports = { renderOrderConfirmation, renderSalesReport, renderStockReport, money };
+module.exports = {
+  renderOrderConfirmation,
+  renderOrderStatusUpdate,
+  renderSalesReport,
+  renderStockReport,
+  money,
+};

@@ -49,11 +49,21 @@ const createReviewValidation = [
  *       - in: query
  *         name: limit
  *         schema: { type: integer, default: 10 }
+ *       - in: query
+ *         name: rating
+ *         schema: { type: integer, minimum: 1, maximum: 5 }
+ *         description: Narrow the list to one star rating. Does not affect avgRating/reviewCount/ratingBreakdown, which always reflect the whole product.
  *     responses:
  *       200:
- *         description: Paginated reviews, plus avgRating/reviewCount in meta
+ *         description: Paginated reviews, plus avgRating/reviewCount/ratingBreakdown in meta
  */
-router.get('/product/:productId', productIdParam, handleValidationErrors, getProductReviews);
+router.get(
+  '/product/:productId',
+  productIdParam,
+  [query('rating').optional().isInt({ min: 1, max: 5 })],
+  handleValidationErrors,
+  getProductReviews
+);
 
 /**
  * @swagger

@@ -14,6 +14,7 @@ const { buildCsv, keyValueSection } = require('./csv.util');
  */
 function renderOrdersCsv(res, data, filename) {
   const { summary, orderRows, itemRows, filtersApplied } = data;
+  const singleCurrency = summary.currencyBreakdown.length === 1 ? summary.currencyBreakdown[0] : null;
 
   const csv = buildCsv([
     keyValueSection('Amoonis Boutique — Orders Export', [
@@ -23,11 +24,24 @@ function renderOrdersCsv(res, data, filename) {
       ['Payment status', filtersApplied.paymentStatus],
       ['Region', filtersApplied.region],
       ['Total Orders', summary.totalOrders],
-      ['Total Revenue', summary.totalRevenue],
-      ['Average Order Value', summary.averageOrderValue],
+      // A single-currency result keeps the plain top-line figures (common
+      // case — most exports are filtered to one region). A mixed-currency
+      // result (e.g. "All regions" spanning AED + SAR) omits these — see the
+      // "Revenue By Currency" section below instead; a blended figure across
+      // different currencies would be financially meaningless.
+      ...(singleCurrency
+        ? [
+            [`Total Revenue (${singleCurrency.currency})`, singleCurrency.totalRevenue],
+            [`Average Order Value (${singleCurrency.currency})`, singleCurrency.averageOrderValue],
+          ]
+        : []),
       ['Total Quantity Sold', summary.totalQuantitySold],
-      ['Highest Order Value', summary.highestOrderValue],
-      ['Lowest Order Value', summary.lowestOrderValue],
+      ...(singleCurrency
+        ? [
+            [`Highest Order Value (${singleCurrency.currency})`, singleCurrency.highestOrderValue],
+            [`Lowest Order Value (${singleCurrency.currency})`, singleCurrency.lowestOrderValue],
+          ]
+        : []),
       ['Average Items Per Order', summary.averageItemsPerOrder],
       ['Paid Orders', summary.paidOrders],
       ['Unpaid Orders', summary.unpaidOrders],
@@ -39,6 +53,18 @@ function renderOrdersCsv(res, data, filename) {
       ['Cancelled %', summary.cancelledOrderPercentage],
     ]),
     {
+      title: 'Revenue By Currency',
+      columns: [
+        { key: 'currency', header: 'Currency' },
+        { key: 'totalOrders', header: 'Orders' },
+        { key: 'totalRevenue', header: 'Total Revenue' },
+        { key: 'averageOrderValue', header: 'Average Order Value' },
+        { key: 'highestOrderValue', header: 'Highest Order Value' },
+        { key: 'lowestOrderValue', header: 'Lowest Order Value' },
+      ],
+      rows: summary.currencyBreakdown,
+    },
+    {
       title: 'Orders',
       columns: [
         { key: 'orderNumber', header: 'Order #' },
@@ -46,6 +72,7 @@ function renderOrdersCsv(res, data, filename) {
         { key: 'customerName', header: 'Customer Name' },
         { key: 'customerPhone', header: 'Phone' },
         { key: 'customerEmail', header: 'Email' },
+        { key: 'region', header: 'Region' },
         { key: 'city', header: 'City' },
         { key: 'shippingAddress', header: 'Shipping Address' },
         { key: 'paymentMethod', header: 'Payment Method' },
@@ -54,7 +81,9 @@ function renderOrdersCsv(res, data, filename) {
         { key: 'currency', header: 'Currency' },
         { key: 'deliveryCharges', header: 'Delivery Charges' },
         { key: 'discountAmount', header: 'Discount' },
+        { key: 'appliedPromoCode', header: 'Promo Code' },
         { key: 'taxAmount', header: 'Tax' },
+        { key: 'vatRatePercent', header: 'VAT %' },
         { key: 'totalAmount', header: 'Total Amount' },
         { key: 'itemCount', header: 'Item Count' },
       ],

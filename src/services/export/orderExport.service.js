@@ -106,10 +106,7 @@ async function getOrdersForExport(filters = {}) {
 
   const orderRows = [];
   const itemRows = [];
-  let totalRevenue = 0;
   let totalQuantitySold = 0;
-  let highestOrderValue = null;
-  let lowestOrderValue = null;
   let paidOrders = 0;
   let unpaidOrders = 0;
   let codOrders = 0;
@@ -118,6 +115,19 @@ async function getOrdersForExport(filters = {}) {
   // Distinct-customer identity key: account id for authed, else guest email or
   // phone. Counts how many orders each customer placed → unique vs repeat.
   const customerOrderCounts = new Map();
+  // Financial totals must NEVER be blended across currencies (AED + SAR summed
+  // as raw numbers is meaningless) — the store is multi-region/multi-currency
+  // (UAE→AED, Saudi→SAR), and "All regions" (spanning both) is the export
+  // dialog's default filter, so this isn't a theoretical edge case. Every
+  // money metric is tracked per-currency; only counts (order/item counts,
+  // payment/cancellation tallies) are safe to blend across the whole result set.
+  const byCurrency = new Map();
+  function currencyBucket(currency) {
+    if (!byCurrency.has(currency)) {
+      byCurrency.set(currency, { currency, totalOrders: 0, totalRevenue: 0, highestOrderValue: null, lowestOrderValue: null });
+    }
+    return byCurrency.get(currency);
+  }
 
   for (const order of orders) {
     const totalAmount = decimalToNumber(order.totalAmount);
@@ -125,11 +135,15 @@ async function getOrdersForExport(filters = {}) {
     const taxAmount = decimalToNumber(order.taxAmount);
     const shippingAmount = decimalToNumber(order.shippingAmount) || 0;
     const itemCount = order.items.reduce((s, i) => s + i.quantity, 0);
+    const currency = order.currency || 'AED';
 
-    totalRevenue += totalAmount;
+    const bucket = currencyBucket(currency);
+    bucket.totalOrders += 1;
+    bucket.totalRevenue += totalAmount;
+    if (bucket.highestOrderValue == null || totalAmount > bucket.highestOrderValue) bucket.highestOrderValue = totalAmount;
+    if (bucket.lowestOrderValue == null || totalAmount < bucket.lowestOrderValue) bucket.lowestOrderValue = totalAmount;
+
     totalQuantitySold += itemCount;
-    if (highestOrderValue == null || totalAmount > highestOrderValue) highestOrderValue = totalAmount;
-    if (lowestOrderValue == null || totalAmount < lowestOrderValue) lowestOrderValue = totalAmount;
     if (order.paymentStatus === 'PAID') paidOrders += 1;
     if (order.paymentStatus === 'UNPAID') unpaidOrders += 1;
     if (order.paymentMethod === 'COD') codOrders += 1;
@@ -149,14 +163,21 @@ async function getOrdersForExport(filters = {}) {
       // legacy city column for orders placed before that change.
       city: order.shippingArea || order.shippingCity || '',
       shippingAddress: formatShippingAddress(order),
+      // Code, not full name (matches the admin Orders list's Region column
+      // convention) — also keeps this narrow enough that the PDF's fixed-height
+      // table rows never wrap, which otherwise cascades into spurious extra
+      // pages (pdfkit's implicit pagination fighting drawTable's own).
+      region: order.region?.code || '',
       paymentMethod: order.paymentMethod,
       paymentStatus: order.paymentStatus,
       status: order.status,
       deliveryCharges: shippingAmount,
       discountAmount,
-      taxAmount, // Reserved for the upcoming VAT phase — always 0 until then.
+      appliedPromoCode: order.appliedPromoCode || '',
+      taxAmount,
+      vatRatePercent: order.vatRatePercent != null ? decimalToNumber(order.vatRatePercent) : '',
       totalAmount,
-      currency: order.currency || 'AED',
+      currency,
       itemCount,
       isGuest: !order.userId,
     });
@@ -170,7 +191,7 @@ async function getOrdersForExport(filters = {}) {
         quantity: item.quantity,
         unitPrice: decimalToNumber(item.price),
         lineTotal: decimalToNumber(item.price) * item.quantity,
-        currency: order.currency || 'AED',
+        currency,
       });
     }
   }
@@ -179,14 +200,25 @@ async function getOrdersForExport(filters = {}) {
   const uniqueCustomers = customerOrderCounts.size;
   const repeatCustomers = [...customerOrderCounts.values()].filter((c) => c > 1).length;
 
+  const currencyBreakdown = [...byCurrency.values()]
+    .map((b) => ({
+      currency: b.currency,
+      totalOrders: b.totalOrders,
+      totalRevenue: round2(b.totalRevenue),
+      averageOrderValue: b.totalOrders > 0 ? round2(b.totalRevenue / b.totalOrders) : 0,
+      highestOrderValue: round2(b.highestOrderValue),
+      lowestOrderValue: round2(b.lowestOrderValue),
+    }))
+    .sort((a, b) => b.totalRevenue - a.totalRevenue);
+
   const summary = {
     totalOrders: orders.length,
-    totalRevenue: round2(totalRevenue),
-    averageOrderValue: orders.length > 0 ? round2(totalRevenue / orders.length) : 0,
     totalQuantitySold,
+    // Per-currency financial breakdown — always present, even for a single
+    // currency (renderers show the plain single-currency layout when there's
+    // only one entry, and a labelled per-currency table when there's more).
+    currencyBreakdown,
     // Extended KPIs (computed in-memory from the full filtered set — exact, not sampled).
-    highestOrderValue: round2(highestOrderValue),
-    lowestOrderValue: round2(lowestOrderValue),
     averageItemsPerOrder: orders.length > 0 ? round2(totalQuantitySold / orders.length) : 0,
     paidOrders,
     unpaidOrders,
