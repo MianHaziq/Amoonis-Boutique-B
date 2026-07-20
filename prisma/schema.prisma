@@ -18,33 +18,74 @@ datasource db {
 /// the mobile app sends in the `X-Region` header (e.g. "UAE", "SA"). Exactly one region
 /// should have `isDefault = true`; it is used when the client sends no/unknown region.
 model Region {
-  id        String   @id @default(uuid())
-  code      String   @unique
-  name      String
-  name_ar   String?
+  id                             String   @id @default(uuid())
+  code                           String   @unique
+  name                           String
+  name_ar                        String?
   // ISO 4217 currency code shown/charged for this region (e.g. "AED", "SAR").
   // Drives storefront price display, order currency, and which orders are
   // eligible for online payment (see payment.service's configured currency).
-  currency  String   @default("AED")
+  currency                       String   @default("AED")
   // Legal entity name shown in the storefront footer's copyright line for this
   // region (e.g. "AMOON BLOOM Trading L.L.C S.O.C™"). Null falls back to the
   // frontend's default siteConfig.legalEntity, so existing regions keep working
   // without an admin having to backfill this.
-  legalEntity String?
+  legalEntity                    String?
   // Flat shipping fee charged on every order placed in this region. Null means
   // no fee has been configured yet — orders ship free until an admin sets one
   // (matches the pre-existing de-facto behavior, so nothing regresses).
-  shippingFlatRate Decimal? @db.Decimal(10, 2)
+  shippingFlatRate               Decimal? @db.Decimal(10, 2)
   // ISO 3166-1 alpha-2 code (e.g. "AE", "SA") — renders the region's flag in the
   // storefront's country/region pickers. Null shows a neutral placeholder until
   // an admin sets it (deliberately not required — regions worked without a flag
   // before this field existed).
-  iso2 String? @db.VarChar(2)
-  isDefault Boolean  @default(false)
-  isActive  Boolean  @default(true)
-  sortOrder Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  iso2                           String?  @db.VarChar(2)
+  // Per-region contact/legal info shown across the storefront (footer, support
+  // section, WhatsApp button, contact page, legal pages, checkout receipt, order
+  // emails). Same fallback convention as legalEntity above: null falls back to
+  // the frontend's siteConfig.contact.*, so existing regions keep working
+  // without an admin having to backfill anything. address_ar/hours_ar fall back
+  // to their English counterpart when unset, mirroring name/name_ar.
+  contactEmail                   String?
+  contactPhone                   String?
+  whatsappNumber                 String?
+  address                        String?
+  address_ar                     String?
+  hours                          String?
+  hours_ar                       String?
+  // Legal citations shown across the 5 storefront legal pages (Privacy, Terms,
+  // Refund Policy, Shipping Policy, Product Disclaimer) — e.g. the IP law
+  // citation, the consumer-protection regulator name. Required at creation
+  // time (see region.service.js createRegion) so a new region can never be
+  // created with the wrong country's law citations showing on its legal
+  // pages. Nullable at the DB level only because regions created before this
+  // feature existed (and their un-set fields, once created) don't get
+  // retrofitted with a NOT NULL constraint — the frontend falls back to
+  // generic, non-country-specific wording for those, never to another
+  // region's specific citation. See Amoon-Bloom-F/src/features/location/regionContact.ts.
+  registrationCity               String?
+  registrationCity_ar            String?
+  currencyDisplayName            String?
+  currencyDisplayName_ar         String?
+  vatLawName                     String?
+  vatLawName_ar                  String?
+  dataProtectionLawName          String?
+  dataProtectionLawName_ar       String?
+  dataProtectionAuthority        String?
+  dataProtectionAuthority_ar     String?
+  ipLawName                      String?
+  ipLawName_ar                   String?
+  consumerProtectionLawName      String?
+  consumerProtectionLawName_ar   String?
+  consumerProtectionAuthority    String?
+  consumerProtectionAuthority_ar String?
+  standardsAuthority             String?
+  standardsAuthority_ar          String?
+  isDefault                      Boolean  @default(false)
+  isActive                       Boolean  @default(true)
+  sortOrder                      Int      @default(0)
+  createdAt                      DateTime @default(now())
+  updatedAt                      DateTime @updatedAt
 
   products      ProductRegion[]
   categories    CategoryRegion[]
@@ -84,10 +125,15 @@ model DeliveryZone {
 
 /// Join: which regions a product is visible in. A row per (product, region) pair —
 /// "both regions" = two rows, "UAE only" = one row. No rows = visible in none.
+/// Also carries an optional manual price override for that region (no auto FX
+/// conversion) — null means "no override set", storefront/order pricing falls
+/// back to Product.price/discountedPrice (the base AED price) for that region.
 model ProductRegion {
-  productId String
-  regionId  String
-  createdAt DateTime @default(now())
+  productId       String
+  regionId        String
+  price           Decimal? @db.Decimal(10, 2)
+  discountedPrice Decimal? @db.Decimal(10, 2)
+  createdAt       DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
   region  Region  @relation(fields: [regionId], references: [id], onDelete: Cascade)
@@ -284,19 +330,19 @@ model BannerImage {
 // ============================================
 
 model Settings {
-  id              String   @id @default("default")
-  siteName        String   @default("Amoon Bloom")
-  logo            String?
-  contactEmail    String   @default("contact@example.com")
-  supportEmail    String   @default("support@example.com")
-  currency        String   @default("USD")
-  maintenanceMode Boolean  @default(false)
-  hiddenPages     String[] @default([])
+  id                String   @id @default("default")
+  siteName          String   @default("Amoon Bloom")
+  logo              String?
+  contactEmail      String   @default("contact@example.com")
+  supportEmail      String   @default("support@example.com")
+  currency          String   @default("AED")
+  maintenanceMode   Boolean  @default(false)
+  hiddenPages       String[] @default([])
   /// Master switch for the product-reviews feature. When true (default), anyone —
   /// signed in or not — can submit a review (guests provide name + email). When
   /// false, only signed-in customers can submit; guest submissions are rejected.
-  allowGuestReviews Boolean @default(true)
-  updatedAt       DateTime @updatedAt
+  allowGuestReviews Boolean  @default(true)
+  updatedAt         DateTime @updatedAt
 }
 
 // ============================================
@@ -409,11 +455,6 @@ model Product {
   subtitle_ar        String?
   price              Decimal       @db.Decimal(10, 2)
   discountedPrice    Decimal?      @db.Decimal(10, 2)
-  // Optional Saudi Riyal price override, entered manually by the admin (no
-  // auto FX conversion). Null means "no SAR price set yet" — storefront/order
-  // pricing falls back to the AED price above for a Saudi-region request.
-  priceSar           Decimal?      @db.Decimal(10, 2)
-  discountedPriceSar Decimal?      @db.Decimal(10, 2)
   // Gift card add-on: free personalized message at add-to-cart time. Enabled per
   // product to mirror the client site, where most (but not all) products offer it.
   giftCardEnabled    Boolean       @default(false)
@@ -465,6 +506,10 @@ model Review {
   guestEmail String?
   rating     Int
   comment    String
+  // Customer-uploaded review photos (Bunny CDN URLs), like Amazon/Daraz reviews.
+  // Empty by default; capped in the controller. Purely additive — existing API
+  // consumers (the mobile app) simply ignore the extra field.
+  media      String[] @default([])
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -541,24 +586,24 @@ model ProductImage {
 // ============================================
 
 model Address {
-  id            String   @id @default(uuid())
-  userId        String
-  label         String?
-  fullName      String?
-  phone         String?
-  streetAddress String?
-  apartment     String?
-  city          String?
-  state         String?
-  postalCode    String?
-  country       String?
+  id             String   @id @default(uuid())
+  userId         String
+  label          String?
+  fullName       String?
+  phone          String?
+  streetAddress  String?
+  apartment      String?
+  city           String?
+  state          String?
+  postalCode     String?
+  country        String?
   // Free-text neighborhood/community, e.g. "Al Barsha" — replaces streetAddress
   // as the primary location detail in the current checkout form.
   area           String?
   deliveryZoneId String?
-  isDefault     Boolean  @default(false)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   orders       Order[]
@@ -587,20 +632,20 @@ model Cart {
 }
 
 model CartItem {
-  id              String   @id @default(uuid())
-  cartId          String
-  productId       String
-  quantity        Int      @default(1)
-  message         String?  @db.Text
+  id               String   @id @default(uuid())
+  cartId           String
+  productId        String
+  quantity         Int      @default(1)
+  message          String?  @db.Text
   /// Chosen variant, e.g. {"Colour":"Pink","Size":"M"} — keyed by the product's
   /// ProductOption.title. Carried through to OrderItem.selectedOptions at checkout.
-  selectedOptions Json?
+  selectedOptions  Json?
   // Gift card / custom name add-on selections. `message` above doubles as the
   // gift card's personalized note when giftCardSelected is true.
-  giftCardSelected Boolean @default(false)
+  giftCardSelected Boolean  @default(false)
   customName       String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   cart    Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -770,20 +815,20 @@ model UserNotificationPreferences {
 /// see it — and so the app can show a badge / unread count. `data` mirrors the FCM
 /// data payload (e.g. { type, orderId, status }) for deep-linking from the inbox.
 model Notification {
-  id        String    @id @default(uuid())
+  id         String    @id @default(uuid())
   /// Null for a notification created before the recipient had an account (see
   /// guestEmail below) — same nullable-then-claimed pattern as Order.userId.
-  userId    String?
+  userId     String?
   /// Guest checkout contact snapshot (only set when userId is NULL), normalized
   /// (trim+lowercase) like Order.guestEmail. linkGuestOrdersToUser re-points
   /// these rows to the new account on signup/login, matching the same email.
   guestEmail String?
-  type      String
-  title     String
-  body      String
-  data      Json?
-  readAt    DateTime?
-  createdAt DateTime  @default(now())
+  type       String
+  title      String
+  body       String
+  data       Json?
+  readAt     DateTime?
+  createdAt  DateTime  @default(now())
 
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -968,6 +1013,8 @@ enum ManagerPermission {
   DELIVERY_ZONES
   VAT
   NOTIFICATIONS
+  USERS
+  MANAGERS
 }
 
 enum DiscountType {

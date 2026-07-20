@@ -132,18 +132,20 @@ const createValidation = [
     // "discount" above the original). The service re-checks against the stored price too.
     .custom((val, { req }) => req.body.price == null || Number(val) <= Number(req.body.price))
     .withMessage('discountedPrice cannot exceed price'),
-  // Optional manual Saudi Riyal price override — same bounds as the AED price. No
-  // auto-conversion: admin enters both currencies explicitly.
-  body('priceSar')
+  // Optional per-region manual price overrides — same bounds as the base AED price. No
+  // auto-conversion: admin enters each region's price explicitly. One entry per region;
+  // shape/range validated here, the cross-field discountedPrice<=price check (per entry)
+  // and regionId validity are enforced in the service, which has the full picture.
+  body('regionPrices').optional().isArray().withMessage('regionPrices must be an array'),
+  body('regionPrices.*.regionId').isString().trim().notEmpty().withMessage('regionPrices[].regionId is required'),
+  body('regionPrices.*.price')
     .optional({ values: 'null' })
-    .isFloat({ min: 0, max: 99999999.99 }).withMessage('priceSar must be between 0 and 99999999.99').bail()
-    .custom(isTwoDecimals).withMessage('priceSar supports at most 2 decimal places'),
-  body('discountedPriceSar')
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('regionPrices[].price must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('regionPrices[].price supports at most 2 decimal places'),
+  body('regionPrices.*.discountedPrice')
     .optional({ values: 'null' })
-    .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPriceSar must be between 0 and 99999999.99').bail()
-    .custom(isTwoDecimals).withMessage('discountedPriceSar supports at most 2 decimal places').bail()
-    .custom((val, { req }) => req.body.priceSar == null || Number(val) <= Number(req.body.priceSar))
-    .withMessage('discountedPriceSar cannot exceed priceSar'),
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('regionPrices[].discountedPrice must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('regionPrices[].discountedPrice supports at most 2 decimal places'),
   // Gift card add-on — free personalized message, toggled per product.
   body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
   body('giftCardExtraPrice')
@@ -218,16 +220,17 @@ const updateValidation = [
     .custom(isTwoDecimals).withMessage('discountedPrice supports at most 2 decimal places').bail()
     .custom((val, { req }) => req.body.price == null || Number(val) <= Number(req.body.price))
     .withMessage('discountedPrice cannot exceed price'),
-  body('priceSar')
+  // Optional per-region manual price overrides — see the create-validation comment above.
+  body('regionPrices').optional().isArray().withMessage('regionPrices must be an array'),
+  body('regionPrices.*.regionId').isString().trim().notEmpty().withMessage('regionPrices[].regionId is required'),
+  body('regionPrices.*.price')
     .optional({ values: 'null' })
-    .isFloat({ min: 0, max: 99999999.99 }).withMessage('priceSar must be between 0 and 99999999.99').bail()
-    .custom(isTwoDecimals).withMessage('priceSar supports at most 2 decimal places'),
-  body('discountedPriceSar')
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('regionPrices[].price must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('regionPrices[].price supports at most 2 decimal places'),
+  body('regionPrices.*.discountedPrice')
     .optional({ values: 'null' })
-    .isFloat({ min: 0, max: 99999999.99 }).withMessage('discountedPriceSar must be between 0 and 99999999.99').bail()
-    .custom(isTwoDecimals).withMessage('discountedPriceSar supports at most 2 decimal places').bail()
-    .custom((val, { req }) => req.body.priceSar == null || Number(val) <= Number(req.body.priceSar))
-    .withMessage('discountedPriceSar cannot exceed priceSar'),
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('regionPrices[].discountedPrice must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('regionPrices[].discountedPrice supports at most 2 decimal places'),
   // Gift card add-on — free personalized message, toggled per product.
   body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
   body('giftCardExtraPrice')

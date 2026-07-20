@@ -54,8 +54,16 @@ function formatDate(d) {
   }
 }
 
-/** Shared shell: branded logo header + white card + contact footer. `subtitle` is optional. */
-function layout(title, bodyHtml, subtitle) {
+/**
+ * Shared shell: branded logo header + white card + contact footer. `subtitle`
+ * is optional. `regionContact` (optional — only order-linked emails have one)
+ * overrides the footer's legal entity / support email with the order's
+ * region-specific values; null/absent fields fall back to the global brand
+ * constants below, so emails with no associated region behave exactly as before.
+ */
+function layout(title, bodyHtml, subtitle, regionContact) {
+  const legalEntity = regionContact?.legalEntity?.trim() || LEGAL_ENTITY;
+  const supportEmail = regionContact?.contactEmail?.trim() || SUPPORT_EMAIL;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${esc(title)}</title></head>
 <body style="margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:${CREAM};padding:24px;">
   <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 16px rgba(31,23,23,.06);border:1px solid ${BORDER};">
@@ -67,8 +75,8 @@ function layout(title, bodyHtml, subtitle) {
       ${bodyHtml}
     </div>
     <div style="padding:20px 32px;background:${CREAM};border-top:1px solid ${BORDER};text-align:center;">
-      <p style="margin:0 0 4px;color:${INK};font-size:12px;font-weight:600;">${esc(LEGAL_ENTITY)}</p>
-      <p style="margin:0;color:${MUTED};font-size:12px;">Questions about your order? <a href="mailto:${SUPPORT_EMAIL}" style="color:${BLOOM_DARK};text-decoration:none;font-weight:600;">${SUPPORT_EMAIL}</a></p>
+      <p style="margin:0 0 4px;color:${INK};font-size:12px;font-weight:600;">${esc(legalEntity)}</p>
+      <p style="margin:0;color:${MUTED};font-size:12px;">Questions about your order? <a href="mailto:${esc(supportEmail)}" style="color:${BLOOM_DARK};text-decoration:none;font-weight:600;">${esc(supportEmail)}</a></p>
     </div>
   </div>
 </body></html>`;
@@ -219,7 +227,7 @@ function renderOrderConfirmation(order) {
     </table>
     ${ctaButton('Track your order', orderTrackUrl(order.id))}`;
 
-  return layout('Order confirmation', body, `Order #${order.orderNumber} · ${formatDate(order.createdAt)}`);
+  return layout('Order confirmation', body, `Order #${order.orderNumber} · ${formatDate(order.createdAt)}`, order.region);
 }
 
 /* ------------------------------- Order status update ------------------------------- */
@@ -263,7 +271,7 @@ function renderOrderStatusUpdate(order, status) {
     </div>
     ${ctaButton('View your order', orderTrackUrl(order.id))}`;
 
-  return layout(meta.heading, body, `Order #${order.orderNumber}`);
+  return layout(meta.heading, body, `Order #${order.orderNumber}`, order.region);
 }
 
 /* -------------------------------- Sales report -------------------------------- */

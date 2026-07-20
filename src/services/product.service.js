@@ -77,8 +77,6 @@ function mapProduct(product) {
   const {
     price,
     discountedPrice,
-    priceSar,
-    discountedPriceSar,
     giftCardExtraPrice,
     customNamePrice,
     images,
@@ -94,12 +92,6 @@ function mapProduct(product) {
     ...rest,
     price: decimalToNumber(price),
     discountedPrice: decimalToNumber(discountedPrice),
-    // Raw SAR override (manually entered by the admin), always present and additive —
-    // null means "no SAR price set yet". Region-currency resolution (which field a
-    // storefront request actually sees as `price`/`discountedPrice`) happens on top of
-    // this via applyRegionCurrency, so admin reads always get both currencies raw.
-    priceSar: decimalToNumber(priceSar),
-    discountedPriceSar: decimalToNumber(discountedPriceSar),
     giftCardExtraPrice: decimalToNumber(giftCardExtraPrice),
     customNamePrice: decimalToNumber(customNamePrice),
     images: imagesList.map((i) => i.url),
@@ -107,32 +99,62 @@ function mapProduct(product) {
     descriptions: descriptionsList,
     productOptions: productOptionsList,
   };
-  // Region tags are only loaded (and only needed) for staff/admin reads. Storefront
-  // responses omit them — the app already filtered by region and doesn't need the tags.
+  // `regions` has two possible shapes depending on the caller:
+  //  - Staff/admin reads (REGION_INCLUDE): each row carries a nested `region` object —
+  //    the full region tag list plus, additively, this product's per-region price
+  //    overrides (`regionPrices`) so the edit form can show/edit every region at once.
+  //  - Storefront reads: 0-1 row, scoped to the requesting region, with only
+  //    price/discountedPrice (no nested `region`) — stashed on an internal key for
+  //    applyRegionCurrency to overlay and strip. Storefront responses never expose
+  //    `regions`/`regionIds` — the app already filtered by region and doesn't need tags.
   if (Array.isArray(regions)) {
-    const regionList = regions.map((r) => r.region).filter(Boolean);
-    out.regions = regionList;
-    out.regionIds = regionList.map((r) => r.id);
+    const hasRegionTags = regions.some((r) => r.region);
+    if (hasRegionTags) {
+      const regionList = regions.map((r) => r.region).filter(Boolean);
+      out.regions = regionList;
+      out.regionIds = regionList.map((r) => r.id);
+      out.regionPrices = regions.map((r) => ({
+        regionId: r.regionId,
+        price: decimalToNumber(r.price),
+        discountedPrice: decimalToNumber(r.discountedPrice),
+      }));
+    } else {
+      out._regionPriceRow = regions[0]
+        ? { price: decimalToNumber(regions[0].price), discountedPrice: decimalToNumber(regions[0].discountedPrice) }
+        : null;
+    }
   }
   return out;
 }
 
 /**
- * Overlay a region's currency onto an already-mapped product for STOREFRONT reads:
- * when the currency is SAR, `price`/`discountedPrice` become the SAR override (falling
- * back to the AED value when no SAR price is set), so the frontend reads the same
- * field names regardless of region — no currency-branching needed client-side.
- * Staff/admin reads should NOT call this — they get the raw AED + SAR fields so the
- * edit form can show/edit both.
+ * Overlay the requesting region's price override (if any) onto an already-mapped
+ * product for STOREFRONT reads: `price`/`discountedPrice` become the region's override
+ * (falling back to the base AED value when no override is set for that region), so the
+ * frontend reads the same field names regardless of region — no currency-branching
+ * needed client-side. Relies on `mapped._regionPriceRow`, set by mapProduct from a
+ * region-scoped ProductRegion include (see REGION_PRICE_INCLUDE below).
+ * Staff/admin reads should NOT call this — they get the raw base price + regionPrices
+ * array so the edit form can show/edit every region's override at once.
  */
-function applyRegionCurrency(mapped, currency) {
-  if (!mapped || currency !== 'SAR') return mapped;
+function applyRegionCurrency(mapped) {
+  if (!mapped) return mapped;
+  const override = mapped._regionPriceRow;
+  const { _regionPriceRow, ...clean } = mapped;
+  if (!override) return clean;
   return {
-    ...mapped,
-    price: mapped.priceSar != null ? mapped.priceSar : mapped.price,
-    discountedPrice:
-      mapped.discountedPriceSar != null ? mapped.discountedPriceSar : mapped.discountedPrice,
+    ...clean,
+    price: override.price != null ? override.price : clean.price,
+    discountedPrice: override.discountedPrice != null ? override.discountedPrice : clean.discountedPrice,
   };
+}
+
+// Storefront (non-staff) include: the requesting region's own price-override row only —
+// no nested region tag, distinguishing it from REGION_INCLUDE in mapProduct above.
+function regionPriceInclude(regionId) {
+  return regionId
+    ? { regions: { where: { regionId }, select: { regionId: true, price: true, discountedPrice: true } } }
+    : {};
 }
 
 /**
@@ -177,16 +199,19 @@ async function attachRatingAggregates(mappedProducts) {
  * Same resolution as applyRegionCurrency, but works directly on a raw Prisma product
  * row (Decimal fields) instead of an already-mapped product — used where only the
  * numeric price is needed (order totals, cart line totals), not the full product shape.
+ * `row.regions` must be pre-scoped to the requesting region (0-1 row) by the caller's
+ * query, e.g. `regions: { where: { regionId }, select: { price, discountedPrice } }`.
  */
-function regionPriceFromRow(row, currency) {
+function regionPriceFromRow(row) {
   const price = decimalToNumber(row.price) ?? 0;
   const discountedPrice = decimalToNumber(row.discountedPrice);
-  if (currency !== 'SAR') return { price, discountedPrice };
-  const priceSar = decimalToNumber(row.priceSar);
-  const discountedPriceSar = decimalToNumber(row.discountedPriceSar);
+  const override = Array.isArray(row.regions) ? row.regions[0] : null;
+  if (!override) return { price, discountedPrice };
+  const overridePrice = decimalToNumber(override.price);
+  const overrideDiscountedPrice = decimalToNumber(override.discountedPrice);
   return {
-    price: priceSar != null ? priceSar : price,
-    discountedPrice: discountedPriceSar != null ? discountedPriceSar : discountedPrice,
+    price: overridePrice != null ? overridePrice : price,
+    discountedPrice: overrideDiscountedPrice != null ? overrideDiscountedPrice : discountedPrice,
   };
 }
 
@@ -306,6 +331,30 @@ async function resolveWriteRegionIds(regionIds) {
   return def ? [def.id] : [];
 }
 
+/**
+ * Validate & index a `regionPrices: {regionId, price, discountedPrice}[]` payload
+ * (the per-region manual price override, replacing the old single-currency
+ * priceSar/discountedPriceSar columns) into a Map keyed by regionId, for merging
+ * onto the ProductRegion create/update rows. Throws INVALID_PRICE (naming the
+ * offending region) when a discount exceeds its own region's base price.
+ */
+function buildRegionPriceMap(regionPrices) {
+  const map = new Map();
+  if (!Array.isArray(regionPrices)) return map;
+  for (const entry of regionPrices) {
+    if (!entry || typeof entry.regionId !== 'string' || !entry.regionId) continue;
+    const price = entry.price != null ? Number(entry.price) : null;
+    const discountedPrice = entry.discountedPrice != null ? Number(entry.discountedPrice) : null;
+    if (discountedPrice != null && price != null && discountedPrice > price) {
+      const err = new Error(`discountedPrice cannot exceed price for region ${entry.regionId}`);
+      err.code = 'INVALID_PRICE';
+      throw err;
+    }
+    map.set(entry.regionId, { price, discountedPrice });
+  }
+  return map;
+}
+
 async function createProduct(data) {
   const categoryId = data.categoryId ? String(data.categoryId).trim() || null : null;
   const status = normalizeStatus(data.status);
@@ -316,15 +365,7 @@ async function createProduct(data) {
     err.code = 'INVALID_PRICE';
     throw err;
   }
-  if (
-    data.discountedPriceSar != null &&
-    data.priceSar != null &&
-    Number(data.discountedPriceSar) > Number(data.priceSar)
-  ) {
-    const err = new Error('discountedPriceSar cannot exceed priceSar');
-    err.code = 'INVALID_PRICE';
-    throw err;
-  }
+  const regionPriceMap = buildRegionPriceMap(data.regionPrices);
   const regionIds = await resolveWriteRegionIds(data.regionIds);
   const imageUrls = Array.isArray(data.images)
     ? data.images.filter((u) => typeof u === 'string' && u.trim()).slice(0, MAX_IMAGES)
@@ -366,8 +407,6 @@ async function createProduct(data) {
         subtitle_ar: productDraft.subtitle_ar ?? null,
         price: data.price,
         discountedPrice: data.discountedPrice ?? null,
-        priceSar: data.priceSar != null ? Number(data.priceSar) : null,
-        discountedPriceSar: data.discountedPriceSar != null ? Number(data.discountedPriceSar) : null,
         giftCardEnabled: !!data.giftCardEnabled,
         giftCardExtraPrice: data.giftCardExtraPrice != null ? Number(data.giftCardExtraPrice) : null,
         customNameEnabled: !!data.customNameEnabled,
@@ -375,7 +414,14 @@ async function createProduct(data) {
         quantity,
         status,
         ...(regionIds.length > 0
-          ? { regions: { create: regionIds.map((regionId) => ({ regionId })) } }
+          ? {
+              regions: {
+                create: regionIds.map((regionId) => {
+                  const rp = regionPriceMap.get(regionId);
+                  return { regionId, price: rp?.price ?? null, discountedPrice: rp?.discountedPrice ?? null };
+                }),
+              },
+            }
           : {}),
         ...(categoryId ? { categoryId } : {}),
         ...(imageUrls.length > 0
@@ -451,19 +497,7 @@ async function updateProduct(id, data) {
       throw err;
     }
   }
-  if (data.discountedPriceSar != null) {
-    const basePriceSar =
-      data.priceSar != null
-        ? Number(data.priceSar)
-        : existing.priceSar != null
-          ? Number(existing.priceSar)
-          : null;
-    if (basePriceSar != null && Number(data.discountedPriceSar) > basePriceSar) {
-      const err = new Error('discountedPriceSar cannot exceed priceSar');
-      err.code = 'INVALID_PRICE';
-      throw err;
-    }
-  }
+  const regionPriceMap = buildRegionPriceMap(data.regionPrices);
 
   const bilingualDraft = {};
   if (data.title !== undefined) bilingualDraft.title = data.title;
@@ -477,11 +511,27 @@ async function updateProduct(id, data) {
   const descriptionRows = data.descriptions !== undefined ? normalizeDescriptions(data.descriptions) : null;
   const productOptionRows = data.productOptions !== undefined ? normalizeProductOptions(data.productOptions) : null;
 
-  // Region links are replaced wholesale when `regionIds` is sent. Validate before
-  // opening the transaction so an unknown id fails fast without a partial write.
-  const newRegionIds = data.regionIds !== undefined
-    ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
-    : null;
+  // Region links are replaced wholesale when `regionIds` OR `regionPrices` is sent — a
+  // price-only update (visibility untouched) still needs the full existing region set so
+  // the replace-on-write below doesn't wipe visibility. Validate before opening the
+  // transaction so an unknown id fails fast without a partial write. Existing per-region
+  // prices are fetched here too, as the fallback for any region left out of an incoming
+  // `regionPrices` array (e.g. admin only touched Morocco's price — Saudi's must survive
+  // the delete+recreate below, not silently null out).
+  let existingRegionPriceByRegionId = new Map();
+  let newRegionIds = null;
+  if (data.regionIds !== undefined || data.regionPrices !== undefined) {
+    const existingRegionRows = await prisma.productRegion.findMany({
+      where: { productId: id },
+      select: { regionId: true, price: true, discountedPrice: true },
+    });
+    existingRegionPriceByRegionId = new Map(
+      existingRegionRows.map((r) => [r.regionId, { price: decimalToNumber(r.price), discountedPrice: decimalToNumber(r.discountedPrice) }])
+    );
+    newRegionIds = data.regionIds !== undefined
+      ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
+      : [...existingRegionPriceByRegionId.keys()];
+  }
 
   await Promise.all([
     autoTranslate(bilingualDraft, PRODUCT_BILINGUAL),
@@ -507,12 +557,6 @@ async function updateProduct(id, data) {
     ...(bilingualDraft.subtitle_ar !== undefined && { subtitle_ar: bilingualDraft.subtitle_ar ?? null }),
     ...(data.price != null && { price: data.price }),
     ...(data.discountedPrice !== undefined && { discountedPrice: data.discountedPrice }),
-    ...(data.priceSar !== undefined && {
-      priceSar: data.priceSar != null ? Number(data.priceSar) : null,
-    }),
-    ...(data.discountedPriceSar !== undefined && {
-      discountedPriceSar: data.discountedPriceSar != null ? Number(data.discountedPriceSar) : null,
-    }),
     ...(data.giftCardEnabled !== undefined && { giftCardEnabled: !!data.giftCardEnabled }),
     ...(data.giftCardExtraPrice !== undefined && {
       giftCardExtraPrice: data.giftCardExtraPrice != null ? Number(data.giftCardExtraPrice) : null,
@@ -601,7 +645,13 @@ async function updateProduct(id, data) {
       await tx.productRegion.deleteMany({ where: { productId: id } });
       if (newRegionIds.length > 0) {
         await tx.productRegion.createMany({
-          data: newRegionIds.map((regionId) => ({ productId: id, regionId })),
+          data: newRegionIds.map((regionId) => {
+            // An explicit entry in this update's regionPrices wins; otherwise carry the
+            // region's existing price forward so an unrelated visibility/price edit for
+            // another region doesn't silently null this one out.
+            const rp = regionPriceMap.get(regionId) ?? existingRegionPriceByRegionId.get(regionId);
+            return { productId: id, regionId, price: rp?.price ?? null, discountedPrice: rp?.discountedPrice ?? null };
+          }),
           skipDuplicates: true,
         });
       }
@@ -703,7 +753,7 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null, visibilit
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
-        ...(visibility.isStaff ? REGION_INCLUDE : {}),
+        ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     }),
     prisma.product.count({ where }),
@@ -714,7 +764,7 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null, visibilit
   return {
     // Storefront-only: overlay the requesting region's currency (AED/SAR) so `price`/
     // `discountedPrice` are already correct for the region. Staff/admin keep raw fields.
-    items: visibility.isStaff ? mapped : mapped.map((p) => applyRegionCurrency(p, visibility.currency)),
+    items: visibility.isStaff ? mapped : mapped.map((p) => applyRegionCurrency(p)),
     total,
     page: safePage,
     limit: take,
@@ -814,7 +864,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
-        ...(visibility.isStaff ? REGION_INCLUDE : {}),
+        ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     });
     const orderIndex = new Map(pageIds.map((id, i) => [id, i]));
@@ -824,7 +874,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
   }
 
   return {
-    items: visibility.isStaff ? items : items.map((p) => applyRegionCurrency(p, visibility.currency)),
+    items: visibility.isStaff ? items : items.map((p) => applyRegionCurrency(p)),
     total,
     page: safePage,
     limit: take,
@@ -886,7 +936,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
-        ...(visibility.isStaff ? REGION_INCLUDE : {}),
+        ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     }),
     prisma.product.count({ where }),
@@ -897,7 +947,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
   return {
     items: visibility.isStaff
       ? mappedResults
-      : mappedResults.map((p) => applyRegionCurrency(p, visibility.currency)),
+      : mappedResults.map((p) => applyRegionCurrency(p)),
     total,
     page: safePage,
     limit: take,
@@ -914,13 +964,13 @@ async function getProductById(id, visibility = {}) {
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
-      ...(visibility.isStaff ? REGION_INCLUDE : {}),
+      ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
     },
   });
   if (!product) return null;
   const mapped = mapProduct(product);
   await attachRatingAggregates([mapped]);
-  return visibility.isStaff ? mapped : applyRegionCurrency(mapped, visibility.currency);
+  return visibility.isStaff ? mapped : applyRegionCurrency(mapped);
 }
 
 module.exports = {

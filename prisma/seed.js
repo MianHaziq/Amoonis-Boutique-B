@@ -29,7 +29,7 @@ async function main() {
       siteName: 'Amoon Bloom',
       contactEmail: 'contact@example.com',
       supportEmail: 'support@example.com',
-      currency: 'USD',
+      currency: 'AED',
     },
   });
 

@@ -4,6 +4,7 @@ const router = express.Router();
 const {
   getProductReviews,
   createReview,
+  uploadReviewMedia,
   getAllReviewsAdmin,
   deleteReviewAdmin,
 } = require('../controllers/review.controller');
@@ -11,6 +12,7 @@ const { optionalAuth } = require('../middleware/auth');
 const { verifyAdminOrManager, requireManagerPermission } = require('../middleware/managerAuth');
 const { handleValidationErrors } = require('../middleware/validate');
 const { publicLimiter } = require('../middleware/rateLimit');
+const { uploadImage: uploadImageMulter } = require('../middleware/upload');
 
 /**
  * @swagger
@@ -30,6 +32,10 @@ const createReviewValidation = [
   body('comment').trim().notEmpty().withMessage('Review text is required'),
   body('guestName').optional({ values: 'falsy' }).trim().isLength({ max: 120 }),
   body('guestEmail').optional({ values: 'falsy' }).trim().isEmail().withMessage('Valid email required'),
+  // Optional photos: an array of up to 6 CDN URLs (further validated/sanitized
+  // server-side against the allowed CDN host in the controller).
+  body('media').optional({ nullable: true }).isArray({ max: 6 }).withMessage('media must be an array of up to 6 URLs'),
+  body('media.*').optional().isString().isLength({ max: 500 }),
 ];
 
 /**
@@ -106,6 +112,39 @@ router.post(
   createReviewValidation,
   handleValidationErrors,
   createReview
+);
+
+/**
+ * @swagger
+ * /reviews/media:
+ *   post:
+ *     summary: Upload a review photo (public — customers & guests)
+ *     description: |
+ *       Uploads a single image for use in a product review and returns its CDN URL.
+ *       Send the URL back in the `media` array when submitting the review. Content is
+ *       validated by its actual bytes (JPEG/PNG/WebP/GIF, max 5MB); rate-limited.
+ *     tags: [Reviews]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file]
+ *             properties:
+ *               file: { type: string, format: binary }
+ *     responses:
+ *       200:
+ *         description: Uploaded — returns { url }
+ *       400:
+ *         description: No file, or file is not a valid image
+ */
+router.post(
+  '/media',
+  publicLimiter,
+  optionalAuth,
+  uploadImageMulter.single('file'),
+  uploadReviewMedia
 );
 
 /**

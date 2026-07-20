@@ -14,6 +14,54 @@ const {
 } = require('../constants/managerPermissions');
 
 /**
+ * Row-level authorization for the Users admin section. The route middleware
+ * only checks "does this caller hold USERS and/or MANAGERS at all" — it can't
+ * know which one is needed until we know the ROLE of the row being touched.
+ * This is where that's enforced, plus the one rule that never bends: no
+ * manager, no matter which permissions they hold, may ever see, create,
+ * modify, or delete an ADMIN account, or set anyone's role to ADMIN. Only an
+ * actual admin (req.isAdmin) can touch ADMIN rows or the ADMIN role.
+ */
+const ADMIN_ROLE = 'ADMIN';
+const ROLE_PERMISSION = { CUSTOMER: 'USERS', MANAGER: 'MANAGERS' };
+
+/** Permission key required to touch a user of this role, or null if the role
+ *  (ADMIN) is off-limits to every manager regardless of permissions. */
+function permissionForRole(role) {
+  return ROLE_PERMISSION[role] || null;
+}
+
+/** True if the caller (admin or manager) is allowed to act on a row/role. */
+function canAccessRole(req, role) {
+  if (req.isAdmin) return true;
+  const needed = permissionForRole(role);
+  if (!needed) return false; // ADMIN — no manager permission ever unlocks this
+  return Array.isArray(req.managerPermissions) && req.managerPermissions.includes(needed);
+}
+
+/** Roles a manager caller is allowed to see/act on, given their permissions.
+ *  Admin callers get null (meaning "unrestricted"). ADMIN is never included. */
+function allowedRolesFor(req) {
+  if (req.isAdmin) return null;
+  const perms = Array.isArray(req.managerPermissions) ? req.managerPermissions : [];
+  const roles = [];
+  if (perms.includes('USERS')) roles.push('CUSTOMER');
+  if (perms.includes('MANAGERS')) roles.push('MANAGER');
+  return roles;
+}
+
+/** Hides ADMIN rows from a manager as "not found" (rather than 403) so a
+ *  manager can't even confirm an admin account exists by probing an id. */
+function hideAdminFromManager(req, res, targetRole) {
+  if (req.isAdmin) return false;
+  if (targetRole === ADMIN_ROLE) {
+    error(res, 'User not found', 404);
+    return true;
+  }
+  return false;
+}
+
+/**
  * Capitalize first letter, lowercase rest (e.g., "ADMIN" -> "Admin")
  */
 const capitalize = (str) => {
@@ -88,6 +136,10 @@ const createUser = async (req, res, next) => {
       return error(res, 'Invalid role. Allowed values: CUSTOMER, MANAGER', 400);
     }
 
+    if (!canAccessRole(req, resolvedRole)) {
+      return error(res, 'You do not have permission to perform this action.', 403);
+    }
+
     let managerData = {};
     if (resolvedRole === 'MANAGER') {
       const title = managerTitle != null ? String(managerTitle).trim() : '';
@@ -159,8 +211,18 @@ const getAllUsers = async (req, res, next) => {
       ];
     }
 
+    // Manager callers are scoped to the roles their permissions cover (never
+    // ADMIN, regardless of permissions). An explicit ?role= outside that scope
+    // is a permission error, not a silent empty result — mirrors requireManagerPermission's 403.
+    const allowedRoles = allowedRolesFor(req);
     if (role) {
-      where.role = role.toUpperCase();
+      const requestedRole = role.toUpperCase();
+      if (allowedRoles && !allowedRoles.includes(requestedRole)) {
+        return error(res, 'You do not have permission to perform this action.', 403);
+      }
+      where.role = requestedRole;
+    } else if (allowedRoles) {
+      where.role = { in: allowedRoles };
     }
 
     if (status) {
@@ -222,6 +284,11 @@ const getUserById = async (req, res, next) => {
       return error(res, 'User not found', 404);
     }
 
+    if (hideAdminFromManager(req, res, user.role)) return;
+    if (!canAccessRole(req, user.role)) {
+      return error(res, 'You do not have permission to perform this action.', 403);
+    }
+
     return success(res, transformUser(user), 'User fetched successfully', 200);
   } catch (err) {
     next(err);
@@ -259,6 +326,17 @@ const updateUser = async (req, res, next) => {
 
     if (role && !['CUSTOMER', 'ADMIN', 'MANAGER'].includes(nextRole)) {
       return error(res, 'Invalid role', 400);
+    }
+
+    if (hideAdminFromManager(req, res, existingUser.role)) return;
+    if (!canAccessRole(req, existingUser.role)) {
+      return error(res, 'You do not have permission to perform this action.', 403);
+    }
+    // Changing role: a manager needs permission over the DESTINATION role too
+    // (e.g. USERS alone can't turn a customer into a manager), and can never
+    // set anyone's role to ADMIN, regardless of which permissions they hold.
+    if (role && nextRole !== existingUser.role && !canAccessRole(req, nextRole)) {
+      return error(res, 'You do not have permission to perform this action.', 403);
     }
 
     const updateData = {};
@@ -358,6 +436,10 @@ const deleteUser = async (req, res, next) => {
       return error(res, 'Admin users cannot be deleted', 403);
     }
 
+    if (!canAccessRole(req, user.role)) {
+      return error(res, 'You do not have permission to perform this action.', 403);
+    }
+
     await prisma.user.delete({
       where: { id },
     });
@@ -384,6 +466,11 @@ const toggleUserStatus = async (req, res, next) => {
 
     if (!user) {
       return error(res, 'User not found', 404);
+    }
+
+    if (hideAdminFromManager(req, res, user.role)) return;
+    if (!canAccessRole(req, user.role)) {
+      return error(res, 'You do not have permission to perform this action.', 403);
     }
 
     const newStatus = status
@@ -434,6 +521,16 @@ const changeUserRole = async (req, res, next) => {
       return error(res, 'User not found', 404);
     }
 
+    if (hideAdminFromManager(req, res, user.role)) return;
+    if (!canAccessRole(req, user.role)) {
+      return error(res, 'You do not have permission to perform this action.', 403);
+    }
+    // Changing role: a manager needs permission over the DESTINATION role too,
+    // and can never set anyone's role to ADMIN, regardless of permissions held.
+    if (upper !== user.role && !canAccessRole(req, upper)) {
+      return error(res, 'You do not have permission to perform this action.', 403);
+    }
+
     let data = { role: upper };
 
     if (upper === 'MANAGER') {
@@ -474,14 +571,25 @@ const changeUserRole = async (req, res, next) => {
  */
 const getUserStats = async (req, res, next) => {
   try {
+    // Scoped the same way as getAllUsers: a manager only sees counts for the
+    // roles their permissions cover. Admin count is never shown to a manager,
+    // even one with both USERS and MANAGERS — and total/active/inactive are
+    // summed over the visible scope only, so they can't be used to infer the
+    // size of the invisible (admin, or other-permission) population.
+    const allowedRoles = allowedRolesFor(req);
+    const canSeeCustomers = !allowedRoles || allowedRoles.includes('CUSTOMER');
+    const canSeeManagers = !allowedRoles || allowedRoles.includes('MANAGER');
+    const canSeeAdmins = !!req.isAdmin;
+    const scopeWhere = allowedRoles ? { role: { in: allowedRoles } } : {};
+
     const [totalUsers, customers, admins, managers, activeUsers, inactiveUsers] =
       await Promise.all([
-        prisma.user.count(),
-        prisma.user.count({ where: { role: 'CUSTOMER' } }),
-        prisma.user.count({ where: { role: 'ADMIN' } }),
-        prisma.user.count({ where: { role: 'MANAGER' } }),
-        prisma.user.count({ where: { status: 'ACTIVE' } }),
-        prisma.user.count({ where: { status: 'INACTIVE' } }),
+        prisma.user.count({ where: scopeWhere }),
+        canSeeCustomers ? prisma.user.count({ where: { role: 'CUSTOMER' } }) : Promise.resolve(0),
+        canSeeAdmins ? prisma.user.count({ where: { role: 'ADMIN' } }) : Promise.resolve(0),
+        canSeeManagers ? prisma.user.count({ where: { role: 'MANAGER' } }) : Promise.resolve(0),
+        prisma.user.count({ where: { ...scopeWhere, status: 'ACTIVE' } }),
+        prisma.user.count({ where: { ...scopeWhere, status: 'INACTIVE' } }),
       ]);
 
     return success(res, {

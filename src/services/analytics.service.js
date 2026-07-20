@@ -1,8 +1,8 @@
-const { Prisma } = require('@prisma/client');
+﻿const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
 const regionService = require('./region.service');
 
-// Region id that can never match a row — so an unknown region code yields zeroed
+// Region id that can never match a row â€” so an unknown region code yields zeroed
 // analytics rather than silently falling back to "all regions".
 const NO_MATCH_REGION_ID = '00000000-0000-0000-0000-000000000000';
 
@@ -23,7 +23,7 @@ async function attachRegionFilter(range, params) {
   const region = await regionService.getRegionByCode(code);
   range.regionId = region ? region.id : NO_MATCH_REGION_ID;
   range.regionCode = region ? region.code : code.toUpperCase();
-  // A single region has one unambiguous currency — prefer it over the global default.
+  // A single region has one unambiguous currency â€” prefer it over the global default.
   range.currency = region?.currency || null;
   return range;
 }
@@ -266,7 +266,7 @@ async function fetchStatusBreakdown(range) {
 }
 
 /**
- * One GROUP BY on Order.createdAt — day or month buckets (indexed range scan when dated).
+ * One GROUP BY on Order.createdAt â€” day or month buckets (indexed range scan when dated).
  */
 async function fetchSalesByCalendarUnit(range, unit) {
   const u = unit === 'month' ? 'month' : 'day';
@@ -390,7 +390,7 @@ async function getDailySalesAnalytics(params) {
   return {
     preset: w.preset,
     presetLabel: isAllTime ? `${w.presetLabel} (monthly buckets)` : w.presetLabel,
-    currency: w.range.currency ?? settingsRow?.currency ?? 'USD',
+    currency: w.range.currency ?? settingsRow?.currency ?? 'AED',
     range: rangeMetaPayload(w.range),
     granularity: isAllTime ? 'month' : 'day',
     note: isAllTime
@@ -626,7 +626,7 @@ function rangeMetaPayload(range) {
       from: null,
       toExclusive: null,
       region,
-      timezoneNote: 'No date filter — entire order history.',
+      timezoneNote: 'No date filter â€” entire order history.',
     };
   }
   return {
@@ -670,7 +670,7 @@ async function getRevenueAnalytics(params) {
   return {
     preset: preset || null,
     presetLabel,
-    currency: range.currency ?? settingsRow?.currency ?? 'USD',
+    currency: range.currency ?? settingsRow?.currency ?? 'AED',
     range: rangeMetaPayload(range),
     bucket: trunc,
     summary,
@@ -701,7 +701,7 @@ async function getKpiAnalytics(params) {
   return {
     preset: w.preset,
     presetLabel: w.presetLabel,
-    currency: w.range.currency ?? settingsRow?.currency ?? 'USD',
+    currency: w.range.currency ?? settingsRow?.currency ?? 'AED',
     range: rangeMetaPayload(w.range),
     totals: {
       totalOrdersAllStatuses: num(r.totalOrdersAllStatuses),
@@ -765,17 +765,17 @@ async function getCategorySalesAnalytics(params) {
   return {
     preset: w.preset,
     presetLabel: w.presetLabel,
-    currency: w.range.currency ?? settingsRow?.currency ?? 'USD',
+    currency: w.range.currency ?? settingsRow?.currency ?? 'AED',
     range: rangeMetaPayload(w.range),
     note:
-      'Revenue is the sum of line totals (quantity × captured unit price) on **non-cancelled** orders only. Compare categories for “which sold more” in the selected window.',
+      'Revenue is the sum of line totals (quantity Ã— captured unit price) on **non-cancelled** orders only. Compare categories for â€œwhich sold moreâ€ in the selected window.',
     totalNetLineRevenue: Math.round(totalNetRevenue * 100) / 100,
     categories,
   };
 }
 
 /**
- * Net revenue/quantity by product (excludes cancelled orders) — the same
+ * Net revenue/quantity by product (excludes cancelled orders) â€” the same
  * grouping convention as fetchCategorySales, one level down to product. Used
  * to derive best/least-selling product rankings for the Analytics Export.
  */
@@ -826,7 +826,7 @@ async function getProductSalesAnalytics(params) {
 }
 
 /**
- * Live catalog snapshot (no date range) — total sellable stock, low-stock and
+ * Live catalog snapshot (no date range) â€” total sellable stock, low-stock and
  * out-of-stock published products. Reuses the exact LOW_STOCK_THRESHOLD
  * convention from report.service.buildStockReport (the daily digest email) so
  * "low stock" means the same thing everywhere in the system.

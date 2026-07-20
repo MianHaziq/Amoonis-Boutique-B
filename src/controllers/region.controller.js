@@ -61,4 +61,22 @@ async function deleteRegion(req, res, next) {
   }
 }
 
-module.exports = { listRegions, createRegion, updateRegion, deleteRegion };
+/**
+ * POST /regions/:id/bulk-assign – Link ALL existing products and/or
+ * categories to this region in one shot (admin). Idempotent.
+ */
+async function bulkAssign(req, res, next) {
+  try {
+    const { products, categories } = req.body;
+    const result = await regionService.bulkAssignRegion(req.params.id, {
+      products: !!products,
+      categories: !!categories,
+    });
+    if (!result) return error(res, 'Region not found', 404);
+    return success(res, result, 'Region catalog visibility updated', 200);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listRegions, createRegion, updateRegion, deleteRegion, bulkAssign };

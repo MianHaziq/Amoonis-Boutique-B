@@ -14,6 +14,29 @@ const { publicLimiter } = require('../middleware/rateLimit');
  *   description: Storefront regions (multi-region support). Public list (active only); admin/manager CRUD.
  */
 
+// Legal citations shown across the 5 storefront legal pages — required at
+// creation time (see region.service.js createRegion) so a new region can
+// never go live with the wrong country's law citations. Mirrors code/name.
+const LEGAL_FIELD_BASE_NAMES = [
+  'registrationCity',
+  'currencyDisplayName',
+  'vatLawName',
+  'dataProtectionLawName',
+  'dataProtectionAuthority',
+  'ipLawName',
+  'consumerProtectionLawName',
+  'consumerProtectionAuthority',
+  'standardsAuthority',
+];
+const legalFieldsRequiredValidation = LEGAL_FIELD_BASE_NAMES.flatMap((f) => [
+  body(f).isString().trim().notEmpty().withMessage(`${f} is required`),
+  body(`${f}_ar`).isString().trim().notEmpty().withMessage(`${f}_ar is required`),
+]);
+const legalFieldsOptionalValidation = LEGAL_FIELD_BASE_NAMES.flatMap((f) => [
+  body(f).optional({ nullable: true }).isString().trim(),
+  body(`${f}_ar`).optional({ nullable: true }).isString().trim(),
+]);
+
 const createValidation = [
   body('code').isString().trim().notEmpty().withMessage('code is required (e.g. UAE, SA)'),
   body('name').isString().trim().notEmpty().withMessage('name is required'),
@@ -26,6 +49,7 @@ const createValidation = [
     .withMessage('shippingFlatRate must be a non-negative number'),
   body('iso2').optional({ nullable: true }).isString().trim().isLength({ min: 2, max: 2 })
     .withMessage('iso2 must be a 2-letter country code (e.g. AE, SA)'),
+  ...legalFieldsRequiredValidation,
   body('isDefault').optional().isBoolean(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),
@@ -44,6 +68,7 @@ const updateValidation = [
     .withMessage('shippingFlatRate must be a non-negative number'),
   body('iso2').optional({ nullable: true }).isString().trim().isLength({ min: 2, max: 2 })
     .withMessage('iso2 must be a 2-letter country code (e.g. AE, SA)'),
+  ...legalFieldsOptionalValidation,
   body('isDefault').optional().isBoolean(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),
@@ -178,6 +203,58 @@ router.delete(
   idParam,
   handleValidationErrors,
   regionController.deleteRegion
+);
+
+/**
+ * @swagger
+ * /regions/{id}/bulk-assign:
+ *   post:
+ *     summary: Bulk-link all existing products and/or categories to a region (admin/manager)
+ *     description: |
+ *       A new region starts with zero products/categories visible (same "no rows = visible in
+ *       none" rule every region-scoped entity follows). This links ALL current products and/or
+ *       categories to the given region in one shot — the fix for "I made a new region and
+ *       nothing shows up." Idempotent: only adds missing links, safe to call more than once.
+ *     tags: [Regions]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               products: { type: boolean, example: true, description: Link every existing product to this region }
+ *               categories: { type: boolean, example: true, description: Link every existing category to this region }
+ *     responses:
+ *       200:
+ *         description: Counts of newly-created links (already-linked items are skipped, not recounted)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     productsLinked: { type: integer, example: 32 }
+ *                     categoriesLinked: { type: integer, example: 4 }
+ *       404: { description: Region not found }
+ */
+router.post(
+  '/:id/bulk-assign',
+  verifyAdminOrManager,
+  requireManagerPermission('REGIONS'),
+  idParam,
+  [body('products').optional().isBoolean(), body('categories').optional().isBoolean()],
+  handleValidationErrors,
+  regionController.bulkAssign
 );
 
 module.exports = router;

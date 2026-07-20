@@ -1,4 +1,7 @@
+const crypto = require('crypto');
 const prisma = require('../config/db');
+const bunnyStorage = require('../services/bunnyStorage.service');
+const { detectImageMime } = require('../utils/fileSignature');
 const { success, error } = require('../utils/response');
 
 const REVIEWER_SELECT = {
@@ -7,16 +10,56 @@ const REVIEWER_SELECT = {
   avatar: true,
 };
 
+// Max photos a single review may carry (mirrors the storefront picker cap).
+const MAX_REVIEW_MEDIA = 6;
+
+// Only URLs served from our own Bunny CDN are accepted as review media, so a
+// caller can't inject an arbitrary external/hostile URL into a public review.
+function isAllowedMediaUrl(url) {
+  if (typeof url !== 'string') return false;
+  const cdnHost = process.env.BUNNY_IMAGES_CDN_HOSTNAME || '';
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && !!cdnHost && u.hostname === cdnHost;
+  } catch {
+    return false;
+  }
+}
+
+// Normalize a client-supplied media array: keep only well-formed CDN URLs,
+// de-duplicate, and cap the count. Returns [] for anything unusable.
+function sanitizeMedia(media) {
+  if (!Array.isArray(media)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of media) {
+    const url = typeof item === 'string' ? item.trim() : '';
+    if (!url || seen.has(url) || !isAllowedMediaUrl(url)) continue;
+    seen.add(url);
+    out.push(url);
+    if (out.length >= MAX_REVIEW_MEDIA) break;
+  }
+  return out;
+}
+
 function mapReview(review) {
   if (!review) return null;
   const { user, ...rest } = review;
   return {
     ...rest,
+    media: Array.isArray(review.media) ? review.media : [],
     reviewerName: user?.fullName || review.guestName || 'Anonymous',
     reviewerAvatar: user?.avatar ?? null,
     isGuest: !review.userId,
   };
 }
+
+const IMAGE_EXT_BY_MIME = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
 
 // ============================================
 // GET /api/reviews/product/:productId
@@ -100,6 +143,9 @@ const createReview = async (req, res, next) => {
       return error(res, 'Review text is required', 400);
     }
 
+    // Photos are optional; keep only valid, de-duplicated CDN URLs (capped).
+    const media = sanitizeMedia(req.body.media);
+
     const product = await prisma.product.findUnique({ where: { id: productId }, select: { id: true } });
     if (!product) {
       return error(res, 'Product not found', 404);
@@ -109,6 +155,7 @@ const createReview = async (req, res, next) => {
       productId,
       rating: ratingNum,
       comment: comment.trim(),
+      media,
     };
 
     if (req.userId) {
@@ -212,9 +259,35 @@ const deleteReviewAdmin = async (req, res, next) => {
   }
 };
 
+// ============================================
+// POST /api/reviews/media
+// Public (optionalAuth) single-image upload for review photos. Validated by
+// magic bytes (not the spoofable client mimetype), stored under the CDN's
+// `reviews` folder, returns the CDN URL for the client to attach to a review.
+// ============================================
+const uploadReviewMedia = async (req, res, next) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return error(res, 'No file uploaded. Send multipart form with field "file".', 400);
+    }
+    // Trust the bytes, not the header — reject anything that isn't a real image.
+    const detectedMime = detectImageMime(req.file.buffer);
+    if (!detectedMime) {
+      return error(res, 'File content is not a valid image (JPEG, PNG, WebP, or GIF).', 400);
+    }
+    const ext = IMAGE_EXT_BY_MIME[detectedMime] || '.jpg';
+    const filename = `${crypto.randomUUID()}${ext}`;
+    const url = await bunnyStorage.uploadImage(req.file.buffer, 'reviews', filename, detectedMime);
+    return success(res, { url }, 'Media uploaded successfully', 200);
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getProductReviews,
   createReview,
+  uploadReviewMedia,
   getAllReviewsAdmin,
   deleteReviewAdmin,
 };

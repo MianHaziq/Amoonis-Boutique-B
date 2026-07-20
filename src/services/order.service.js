@@ -249,8 +249,9 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     orderRegionId = def?.id || null;
   }
   const orderRegion = orderRegionId ? await regionService.getRegionById(orderRegionId) : null;
-  // Which currency this order is priced/charged in — drives priceSar vs price selection
-  // (see productService.regionPriceFromRow) and the order's stamped Order.currency.
+  // Which currency this order is priced/charged in — stamped onto Order.currency. Line
+  // pricing itself is resolved per-product from orderRegionId (see the `regions: { where:
+  // { regionId: orderRegionId } }` selects below + productService.regionPriceFromRow).
   const orderCurrency = orderRegion?.currency || 'AED';
 
   // Online payment currently only works for the gateway's configured currency (AED).
@@ -339,8 +340,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       categoryId: true,
       price: true,
       discountedPrice: true,
-      priceSar: true,
-      discountedPriceSar: true,
+      regions: { where: { regionId: orderRegionId }, select: { price: true, discountedPrice: true } },
       quantity: true,
       giftCardEnabled: true,
       giftCardExtraPrice: true,
@@ -392,11 +392,12 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // snapshot. Closes the price-edit drift window between cart load and order commit.
   // Mirrors cart.service.effectivePrice EXACTLY (discounted only when it's actually lower
   // than the base price) so the order never charges more than the cart displayed (M2).
-  // Resolves to the order's region currency (AED price/discountedPrice, or the manual
-  // SAR override when set) via productService.regionPriceFromRow.
+  // Resolves to the order region's price (base AED price, or that region's manual
+  // override when set) via productService.regionPriceFromRow — productRow.regions is
+  // already scoped to orderRegionId by the select above.
   function livePrice(productRow) {
     if (!productRow) return 0;
-    const { price, discountedPrice } = productService.regionPriceFromRow(productRow, orderCurrency);
+    const { price, discountedPrice } = productService.regionPriceFromRow(productRow);
     return discountedPrice != null && discountedPrice < price ? discountedPrice : price;
   }
   // Effective per-unit price INCLUDING this line's gift-card/custom-name add-ons —
@@ -449,8 +450,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         id: true,
         price: true,
         discountedPrice: true,
-        priceSar: true,
-        discountedPriceSar: true,
+        regions: { where: { regionId: orderRegionId }, select: { price: true, discountedPrice: true } },
         giftCardEnabled: true,
         giftCardExtraPrice: true,
         customNameEnabled: true,
@@ -459,13 +459,13 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     });
     const txProductById = new Map(livePriceRows.map((p) => [p.id, p]));
     // Same effective-price rule as cart/livePrice (M2): discounted only when lower,
-    // resolved to the order's region currency (AED or the manual SAR override) — PLUS
-    // this line's gift-card/custom-name add-on, same as livePriceById above.
+    // resolved to the order region's price (base or that region's manual override) —
+    // PLUS this line's gift-card/custom-name add-on, same as livePriceById above.
     const txPriceById = new Map(
       sanitizedLineItems.map((item) => {
         const p = txProductById.get(item.productId);
         if (!p) return [item.productId, null];
-        const { price, discountedPrice } = productService.regionPriceFromRow(p, orderCurrency);
+        const { price, discountedPrice } = productService.regionPriceFromRow(p);
         const base = discountedPrice != null && discountedPrice < price ? discountedPrice : price;
         const extra = productService.optionExtraCharge(p, { giftCardSelected: item.giftCardSelected, customName: item.customName });
         return [item.productId, base + extra];

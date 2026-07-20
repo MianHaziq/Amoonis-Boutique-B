@@ -46,6 +46,9 @@ async function loadOrder(orderId) {
     include: {
       items: ORDER_ITEMS_INCLUDE,
       user: { select: { email: true } },
+      // Region-scoped contact/legal info for the email footer — see templates.js's
+      // `layout()`. Null fields fall back to the global brand constants there.
+      region: { select: { legalEntity: true, contactEmail: true } },
     },
   });
 }

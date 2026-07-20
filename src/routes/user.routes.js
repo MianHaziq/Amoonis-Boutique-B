@@ -11,7 +11,16 @@ const {
   getUserStats,
   getManagerPermissionCatalog,
 } = require('../controllers/user.controller');
-const { verifyAdmin } = require('../middleware/auth');
+const { verifyAdminOrManager, requireAnyManagerPermission, requireManagerPermission } = require('../middleware/managerAuth');
+
+// Every route below is reachable by an admin OR a manager holding USERS and/or
+// MANAGERS — which specific permission is required depends on the ROLE of the
+// user row being touched (a customer needs USERS, a manager needs MANAGERS),
+// so the route-level check here only gates "does this caller hold at least one
+// of the two keys" and the controller enforces the precise, row-level rule.
+// ADMIN accounts and the ADMIN role are never reachable by a manager, no
+// matter which permissions they hold — enforced in the controller.
+const staffUsers = [verifyAdminOrManager, requireAnyManagerPermission(['USERS', 'MANAGERS'])];
 
 /**
  * @swagger
@@ -19,7 +28,7 @@ const { verifyAdmin } = require('../middleware/auth');
  *   post:
  *     summary: Create customer or manager
  *     description: |
- *       Requires an **Administrator** JWT.
+ *       Requires an **Administrator** JWT, or a **Manager** JWT with the **USERS** or **MANAGERS** permission (see the Users tag description) — ADMIN accounts and the ADMIN role are always off-limits to managers.
  *
  *       - **Customer** — Default account; use role CUSTOMER or omit role.
  *       - **Manager** — Use role MANAGER with **managerTitle**, **managerPermissions** (at least one key), and optional **avatar** URL. Load labels from **GET /users/manager-permissions** first.
@@ -85,7 +94,7 @@ const { verifyAdmin } = require('../middleware/auth');
  *   get:
  *     summary: List users (paginated, filterable)
  *     description: |
- *       Requires an **Administrator** JWT.
+ *       Requires an **Administrator** JWT, or a **Manager** JWT with the **USERS** or **MANAGERS** permission (see the Users tag description) — ADMIN accounts and the ADMIN role are always off-limits to managers.
  *
  *       Paginated list. **role** and **status** in each row are title-cased for display. Managers include **managerTitle** and **managerPermissions**.
  *
@@ -151,8 +160,8 @@ const { verifyAdmin } = require('../middleware/auth');
  *       403:
  *         description: Not admin
  */
-router.post('/', verifyAdmin, createUser);
-router.get('/', verifyAdmin, getAllUsers);
+router.post('/', ...staffUsers, createUser);
+router.get('/', ...staffUsers, getAllUsers);
 
 /**
  * @swagger
@@ -160,7 +169,7 @@ router.get('/', verifyAdmin, getAllUsers);
  *   get:
  *     summary: User counts for admin dashboard
  *     description: |
- *       Requires an **Administrator** JWT. Returns dashboard totals: all users, customers, admins, managers, and active vs inactive counts.
+ *       Requires an **Administrator** JWT, or a **Manager** JWT with the **USERS** or **MANAGERS** permission (see the Users tag description) — ADMIN accounts and the ADMIN role are always off-limits to managers. Returns dashboard totals: all users, customers, admins, managers, and active vs inactive counts.
  *     tags: [Users]
  *     security:
  *       - bearerAuth: []
@@ -180,7 +189,7 @@ router.get('/', verifyAdmin, getAllUsers);
  *       403:
  *         description: Not admin
  */
-router.get('/stats', verifyAdmin, getUserStats);
+router.get('/stats', ...staffUsers, getUserStats);
 
 /**
  * @swagger
@@ -188,7 +197,7 @@ router.get('/stats', verifyAdmin, getUserStats);
  *   get:
  *     summary: Catalog of manager permission keys (for admin UI)
  *     description: |
- *       Requires an **Administrator** JWT.
+ *       Requires an **Administrator** JWT, or a **Manager** JWT with the **USERS** or **MANAGERS** permission (see the Users tag description) — ADMIN accounts and the ADMIN role are always off-limits to managers.
  *
  *       Use **data.permissions** from the response to build checkboxes or toggles when creating or editing a manager. Each item includes:
  *
@@ -228,7 +237,7 @@ router.get('/stats', verifyAdmin, getUserStats);
  *       403:
  *         description: Not admin
  */
-router.get('/manager-permissions', verifyAdmin, getManagerPermissionCatalog);
+router.get('/manager-permissions', verifyAdminOrManager, requireManagerPermission('MANAGERS'), getManagerPermissionCatalog);
 
 /**
  * @swagger
@@ -236,7 +245,7 @@ router.get('/manager-permissions', verifyAdmin, getManagerPermissionCatalog);
  *   get:
  *     summary: Get one user by ID
  *     description: |
- *       Requires an **Administrator** JWT. Returns one user in the same shape as the list endpoint, including manager fields when relevant.
+ *       Requires an **Administrator** JWT, or a **Manager** JWT with the **USERS** or **MANAGERS** permission (see the Users tag description) — ADMIN accounts and the ADMIN role are always off-limits to managers. Returns one user in the same shape as the list endpoint, including manager fields when relevant.
  *     tags: [Users]
  *     security:
  *       - bearerAuth: []
@@ -268,7 +277,7 @@ router.get('/manager-permissions', verifyAdmin, getManagerPermissionCatalog);
  *   put:
  *     summary: Update user (profile, role, manager fields)
  *     description: |
- *       Requires an **Administrator** JWT. Send only fields you want to change.
+ *       Requires an **Administrator** JWT, or a **Manager** JWT with the **USERS** or **MANAGERS** permission (see the Users tag description) — ADMIN accounts and the ADMIN role are always off-limits to managers. Send only fields you want to change.
  *
  *       For **manager** accounts, **managerTitle** and **managerPermissions** must stay valid (server checks the final state). Changing role away from **MANAGER** clears job title and permissions.
  *     tags: [Users]
@@ -313,7 +322,7 @@ router.get('/manager-permissions', verifyAdmin, getManagerPermissionCatalog);
  *   delete:
  *     summary: Delete user
  *     description: |
- *       Requires an **Administrator** JWT. Permanently deletes the account and **cascades** to all related rows: orders (and their items), cart, addresses, saved push devices, notification preferences, contacts, refresh tokens, and promo-code usages. This is irreversible — order history for this customer will be lost.
+ *       Requires an **Administrator** JWT, or a **Manager** JWT with the **USERS** or **MANAGERS** permission (see the Users tag description) — ADMIN accounts and the ADMIN role are always off-limits to managers. Permanently deletes the account and **cascades** to all related rows: orders (and their items), cart, addresses, saved push devices, notification preferences, contacts, refresh tokens, and promo-code usages. This is irreversible — order history for this customer will be lost.
  *     tags: [Users]
  *     security:
  *       - bearerAuth: []
@@ -335,9 +344,9 @@ router.get('/manager-permissions', verifyAdmin, getManagerPermissionCatalog);
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/:id', verifyAdmin, getUserById);
-router.put('/:id', verifyAdmin, updateUser);
-router.delete('/:id', verifyAdmin, deleteUser);
+router.get('/:id', ...staffUsers, getUserById);
+router.put('/:id', ...staffUsers, updateUser);
+router.delete('/:id', ...staffUsers, deleteUser);
 
 /**
  * @swagger
@@ -345,7 +354,7 @@ router.delete('/:id', verifyAdmin, deleteUser);
  *   patch:
  *     summary: Set account ACTIVE or INACTIVE
  *     description: |
- *       Requires an **Administrator** JWT. Set **status** to ACTIVE or INACTIVE in the JSON body, or omit the body to toggle. Inactive users are blocked from protected APIs.
+ *       Requires an **Administrator** JWT, or a **Manager** JWT with the **USERS** or **MANAGERS** permission (see the Users tag description) — ADMIN accounts and the ADMIN role are always off-limits to managers. Set **status** to ACTIVE or INACTIVE in the JSON body, or omit the body to toggle. Inactive users are blocked from protected APIs.
  *     tags: [Users]
  *     security:
  *       - bearerAuth: []
@@ -380,7 +389,7 @@ router.delete('/:id', verifyAdmin, deleteUser);
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.patch('/:id/status', verifyAdmin, toggleUserStatus);
+router.patch('/:id/status', ...staffUsers, toggleUserStatus);
 
 /**
  * @swagger
@@ -388,7 +397,7 @@ router.patch('/:id/status', verifyAdmin, toggleUserStatus);
  *   patch:
  *     summary: Change role (customer / admin / manager)
  *     description: |
- *       Requires an **Administrator** JWT. Sets **role** to CUSTOMER, ADMIN, or MANAGER.
+ *       Requires an **Administrator** JWT, or a **Manager** JWT with the **USERS** or **MANAGERS** permission (see the Users tag description) — ADMIN accounts and the ADMIN role are always off-limits to managers. Sets **role** to CUSTOMER, ADMIN, or MANAGER.
  *
  *       For **MANAGER**, include **managerTitle** and **managerPermissions** with at least one key (use **GET /users/manager-permissions** to drive the UI). Any other role clears manager title and permissions.
  *     tags: [Users]
@@ -438,6 +447,6 @@ router.patch('/:id/status', verifyAdmin, toggleUserStatus);
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.patch('/:id/role', verifyAdmin, changeUserRole);
+router.patch('/:id/role', ...staffUsers, changeUserRole);
 
 module.exports = router;

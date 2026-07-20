@@ -16,6 +16,8 @@ const MANAGER_PERMISSION_VALUES = Object.freeze([
   'DELIVERY_ZONES',
   'VAT',
   'NOTIFICATIONS',
+  'USERS',
+  'MANAGERS',
 ]);
 
 const MANAGER_PERMISSION_CATALOG = Object.freeze([
@@ -33,6 +35,8 @@ const MANAGER_PERMISSION_CATALOG = Object.freeze([
   { key: 'DELIVERY_ZONES', label: 'Delivery zones', description: 'Create, update, and delete delivery zones (e.g. emirates) within a region' },
   { key: 'VAT', label: 'Tax (VAT)', description: 'View and update per-region VAT / tax configuration' },
   { key: 'NOTIFICATIONS', label: 'Notifications', description: 'Broadcast promotional / announcement push notifications to customers' },
+  { key: 'USERS', label: 'Users', description: 'View, create, edit, activate/deactivate, and delete customer accounts. Never grants access to admin accounts.' },
+  { key: 'MANAGERS', label: 'Managers', description: 'View, create, edit, activate/deactivate, and delete manager accounts, including assigning their permissions. Never grants access to admin accounts.' },
 ]);
 
 /** Permissions that imply a need to upload images (logos, product images, etc.) */

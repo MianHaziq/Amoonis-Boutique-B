@@ -6,10 +6,11 @@ function decimalToNumber(v) {
   return v == null ? null : Number(v);
 }
 
-// Resolves to the requesting region's currency (AED price, or the manual SAR
-// override when set) — same rule as order.service's livePrice.
-function effectivePrice(product, currency = 'AED') {
-  const { price, discountedPrice } = productService.regionPriceFromRow(product, currency);
+// Resolves to the requesting region's price (base AED price, or that region's manual
+// override when set) — same rule as order.service's livePrice. `product.regions` must
+// already be scoped to the requesting region (0-1 row) by the caller.
+function effectivePrice(product) {
+  const { price, discountedPrice } = productService.regionPriceFromRow(product);
   return discountedPrice != null && discountedPrice < price ? discountedPrice : price;
 }
 
@@ -237,22 +238,37 @@ async function updateItemMessage(userId, { productId, message }) {
   return { cart: await getOrCreateCart(userId), error: null };
 }
 
-async function getCart(userId, currency = 'AED') {
+async function getCart(userId, currency = 'AED', regionId = null) {
   const cart = await getOrCreateCart(userId);
-  const items = cart.items.map((i) => ({
-    id: i.id,
-    productId: i.productId,
-    product: productService.applyRegionCurrency(productService.mapProduct(i.product), currency),
-    quantity: i.quantity,
-    message: i.message,
-    selectedOptions: i.selectedOptions ?? null,
-    giftCardSelected: i.giftCardSelected,
-    customName: i.customName,
-    lineTotal:
-      (effectivePrice(i.product, currency) +
-        productService.optionExtraCharge(i.product, { giftCardSelected: i.giftCardSelected, customName: i.customName })) *
-      i.quantity,
-  }));
+  const productIds = cart.items.map((i) => i.productId);
+  const overrides = regionId && productIds.length > 0
+    ? await prisma.productRegion.findMany({
+        where: { productId: { in: productIds }, regionId },
+        select: { productId: true, price: true, discountedPrice: true },
+      })
+    : [];
+  const overrideByProductId = new Map(overrides.map((r) => [r.productId, r]));
+
+  const items = cart.items.map((i) => {
+    const override = overrideByProductId.get(i.productId);
+    // Same "0-1 row, no nested `.region`" shape productService.mapProduct/
+    // regionPriceFromRow already expect from a region-scoped ProductRegion lookup.
+    const productRow = { ...i.product, regions: override ? [override] : [] };
+    return {
+      id: i.id,
+      productId: i.productId,
+      product: productService.applyRegionCurrency(productService.mapProduct(productRow)),
+      quantity: i.quantity,
+      message: i.message,
+      selectedOptions: i.selectedOptions ?? null,
+      giftCardSelected: i.giftCardSelected,
+      customName: i.customName,
+      lineTotal:
+        (effectivePrice(productRow) +
+          productService.optionExtraCharge(productRow, { giftCardSelected: i.giftCardSelected, customName: i.customName })) *
+        i.quantity,
+    };
+  });
   const totalAmount = items.reduce((sum, i) => sum + i.lineTotal, 0);
   return {
     id: cart.id,
@@ -263,14 +279,14 @@ async function getCart(userId, currency = 'AED') {
   };
 }
 
-async function clearCart(userId, currency = 'AED') {
+async function clearCart(userId, currency = 'AED', regionId = null) {
   const cart = await getOrCreateCart(userId);
   await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
   await prisma.cart.update({
     where: { id: cart.id },
     data: { orderMessage: null },
   });
-  return getCart(userId, currency);
+  return getCart(userId, currency, regionId);
 }
 
 /**

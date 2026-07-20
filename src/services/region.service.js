@@ -23,6 +23,31 @@ const REGION_SELECT = {
   legalEntity: true,
   shippingFlatRate: true,
   iso2: true,
+  contactEmail: true,
+  contactPhone: true,
+  whatsappNumber: true,
+  address: true,
+  address_ar: true,
+  hours: true,
+  hours_ar: true,
+  registrationCity: true,
+  registrationCity_ar: true,
+  currencyDisplayName: true,
+  currencyDisplayName_ar: true,
+  vatLawName: true,
+  vatLawName_ar: true,
+  dataProtectionLawName: true,
+  dataProtectionLawName_ar: true,
+  dataProtectionAuthority: true,
+  dataProtectionAuthority_ar: true,
+  ipLawName: true,
+  ipLawName_ar: true,
+  consumerProtectionLawName: true,
+  consumerProtectionLawName_ar: true,
+  consumerProtectionAuthority: true,
+  consumerProtectionAuthority_ar: true,
+  standardsAuthority: true,
+  standardsAuthority_ar: true,
   isDefault: true,
   isActive: true,
   sortOrder: true,
@@ -42,6 +67,55 @@ function parseShippingFlatRate(value) {
     throw Object.assign(new Error('shippingFlatRate must be a non-negative number'), { code: 'VALIDATION' });
   }
   return n;
+}
+
+/** Blank/null/undefined -> null; otherwise the trimmed string. Shared by every
+ *  plain optional text field (legalEntity, contact info) — same convention. */
+function trimOrNull(value) {
+  return value != null ? String(value).trim() || null : null;
+}
+
+/**
+ * Legal citations shown across the 5 storefront legal pages. Unlike the
+ * contact-info fields above (which fall back to a UAE-based site default),
+ * these are REQUIRED at region creation — a region must never be created
+ * with the wrong country's law citations on its legal pages. See the
+ * migration doc-comment and Amoon-Bloom-F/src/features/location/regionContact.ts.
+ */
+const LEGAL_FIELD_BASE_NAMES = [
+  'registrationCity',
+  'currencyDisplayName',
+  'vatLawName',
+  'dataProtectionLawName',
+  'dataProtectionAuthority',
+  'ipLawName',
+  'consumerProtectionLawName',
+  'consumerProtectionAuthority',
+  'standardsAuthority',
+];
+const LEGAL_FIELDS = LEGAL_FIELD_BASE_NAMES.flatMap((f) => [f, `${f}_ar`]);
+
+/** Throws VALIDATION if any of the 18 legal fields is missing/blank. */
+function assertLegalFieldsComplete(data) {
+  const missing = LEGAL_FIELDS.filter((f) => !String(data[f] ?? '').trim());
+  if (missing.length > 0) {
+    throw Object.assign(
+      new Error(`All legal citation fields are required to create a region. Missing: ${missing.join(', ')}`),
+      { code: 'VALIDATION', missing }
+    );
+  }
+}
+
+/** Builds the { field: trimOrNull(value) } payload for all 18 legal fields
+ *  that were actually present in `data` (sparse — matches every other
+ *  optional-field update pattern in this file). */
+function buildLegalFieldsPayload(data, { onlyDefined = false } = {}) {
+  const payload = {};
+  for (const f of LEGAL_FIELDS) {
+    if (onlyDefined && data[f] === undefined) continue;
+    payload[f] = trimOrNull(data[f]);
+  }
+  return payload;
 }
 
 /** Blank/null/undefined -> null (no flag configured yet); otherwise exactly 2 letters. */
@@ -160,6 +234,7 @@ async function createRegion(data) {
   if (!code) throw Object.assign(new Error('Region code is required'), { code: 'VALIDATION' });
   const name = String(data.name ?? '').trim();
   if (!name) throw Object.assign(new Error('Region name is required'), { code: 'VALIDATION' });
+  assertLegalFieldsComplete(data);
 
   const region = await prisma.$transaction(async (tx) => {
     const makeDefault = data.isDefault === true;
@@ -172,9 +247,17 @@ async function createRegion(data) {
         name,
         name_ar: data.name_ar != null ? String(data.name_ar).trim() || null : null,
         currency: data.currency ? String(data.currency).trim().toUpperCase() : 'AED',
-        legalEntity: data.legalEntity != null ? String(data.legalEntity).trim() || null : null,
+        legalEntity: trimOrNull(data.legalEntity),
         shippingFlatRate: parseShippingFlatRate(data.shippingFlatRate),
         iso2: parseIso2(data.iso2),
+        contactEmail: trimOrNull(data.contactEmail),
+        contactPhone: trimOrNull(data.contactPhone),
+        whatsappNumber: trimOrNull(data.whatsappNumber),
+        address: trimOrNull(data.address),
+        address_ar: trimOrNull(data.address_ar),
+        hours: trimOrNull(data.hours),
+        hours_ar: trimOrNull(data.hours_ar),
+        ...buildLegalFieldsPayload(data),
         isDefault: makeDefault,
         isActive: data.isActive === undefined ? true : !!data.isActive,
         sortOrder: data.sortOrder != null ? Number(data.sortOrder) : 0,
@@ -207,13 +290,19 @@ async function updateRegion(id, data) {
     if (!currency) throw Object.assign(new Error('Region currency cannot be empty'), { code: 'VALIDATION' });
     payload.currency = currency;
   }
-  if (data.legalEntity !== undefined) {
-    payload.legalEntity = data.legalEntity != null ? String(data.legalEntity).trim() || null : null;
-  }
+  if (data.legalEntity !== undefined) payload.legalEntity = trimOrNull(data.legalEntity);
   if (data.shippingFlatRate !== undefined) {
     payload.shippingFlatRate = parseShippingFlatRate(data.shippingFlatRate);
   }
   if (data.iso2 !== undefined) payload.iso2 = parseIso2(data.iso2);
+  if (data.contactEmail !== undefined) payload.contactEmail = trimOrNull(data.contactEmail);
+  if (data.contactPhone !== undefined) payload.contactPhone = trimOrNull(data.contactPhone);
+  if (data.whatsappNumber !== undefined) payload.whatsappNumber = trimOrNull(data.whatsappNumber);
+  if (data.address !== undefined) payload.address = trimOrNull(data.address);
+  if (data.address_ar !== undefined) payload.address_ar = trimOrNull(data.address_ar);
+  if (data.hours !== undefined) payload.hours = trimOrNull(data.hours);
+  if (data.hours_ar !== undefined) payload.hours_ar = trimOrNull(data.hours_ar);
+  Object.assign(payload, buildLegalFieldsPayload(data, { onlyDefined: true }));
   if (data.isActive !== undefined) payload.isActive = !!data.isActive;
   if (data.sortOrder !== undefined) payload.sortOrder = Number(data.sortOrder);
 
@@ -301,21 +390,77 @@ async function deleteRegion(id) {
       code: 'REGION_IS_DEFAULT',
     });
   }
-  // Block deletion while content/users/orders still reference it to avoid silent data loss.
-  const [productLinks, userCount, orderCount] = await Promise.all([
-    prisma.productRegion.count({ where: { regionId: id } }),
+  // Products/categories/sections/banners/promo codes are many-to-many with a
+  // region (ProductRegion, CategoryRegion, etc.) — deleting a region removes
+  // that region's row from each join table (all `onDelete: Cascade` in the
+  // schema) but never touches the product/category/etc. itself, which may
+  // still be linked to other regions. So none of those block deletion.
+  //
+  // Users and orders are different: `User.regionId`/`Order.regionId` are
+  // direct references, not a multi-region join, so deleting a region a user
+  // is still assigned to (or that has order history) needs an explicit
+  // reassignment first rather than silently going null underneath them.
+  const [userCount, orderCount] = await Promise.all([
     prisma.user.count({ where: { regionId: id } }),
     prisma.order.count({ where: { regionId: id } }),
   ]);
-  if (productLinks > 0 || userCount > 0 || orderCount > 0) {
-    throw Object.assign(new Error('Region is still in use by products, users, or orders. Reassign them first.'), {
+  if (userCount > 0 || orderCount > 0) {
+    throw Object.assign(new Error('Region is still in use by users or orders. Reassign them first.'), {
       code: 'REGION_IN_USE',
-      counts: { productLinks, userCount, orderCount },
+      counts: { userCount, orderCount },
     });
   }
   await prisma.region.delete({ where: { id } });
   invalidateCache();
   return region;
+}
+
+/**
+ * Bulk-links ALL existing products and/or categories to a region in one shot.
+ *
+ * A brand-new region starts with zero products and zero categories visible —
+ * `ProductRegion`/`CategoryRegion` have no rows for it, by the same
+ * "no rows = visible in none" design every other region-scoped entity uses.
+ * That's correct for a deliberate, curated rollout, but it means creating a
+ * region gives an admin an empty storefront with no obvious way to populate
+ * it — sections/banners can be linked to the new region individually, but
+ * their PRODUCTS won't show unless those products are separately linked too.
+ * This is the fix: one action that mirrors "make my whole existing catalog
+ * available in this new region too," which is what an admin expanding into a
+ * new market actually wants almost all the time.
+ *
+ * Idempotent (`skipDuplicates`) — safe to run more than once, only adds the
+ * links that are missing, never duplicates or removes anything.
+ */
+async function bulkAssignRegion(regionId, { products = false, categories = false } = {}) {
+  const region = await prisma.region.findUnique({ where: { id: regionId } });
+  if (!region) return null;
+
+  const result = { productsLinked: 0, categoriesLinked: 0 };
+
+  if (products) {
+    const allProducts = await prisma.product.findMany({ select: { id: true } });
+    if (allProducts.length > 0) {
+      const { count } = await prisma.productRegion.createMany({
+        data: allProducts.map((p) => ({ productId: p.id, regionId })),
+        skipDuplicates: true,
+      });
+      result.productsLinked = count;
+    }
+  }
+
+  if (categories) {
+    const allCategories = await prisma.category.findMany({ select: { id: true } });
+    if (allCategories.length > 0) {
+      const { count } = await prisma.categoryRegion.createMany({
+        data: allCategories.map((c) => ({ categoryId: c.id, regionId })),
+        skipDuplicates: true,
+      });
+      result.categoriesLinked = count;
+    }
+  }
+
+  return result;
 }
 
 module.exports = {
@@ -328,5 +473,6 @@ module.exports = {
   createRegion,
   updateRegion,
   deleteRegion,
+  bulkAssignRegion,
   invalidateCache,
 };
