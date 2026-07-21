@@ -12,29 +12,34 @@ const BRAND = 'Amoon Bloom';
 const COPY = {
   en: {
     ORDER_PLACED: { title: 'Order placed', body: 'Thank you! Your Amoon Bloom order was received.' },
-    ORDER_CONFIRMED: { title: 'Order confirmed', body: 'Your Amoon Bloom order is confirmed.' },
     ORDER_PROCESSING: { title: 'Processing your order', body: "We're getting your items ready." },
-    ORDER_SHIPPED: { title: 'Order shipped', body: 'Your order has shipped.' },
-    ORDER_DELIVERED: { title: 'Delivered', body: 'Your order was delivered. Enjoy!' },
+    ORDER_ON_HOLD: { title: 'Order on hold', body: 'Your order is on hold while we review it.' },
+    ORDER_COMPLETED: { title: 'Order complete', body: 'Your order is complete. Enjoy!' },
     ORDER_CANCELLED: { title: 'Order cancelled', body: 'Your order has been cancelled.' },
+    ORDER_REFUNDED: { title: 'Order refunded', body: 'Your order has been refunded.' },
+    ORDER_FAILED: { title: 'Order issue', body: 'There was an issue with your order. We’ll be in touch.' },
   },
   ar: {
     ORDER_PLACED: { title: 'تم استلام الطلب', body: 'شكراً لك! تم استلام طلبك من أمون بلوم.' },
-    ORDER_CONFIRMED: { title: 'تم تأكيد الطلب', body: 'تم تأكيد طلبك من أمون بلوم.' },
     ORDER_PROCESSING: { title: 'طلبك قيد المعالجة', body: 'نقوم بتجهيز منتجاتك الآن.' },
-    ORDER_SHIPPED: { title: 'تم شحن طلبك', body: 'طلبك في طريقه إليك.' },
-    ORDER_DELIVERED: { title: 'تم التوصيل', body: 'تم توصيل طلبك. نتمنى لك تجربة سعيدة!' },
+    ORDER_ON_HOLD: { title: 'الطلب معلّق', body: 'طلبك معلّق مؤقتاً ريثما تتم مراجعته.' },
+    ORDER_COMPLETED: { title: 'اكتمل الطلب', body: 'تم إتمام طلبك. نتمنى لك تجربة سعيدة!' },
     ORDER_CANCELLED: { title: 'تم إلغاء الطلب', body: 'تم إلغاء طلبك.' },
+    ORDER_REFUNDED: { title: 'تم استرداد الطلب', body: 'تم استرداد قيمة طلبك.' },
+    ORDER_FAILED: { title: 'مشكلة في الطلب', body: 'حدثت مشكلة في طلبك، سنتواصل معك قريباً.' },
   },
 };
 
-// Map an order lifecycle status to its copy key.
+// Map an order lifecycle status to its copy key. PENDING_PAYMENT/DRAFT are intentionally
+// absent — PENDING_PAYMENT is already covered by the "order placed" push (see
+// notify.orderStatusChange), and DRAFT is a pre-order state that never notifies a customer.
 const STATUS_KEY = {
-  CONFIRMED: 'ORDER_CONFIRMED',
   PROCESSING: 'ORDER_PROCESSING',
-  SHIPPED: 'ORDER_SHIPPED',
-  DELIVERED: 'ORDER_DELIVERED',
+  ON_HOLD: 'ORDER_ON_HOLD',
+  COMPLETED: 'ORDER_COMPLETED',
   CANCELLED: 'ORDER_CANCELLED',
+  REFUNDED: 'ORDER_REFUNDED',
+  FAILED: 'ORDER_FAILED',
 };
 
 function normalizeLang(lang) {

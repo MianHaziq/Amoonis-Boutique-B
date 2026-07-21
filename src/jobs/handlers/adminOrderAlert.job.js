@@ -59,7 +59,7 @@ async function handle(data) {
       type: 'ORDER_PLACED',
       title,
       body,
-      data: { type: 'ORDER_PLACED', orderId, status: 'PENDING' },
+      data: { type: 'ORDER_PLACED', orderId, status: 'PENDING_PAYMENT' },
     },
   }));
 

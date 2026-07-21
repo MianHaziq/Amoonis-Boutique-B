@@ -21,6 +21,14 @@ function normalizeStatus(value, fallback = 'DRAFT') {
   return v === 'PUBLISHED' ? 'PUBLISHED' : v === 'DRAFT' ? 'DRAFT' : fallback;
 }
 
+const VALID_SECTION_KINDS = ['CUSTOM', 'BEST_SELLERS', 'NEW_ARRIVALS'];
+
+function normalizeKind(value, fallback = 'CUSTOM') {
+  if (value === undefined || value === null) return fallback;
+  const v = String(value).trim().toUpperCase();
+  return VALID_SECTION_KINDS.includes(v) ? v : fallback;
+}
+
 async function resolveWriteRegionIds(regionIds) {
   if (Array.isArray(regionIds) && regionIds.length > 0) {
     return regionService.assertValidRegionIds(regionIds);
@@ -32,6 +40,22 @@ async function resolveWriteRegionIds(regionIds) {
 function mapSectionRegions(section) {
   if (!section || !Array.isArray(section.regions)) return [];
   return section.regions.map((r) => r.region).filter(Boolean);
+}
+
+/**
+ * The product include shape for a section's nested products — shared between the
+ * curated `SectionProduct` query below and `augmentDynamicSection`'s dynamic-fill
+ * query, so a curated pick and a dynamically-added one are always fetched (and
+ * therefore priced/rendered) identically.
+ */
+function sectionProductInclude(isStaff) {
+  return {
+    category: { select: { id: true, title: true } },
+    images: { orderBy: { sortOrder: 'asc' } },
+    descriptions: { orderBy: { sortOrder: 'asc' } },
+    productOptions: { orderBy: { sortOrder: 'asc' } },
+    ...(isStaff ? SECTION_REGION_INCLUDE : {}),
+  };
 }
 
 /**
@@ -56,13 +80,7 @@ function sectionInclude(visibility = {}) {
       ...(hasFilter ? { where: { product: contentWhere } } : {}),
       include: {
         product: {
-          include: {
-            category: { select: { id: true, title: true } },
-            images: { orderBy: { sortOrder: 'asc' } },
-            descriptions: { orderBy: { sortOrder: 'asc' } },
-            productOptions: { orderBy: { sortOrder: 'asc' } },
-            ...(isStaff ? SECTION_REGION_INCLUDE : {}),
-          },
+          include: sectionProductInclude(isStaff),
         },
       },
     },
@@ -123,6 +141,9 @@ function mapSection(s, visibility = {}) {
     image: s.image ?? null,
     sortOrder: s.sortOrder,
     status: s.status,
+    // Not staff-gated (unlike regions/regionIds below) — the storefront needs this
+    // to build the right "View all" link for a Best Sellers/New Arrivals rail.
+    kind: s.kind ?? 'CUSTOM',
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     products: (s.products || []).map((pr) => mapProductForSection(pr, visibility)).filter(Boolean),
@@ -137,12 +158,101 @@ function mapSection(s, visibility = {}) {
   return out;
 }
 
+// Matches the storefront homepage rail's per-section product cap
+// (HomeSections.tsx's PRODUCTS_PER_SECTION) — no point computing/fetching more
+// dynamic candidates than what's ever actually shown.
+const HOME_SECTION_DYNAMIC_CAP = 12;
+
+/**
+ * For a BEST_SELLERS/NEW_ARRIVALS section, appends products beyond whatever's
+ * manually curated — newest-published for NEW_ARRIVALS, top-selling for
+ * BEST_SELLERS — up to HOME_SECTION_DYNAMIC_CAP, so the rail grows on its own as
+ * new products publish / new sales land, without an admin re-editing the section.
+ * Curated picks always stay first, in their curated order, and are never
+ * duplicated by a dynamic pick.
+ *
+ * Storefront-read-only: no-ops for staff reads (the admin edit view must show only
+ * the true curated SectionProduct rows, never a dynamically-injected extra — saving
+ * the section from the admin form always sends the FULL productIds list, so if a
+ * dynamic extra leaked into that view it would get permanently baked in as if it
+ * had been manually curated) and no-ops for CUSTOM sections (unchanged behavior).
+ *
+ * Mutates and returns `rawSection` (a raw Prisma Section row, pre-mapSection) —
+ * appends synthetic entries to `rawSection.products` shaped exactly like a real
+ * SectionProduct join row, so mapSection's existing mapping code needs no changes.
+ */
+async function augmentDynamicSection(rawSection, visibility = {}) {
+  if (visibility.isStaff) return rawSection;
+  if (rawSection.kind !== 'BEST_SELLERS' && rawSection.kind !== 'NEW_ARRIVALS') return rawSection;
+
+  const curatedIds = rawSection.products.map((sp) => sp.productId);
+  const remaining = HOME_SECTION_DYNAMIC_CAP - curatedIds.length;
+  if (remaining <= 0) return rawSection;
+
+  try {
+    const excludeWhere = { ...buildVisibilityWhere(visibility), id: { notIn: curatedIds } };
+
+    let extraIds = [];
+    if (rawSection.kind === 'NEW_ARRIVALS') {
+      const rows = await prisma.product.findMany({
+        where: excludeWhere,
+        // `id` tiebreaker after createdAt so a batch of products sharing a timestamp
+        // has a deterministic order (matches getNewArrivals).
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        select: { id: true },
+        take: remaining,
+      });
+      extraIds = rows.map((r) => r.id);
+    } else {
+      const curatedSet = new Set(curatedIds);
+      const rankedIds = (await productService.getBestSellingProductIds(visibility.regionId ?? null))
+        .filter((id) => !curatedSet.has(id));
+      if (rankedIds.length > 0) {
+        // getBestSellingProductIds only knows about historical OrderItem rows — a
+        // product that sold well may since have been unpublished/deleted/moved out
+        // of this region, so re-check current visibility before trusting the ranking.
+        const visible = await prisma.product.findMany({
+          where: { ...buildVisibilityWhere(visibility), id: { in: rankedIds } },
+          select: { id: true },
+        });
+        const visibleSet = new Set(visible.map((p) => p.id));
+        extraIds = rankedIds.filter((id) => visibleSet.has(id)).slice(0, remaining);
+      }
+    }
+    if (extraIds.length === 0) return rawSection;
+
+    const extraProducts = await prisma.product.findMany({
+      where: { id: { in: extraIds } },
+      include: sectionProductInclude(visibility.isStaff),
+    });
+    const byId = new Map(extraProducts.map((p) => [p.id, p]));
+    const startOrder = rawSection.products.length
+      ? Math.max(...rawSection.products.map((sp) => sp.sortOrder)) + 1
+      : 0;
+    const synthetic = extraIds
+      .map((id, i) => {
+        const product = byId.get(id);
+        return product ? { productId: id, sortOrder: startOrder + i, product } : null;
+      })
+      .filter(Boolean);
+
+    rawSection.products = [...rawSection.products, ...synthetic];
+  } catch (err) {
+    // A dynamic-fill failure (e.g. the sales-ranking aggregation errors) must never
+    // break the whole /sections response — degrade gracefully to the curated-only
+    // list, which is always a valid non-empty rail on its own.
+    console.error(`[sections] dynamic fill failed for section ${rawSection.id} (${rawSection.kind}):`, err.message);
+  }
+  return rawSection;
+}
+
 async function getSections(visibility = {}) {
   const sections = await prisma.section.findMany({
     where: buildVisibilityWhere(visibility),
     orderBy: { sortOrder: 'asc' },
     include: sectionInclude(visibility),
   });
+  await Promise.all(sections.map((s) => augmentDynamicSection(s, visibility)));
   return sections.map((s) => mapSection(s, visibility));
 }
 
@@ -151,6 +261,7 @@ async function getSectionById(id, visibility = {}) {
     where: { id, ...buildVisibilityWhere(visibility) },
     include: sectionInclude(visibility),
   });
+  if (section) await augmentDynamicSection(section, visibility);
   return mapSection(section, visibility);
 }
 
@@ -162,6 +273,7 @@ async function createSection(data) {
   const productIds = Array.isArray(data.productIds) ? data.productIds.filter((id) => id && String(id).trim()) : [];
   const categoryIds = Array.isArray(data.categoryIds) ? data.categoryIds.filter((id) => id && String(id).trim()) : [];
   const status = normalizeStatus(data.status);
+  const kind = normalizeKind(data.kind);
   const regionIds = await resolveWriteRegionIds(data.regionIds);
 
   const maxOrder = await prisma.section.aggregate({ _max: { sortOrder: true } }).then((r) => (r._max.sortOrder ?? -1) + 1);
@@ -183,6 +295,7 @@ async function createSection(data) {
       image: data.image != null ? String(data.image).trim() || null : null,
       sortOrder: data.sortOrder != null ? Number(data.sortOrder) : maxOrder,
       status,
+      kind,
       ...(regionIds.length > 0
         ? { regions: { create: regionIds.map((regionId) => ({ regionId })) } }
         : {}),
@@ -231,6 +344,7 @@ async function updateSection(id, data) {
   if (data.image !== undefined) updatePayload.image = data.image ? String(data.image).trim() : null;
   if (data.sortOrder !== undefined) updatePayload.sortOrder = Number(data.sortOrder);
   if (data.status !== undefined) updatePayload.status = normalizeStatus(data.status, existing.status);
+  if (data.kind !== undefined) updatePayload.kind = normalizeKind(data.kind, existing.kind);
 
   const newRegionIds = data.regionIds !== undefined
     ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])

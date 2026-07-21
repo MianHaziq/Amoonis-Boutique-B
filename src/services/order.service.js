@@ -101,6 +101,13 @@ function toOrderResponsePayload(order) {
     // Flat shipping fee charged on this order, snapshot from Region.shippingFlatRate
     // at checkout time. 0 for legacy orders placed before this field existed.
     shippingAmount: decimalToNumber(order.shippingAmount) ?? 0,
+    // STANDARD (default) or SCHEDULED (customer picked a future date/time at checkout).
+    deliveryType: order.deliveryType ?? 'STANDARD',
+    // Only set for SCHEDULED orders.
+    scheduledDeliveryAt: order.scheduledDeliveryAt ?? null,
+    // Snapshot of the region's standard delivery days at checkout time, only set for
+    // STANDARD orders. Null for legacy orders placed before this feature existed.
+    estimatedDeliveryDays: order.estimatedDeliveryDays ?? null,
     // Pre-VAT, pre-discount line sum (null for legacy orders placed before VAT).
     subtotalAmount: decimalToNumber(order.subtotalAmount),
     // Total VAT. For EXCLUSIVE VAT this is included in totalAmount; for INCLUSIVE VAT it's
@@ -146,13 +153,75 @@ function toOrderResponsePayload(order) {
 
 const VALID_PAYMENT_METHODS = ['COD', 'MYFATOORAH'];
 
-// AWAITING_PAYMENT orders are unpaid online checkouts that aren't "placed" yet — they
-// must not appear in customer history, admin lists, or analytics. This builds the
-// status filter for list queries: honor an explicit status filter, otherwise exclude
-// AWAITING_PAYMENT.
+const VALID_DELIVERY_TYPES = ['STANDARD', 'SCHEDULED'];
+// A Scheduled Delivery date/time must be at least this many days out (blocks same-day
+// scheduling, giving ops prep time) and no further than this many days out (keeps the
+// admin list from filling with dates a year away). Both are simple constants, not a
+// hard business requirement — adjust freely.
+const SCHEDULED_DELIVERY_MIN_LEAD_DAYS = 1;
+const SCHEDULED_DELIVERY_MAX_WINDOW_DAYS = 60;
+// "Day" boundaries for the min/max checks below are computed in the business's
+// operating timezone (same JOBS_TIMEZONE/Asia/Dubai convention used throughout
+// src/jobs for cron scheduling) — NOT the server process's own local time. A
+// container's default TZ is UTC, which is 3-4h behind the Gulf; computing "start of
+// day" from raw server time would let a customer near midnight schedule something
+// still "today" in Dubai/Riyadh terms as if it were "tomorrow".
+const BUSINESS_TIMEZONE = process.env.JOBS_TIMEZONE || 'Asia/Dubai';
+
+/** The UTC offset (in minutes) of `timeZone` at the instant `date`, via Intl — correct
+ * for any IANA zone (DST-aware), not just fixed-offset ones like Asia/Dubai. */
+function tzOffsetMinutes(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(date).reduce((acc, p) => {
+    if (p.type !== 'literal') acc[p.type] = Number(p.value);
+    return acc;
+  }, {});
+  const asUTC = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return (asUTC - date.getTime()) / 60000;
+}
+
+/** UTC instant for midnight, `daysFromNow` days out, as measured on the calendar in
+ * `timeZone` — i.e. "start of business-local day N". */
+function startOfBusinessDay(daysFromNow, timeZone = BUSINESS_TIMEZONE) {
+  const now = new Date();
+  const offsetMin = tzOffsetMinutes(now, timeZone);
+  const zonedNow = new Date(now.getTime() + offsetMin * 60000);
+  const y = zonedNow.getUTCFullYear();
+  const m = zonedNow.getUTCMonth();
+  const d = zonedNow.getUTCDate();
+  return new Date(Date.UTC(y, m, d + daysFromNow) - offsetMin * 60000);
+}
+
+/**
+ * Validates a customer-chosen scheduled delivery date/time. Returns an error string, or
+ * null if `value` is a valid Date strictly after "tomorrow, start of day" (in
+ * BUSINESS_TIMEZONE, not the server's own clock) and no more than
+ * SCHEDULED_DELIVERY_MAX_WINDOW_DAYS out.
+ */
+function validateScheduledDeliveryAt(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'scheduledDeliveryAt must be a valid date';
+  const minDate = startOfBusinessDay(SCHEDULED_DELIVERY_MIN_LEAD_DAYS);
+  if (date < minDate) {
+    return `scheduledDeliveryAt must be at least ${SCHEDULED_DELIVERY_MIN_LEAD_DAYS} day(s) from now`;
+  }
+  const maxDate = startOfBusinessDay(SCHEDULED_DELIVERY_MAX_WINDOW_DAYS + 1);
+  if (date >= maxDate) {
+    return `scheduledDeliveryAt cannot be more than ${SCHEDULED_DELIVERY_MAX_WINDOW_DAYS} days from now`;
+  }
+  return null;
+}
+
+// Builds the status filter for list queries: honor an explicit status filter,
+// otherwise no filter. Unlike the old AWAITING_PAYMENT, PENDING_PAYMENT is a real,
+// visible order (WooCommerce parity) so there's no hidden state to exclude by default.
 function listStatusFilter(status) {
   if (status) return { status };
-  return { status: { not: 'AWAITING_PAYMENT' } };
+  return {};
 }
 
 // At checkout we no longer require name/phone in the address payload — they're
@@ -193,6 +262,11 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     paymentMethod = 'COD',
     promoCode,
     clearCart = true,
+    // STANDARD (default) or SCHEDULED — see VALID_DELIVERY_TYPES.
+    deliveryType = 'STANDARD',
+    // Customer-chosen future date/time. Required (and validated) when deliveryType is
+    // SCHEDULED; ignored (forced null below) for STANDARD regardless of what's sent.
+    scheduledDeliveryAt = null,
     // Guest (unauthenticated) checkout contact snapshot. Present only when userId
     // is null; stamped onto the order and used to back-link it to an account later.
     guestContact = null,
@@ -209,12 +283,27 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     return { order: null, error: `Invalid paymentMethod. Supported: ${VALID_PAYMENT_METHODS.join(', ')}` };
   }
 
-  // Online payment: the order is NOT "placed" yet — it starts AWAITING_PAYMENT (hidden
-  // from order history / admin / analytics), the cart is kept, and no "order placed"
-  // push fires. confirmOrderPayment turns it into a real CONFIRMED order once paid.
-  // COD: placed instantly as PENDING, cart cleared, push sent (unchanged).
+  if (!VALID_DELIVERY_TYPES.includes(deliveryType)) {
+    return { order: null, error: `Invalid deliveryType. Supported: ${VALID_DELIVERY_TYPES.join(', ')}` };
+  }
+  let resolvedScheduledDeliveryAt = null;
+  if (deliveryType === 'SCHEDULED') {
+    if (!scheduledDeliveryAt) {
+      return { order: null, error: 'scheduledDeliveryAt is required for a Scheduled Delivery' };
+    }
+    const scheduleError = validateScheduledDeliveryAt(scheduledDeliveryAt);
+    if (scheduleError) return { order: null, error: scheduleError };
+    resolvedScheduledDeliveryAt = new Date(scheduledDeliveryAt);
+  }
+  // STANDARD never persists a scheduled date, even if the client sent one.
+
+  // Every order — online or COD — is placed immediately as a real, visible
+  // PENDING_PAYMENT order (WooCommerce parity: "Pending payment" is a normal order
+  // list entry, not a hidden state). Online payment: the cart is kept and no "order
+  // placed" push fires yet — confirmOrderPayment/finalizePaidOrder moves it to
+  // PROCESSING once paid. COD: cart cleared, push sent immediately (unchanged).
   const isOnlinePayment = paymentMethod === 'MYFATOORAH';
-  const initialStatus = isOnlinePayment ? 'AWAITING_PAYMENT' : 'PENDING';
+  const initialStatus = 'PENDING_PAYMENT';
 
   // Recipient identity (fullName + phone) is sourced from the user profile so the
   // checkout payload doesn't need to re-collect what we already have from signup.
@@ -253,6 +342,12 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // pricing itself is resolved per-product from orderRegionId (see the `regions: { where:
   // { regionId: orderRegionId } }` selects below + productService.regionPriceFromRow).
   const orderCurrency = orderRegion?.currency || 'AED';
+
+  // Snapshot the region's standard delivery lead time onto the order at checkout time
+  // (mirrors the shippingAmount snapshot below) — only meaningful for STANDARD orders;
+  // SCHEDULED orders have a customer-chosen date instead, not a day-count estimate.
+  const estimatedDeliveryDays =
+    deliveryType === 'STANDARD' ? orderRegion?.standardDeliveryDays ?? null : null;
 
   // Online payment currently only works for the gateway's configured currency (AED).
   // A region charging a different currency (e.g. Saudi/SAR) must use Cash on Delivery
@@ -364,7 +459,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
 
   // Early stock visibility check — surfaces OUT_OF_STOCK before order creation so the
   // mobile app can show a friendly message instead of completing checkout for unavailable
-  // items. Final atomic enforcement still happens at PENDING→CONFIRMED.
+  // items. Final atomic enforcement still happens at PENDING_PAYMENT→PROCESSING.
   const outOfStock = [];
   for (const it of lineItems) {
     const p = productById.get(it.productId);
@@ -604,6 +699,9 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         vatRatePercent: vat.applied ? vat.ratePercent : null,
         vatInclusive: vat.applied ? vat.inclusive : false,
         shippingAmount,
+        deliveryType,
+        scheduledDeliveryAt: resolvedScheduledDeliveryAt,
+        estimatedDeliveryDays,
         appliedPromoCode: promoResult?.promoCode.code ?? null,
         appliedPromoCodeId: promoResult?.promoCode.id ?? null,
         paymentMethod,
@@ -704,7 +802,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // helper used at confirm). If a concurrent order already took the last unit this
     // throws INSUFFICIENT_STOCK and the whole order transaction rolls back — closing the
     // oversell window where many orders could be placed against the same last unit and
-    // only fail later at confirm. Online (AWAITING_PAYMENT) orders therefore hold their
+    // only fail later at confirm. Online (PENDING_PAYMENT) orders therefore hold their
     // stock until paid; abandoned ones are released by the order.expire-unpaid job.
     await deductInventoryForOrder(tx, orderRecord.id);
   }, { maxWait: 5000, timeout: 15000 });
@@ -774,7 +872,14 @@ async function createOrderCore(userId, params = {}, opts = {}) {
  * Thin wrapper over createOrderCore.
  */
 async function createOrder(userId, checkoutInput = {}, opts = {}) {
-  const { addressId, shippingAddress, paymentMethod = 'COD', promoCode } = checkoutInput;
+  const {
+    addressId,
+    shippingAddress,
+    paymentMethod = 'COD',
+    promoCode,
+    deliveryType,
+    scheduledDeliveryAt,
+  } = checkoutInput;
 
   const cartData = await cartService.getCart(userId);
   if (!cartData.items || cartData.items.length === 0) {
@@ -792,7 +897,17 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
 
   return createOrderCore(
     userId,
-    { lineItems, orderMessage: cartData.orderMessage ?? null, addressId, shippingAddress, paymentMethod, promoCode, clearCart: true },
+    {
+      lineItems,
+      orderMessage: cartData.orderMessage ?? null,
+      addressId,
+      shippingAddress,
+      paymentMethod,
+      promoCode,
+      deliveryType,
+      scheduledDeliveryAt,
+      clearCart: true,
+    },
     opts
   );
 }
@@ -801,7 +916,7 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
  * Buy Now: order a SINGLE product directly from the product page WITHOUT touching the cart.
  * The product must exist and be PUBLISHED (the client sends an arbitrary productId, so we
  * never let a draft/archived item be bought directly). Everything else — pricing, promo,
- * region, address, stock, the AWAITING_PAYMENT/COD split — is identical to cart checkout
+ * region, address, stock, the PENDING_PAYMENT/COD split — is identical to cart checkout
  * because it runs through the same createOrderCore.
  */
 async function buyNow(userId, input = {}, opts = {}) {
@@ -812,6 +927,8 @@ async function buyNow(userId, input = {}, opts = {}) {
     shippingAddress,
     paymentMethod = 'COD',
     promoCode,
+    deliveryType,
+    scheduledDeliveryAt,
     message,
     selectedOptions,
     giftCardSelected,
@@ -852,6 +969,8 @@ async function buyNow(userId, input = {}, opts = {}) {
       shippingAddress,
       paymentMethod,
       promoCode,
+      deliveryType,
+      scheduledDeliveryAt,
       clearCart: false, // never touch the user's cart for a direct purchase
     },
     opts
@@ -872,7 +991,7 @@ async function buyNow(userId, input = {}, opts = {}) {
  * to settle an anonymous online order against.
  */
 async function createGuestOrder(guestInput = {}, opts = {}) {
-  const { items, orderMessage, shippingAddress, promoCode, email } = guestInput;
+  const { items, orderMessage, shippingAddress, promoCode, email, deliveryType, scheduledDeliveryAt } = guestInput;
 
   if (!Array.isArray(items) || items.length === 0) {
     return { order: null, error: 'No items to order' };
@@ -931,6 +1050,8 @@ async function createGuestOrder(guestInput = {}, opts = {}) {
       shippingAddress,
       paymentMethod: 'COD',
       promoCode,
+      deliveryType,
+      scheduledDeliveryAt,
       clearCart: false,
       guestContact,
     },
@@ -1002,10 +1123,14 @@ async function getOrderById(orderId, userId = null) {
   return toOrderResponsePayload(order);
 }
 
-async function getAllOrdersAdmin(page = 1, limit = 10, status = null, regionId = null) {
+async function getAllOrdersAdmin(page = 1, limit = 10, status = null, regionId = null, deliveryType = null) {
   const skip = (Math.max(1, page) - 1) * Math.min(100, Math.max(1, limit));
   const take = Math.min(100, Math.max(1, limit));
-  const where = { ...listStatusFilter(status), ...(regionId ? { regionId } : {}) };
+  const where = {
+    ...listStatusFilter(status),
+    ...(regionId ? { regionId } : {}),
+    ...(deliveryType ? { deliveryType } : {}),
+  };
 
   const [orders, total] = await Promise.all([
     prisma.order.findMany({
@@ -1037,6 +1162,9 @@ async function getAllOrdersAdmin(page = 1, limit = 10, status = null, regionId =
     vatRatePercent: decimalToNumber(o.vatRatePercent),
     vatInclusive: Boolean(o.vatInclusive),
     currency: o.currency ?? 'AED',
+    deliveryType: o.deliveryType ?? 'STANDARD',
+    scheduledDeliveryAt: o.scheduledDeliveryAt ?? null,
+    estimatedDeliveryDays: o.estimatedDeliveryDays ?? null,
     status: o.status,
     region: o.region ? { id: o.region.id, code: o.region.code, name: o.region.name } : null,
     createdAt: o.createdAt,
@@ -1069,6 +1197,9 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
     vatRatePercent: decimalToNumber(order.vatRatePercent),
     vatInclusive: Boolean(order.vatInclusive),
     currency: order.currency ?? 'AED',
+    deliveryType: order.deliveryType ?? 'STANDARD',
+    scheduledDeliveryAt: order.scheduledDeliveryAt ?? null,
+    estimatedDeliveryDays: order.estimatedDeliveryDays ?? null,
     status: order.status,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
@@ -1203,7 +1334,7 @@ async function getAdminOrderHistory(page = 1, limit = 10, filters = {}) {
   };
 }
 
-const FULFILLING_STATUSES = ['CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED'];
+const FULFILLING_STATUSES = ['PROCESSING', 'COMPLETED'];
 
 function aggregateOrderLineQtyByProduct(items) {
   const map = new Map();
@@ -1317,7 +1448,7 @@ async function restoreInventoryForOrder(tx, orderId) {
 /**
  * Release the promo reservation held by an order that is being cancelled. Promo usage is
  * reserved at placement (so the global/per-user caps hold the slot through the
- * AWAITING_PAYMENT window), mirroring how stock is reserved at placement. When the order is
+ * PENDING_PAYMENT window), mirroring how stock is reserved at placement. When the order is
  * cancelled — unpaid-expiry, admin cancel, or a failed online payment — that reservation
  * must be returned: delete the usage row(s) for this order and decrement each affected
  * promo's usageCount (floored at 0). Idempotent: a no-promo order or an already-released
@@ -1349,15 +1480,13 @@ async function releasePromoUsageForOrder(tx, orderId) {
 /**
  * Lightweight status payload for post-checkout polling (customer or staff).
  */
-async function getOrderStatusOnly(orderId, userId = null) {
-  const where = { id: orderId };
-  if (userId) where.userId = userId;
-
+// Public lookup — the order id (a UUID) is the tracking credential (see the route's swagger
+// doc), so this deliberately never filters by ownership. Only non-PII fields are selected.
+async function getOrderStatusOnly(orderId) {
   const order = await prisma.order.findFirst({
-    where,
+    where: { id: orderId },
     select: {
       id: true,
-      userId: true,
       status: true,
       paymentStatus: true,
       totalAmount: true,
@@ -1368,8 +1497,9 @@ async function getOrderStatusOnly(orderId, userId = null) {
 
   if (!order) return null;
 
-  const statusOrder = ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED'];
-  const terminal = order.status === 'CANCELLED';
+  const statusOrder = ['PENDING_PAYMENT', 'PROCESSING', 'COMPLETED'];
+  // CANCELLED/REFUNDED/FAILED all end the normal flow (no further progress expected).
+  const terminal = ['CANCELLED', 'REFUNDED', 'FAILED'].includes(order.status);
   const idx = statusOrder.indexOf(order.status);
   const progressIndex = terminal ? -1 : idx >= 0 ? idx : 0;
 
@@ -1382,7 +1512,7 @@ async function getOrderStatusOnly(orderId, userId = null) {
     updatedAt: order.updatedAt,
     progress: {
       currentStep: order.status,
-      isTerminal: terminal || order.status === 'DELIVERED',
+      isTerminal: terminal || order.status === 'COMPLETED',
       typicalFlow: statusOrder,
       stepIndex: terminal ? null : progressIndex,
     },
@@ -1390,7 +1520,16 @@ async function getOrderStatusOnly(orderId, userId = null) {
 }
 
 async function updateOrderStatus(orderId, status) {
-  const valid = ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
+  const valid = [
+    'PENDING_PAYMENT',
+    'PROCESSING',
+    'ON_HOLD',
+    'COMPLETED',
+    'CANCELLED',
+    'REFUNDED',
+    'FAILED',
+    'DRAFT',
+  ];
   if (!valid.includes(status)) return null;
 
   try {
@@ -1421,24 +1560,28 @@ async function updateOrderStatus(orderId, status) {
           return { payload: toOrderResponsePayload(full), notify: false };
         }
 
-        // Deduct stock on first confirm — both COD (PENDING→CONFIRMED) and online
-        // payment (AWAITING_PAYMENT→CONFIRMED, driven by confirmOrderPayment).
+        // Deduct stock on first entry into fulfilment (PENDING_PAYMENT → PROCESSING,
+        // driven by the admin, the COD confirm step, or confirmOrderPayment for online).
         const needCommit =
-          !prev.inventoryDeducted &&
-          (prev.status === 'PENDING' || prev.status === 'AWAITING_PAYMENT') &&
-          status === 'CONFIRMED';
-        // CANCELLED: always restore if stock was deducted (any prior status). PENDING: restore only when reverting from fulfilment.
+          !prev.inventoryDeducted && prev.status === 'PENDING_PAYMENT' && status === 'PROCESSING';
+        // CANCELLED: always restore if stock was deducted (any prior status).
+        // PENDING_PAYMENT: restore only when reverting from fulfilment (PROCESSING/COMPLETED).
+        // ON_HOLD/REFUNDED/FAILED/DRAFT are pure labels — entering or leaving them never
+        // touches stock, so they're deliberately absent from both conditions below.
         const needRelease =
           prev.inventoryDeducted &&
           (status === 'CANCELLED' ||
-            (status === 'PENDING' && FULFILLING_STATUSES.includes(prev.status)));
+            (status === 'PENDING_PAYMENT' && FULFILLING_STATUSES.includes(prev.status)));
 
         if (needCommit) await deductInventoryForOrder(tx, orderId);
         if (needRelease) await restoreInventoryForOrder(tx, orderId);
 
         // Cancelling returns any promo reservation this order held (independent of stock —
         // a code can be released even on an order whose inventory wasn't deducted). The
-        // helper is a no-op for orders without a promo or already released.
+        // helper is a no-op for orders without a promo or already released. Refunded orders
+        // deliberately do NOT release promo usage (client decision: Refunded is just a
+        // label for now, with no stock/promo side effects — refund itself is handled
+        // manually/externally since no payment-gateway refund API is wired up yet).
         if (status === 'CANCELLED' && prev.status !== 'CANCELLED') {
           await releasePromoUsageForOrder(tx, orderId);
         }
@@ -1477,7 +1620,7 @@ async function updateOrderStatus(orderId, status) {
         status: result.notifyStatus,
       });
     }
-    // Email (Shipped/Delivered only — see notify.orderStatusEmail) fires regardless of
+    // Email (Processing/Completed only — see notify.orderStatusEmail) fires regardless of
     // userId, so a guest order gets the same status emails a signed-in customer does.
     if (result.notify && result.notifyStatus) {
       notify.orderStatusEmail(orderId, result.notifyStatus);
@@ -1518,7 +1661,7 @@ async function initiateOrderPayment(orderId, userId) {
   }
   if (order.paymentStatus === 'PAID') return { error: 'Order is already paid' };
   // Payable only while awaiting payment (covers first attempt and retry after a failed one).
-  if (order.status !== 'AWAITING_PAYMENT') return { error: 'Order can no longer be paid' };
+  if (order.status !== 'PENDING_PAYMENT') return { error: 'Order can no longer be paid' };
   if (Number(order.totalAmount) <= 0) return { error: 'Order total must be greater than zero' };
 
   const { invoiceId, paymentUrl } = await paymentService.createPaymentInvoice(order, {
@@ -1550,7 +1693,7 @@ async function createPaymentSession(orderId, userId) {
   if (!order) return { error: 'Order not found' };
   if (order.paymentMethod !== 'MYFATOORAH') return { error: 'This order is not set up for online payment' };
   if (order.paymentStatus === 'PAID') return { error: 'Order is already paid' };
-  if (order.status !== 'AWAITING_PAYMENT') return { error: 'Order can no longer be paid' };
+  if (order.status !== 'PENDING_PAYMENT') return { error: 'Order can no longer be paid' };
   if (Number(order.totalAmount) <= 0) return { error: 'Order total must be greater than zero' };
 
   const session = await paymentService.initiateSession();
@@ -1582,7 +1725,7 @@ async function executeOrderPayment(orderId, userId, sessionId) {
   if (!order) return { error: 'Order not found' };
   if (order.paymentMethod !== 'MYFATOORAH') return { error: 'This order is not set up for online payment' };
   if (order.paymentStatus === 'PAID') return { isPaid: true, orderId, status: 'Paid', alreadyProcessed: true };
-  if (order.status !== 'AWAITING_PAYMENT') return { error: 'Order can no longer be paid' };
+  if (order.status !== 'PENDING_PAYMENT') return { error: 'Order can no longer be paid' };
 
   // Double-charge guard (H5). ExecutePayment is NOT idempotent — a double-tap (or retry
   // while the first charge is still in flight) could charge the card twice. Atomically
@@ -1641,7 +1784,7 @@ async function executeOrderPayment(orderId, userId, sessionId) {
 
 /**
  * Place a now-PAID order: clear the cart (unless a Buy Now order), fire the "order placed"
- * notifications, and auto-confirm (AWAITING_PAYMENT/PENDING → CONFIRMED). Idempotent and
+ * notifications, and auto-confirm (PENDING_PAYMENT → PROCESSING). Idempotent and
  * safe to call again on a stranded-but-PAID order (recovery): cart clear is a no-op on an
  * empty cart, updateOrderStatus won't re-deduct already-reserved stock, and notifications
  * are only sent on the first placement. Payment is already captured, so a confirm failure
@@ -1661,8 +1804,10 @@ async function finalizePaidOrder(order, { firstPlacement } = {}) {
   }
 
   // Clear the cart (kept until now) for a normal online checkout. Buy Now orders
-  // (clearCartOnPayment=false) must NOT wipe the user's real cart.
-  if (order.status === 'AWAITING_PAYMENT') {
+  // (clearCartOnPayment=false) must NOT wipe the user's real cart. Every order starts
+  // PENDING_PAYMENT now (online or COD); this whole function only ever runs for a
+  // just-paid order, so reaching here with status still PENDING_PAYMENT means online.
+  if (order.status === 'PENDING_PAYMENT') {
     if (order.clearCartOnPayment !== false) {
       await prisma.cartItem.deleteMany({ where: { cart: { userId: order.userId } } }).catch((err) =>
         console.error(`[payment] order ${orderId} paid but cart clear failed: ${err.message}`)
@@ -1670,10 +1815,10 @@ async function finalizePaidOrder(order, { firstPlacement } = {}) {
       await prisma.cart.updateMany({ where: { userId: order.userId }, data: { orderMessage: null } }).catch(() => {});
     }
     if (firstPlacement) {
-      // Online orders auto-confirm immediately below, which sends the customer an
-      // "Order confirmed" push — so we deliberately do NOT also send "Order placed"
-      // (that would be two near-identical pushes within a second). COD keeps "Order
-      // placed" because it's confirmed manually later. Staff alert + email still fire.
+      // Online orders auto-confirm immediately below, which sends the customer a
+      // "Processing" push — so we deliberately do NOT also send "Order placed" (that
+      // would be two near-identical pushes within a second). COD keeps "Order placed"
+      // because it's confirmed manually later. Staff alert + email still fire.
       notify.adminNewOrder({
         orderId,
         orderNumber: order.orderNumber,
@@ -1689,9 +1834,9 @@ async function finalizePaidOrder(order, { firstPlacement } = {}) {
 
   // Auto-confirm. Stock was already reserved at placement (H1), so this only moves the
   // status forward (no re-deduction). A failure here must not propagate.
-  if (order.status === 'AWAITING_PAYMENT' || order.status === 'PENDING') {
+  if (order.status === 'PENDING_PAYMENT') {
     try {
-      await updateOrderStatus(orderId, 'CONFIRMED');
+      await updateOrderStatus(orderId, 'PROCESSING');
     } catch (err) {
       console.error(`[payment] order ${orderId} paid but could not auto-confirm: ${err.message}`);
     }
@@ -1701,7 +1846,7 @@ async function finalizePaidOrder(order, { firstPlacement } = {}) {
 /**
  * Verify a MyFatoorah payment (authoritative server-side check) and, if genuinely paid,
  * place the order: atomically mark it PAID, clear the cart, fire the "order placed" push,
- * and move AWAITING_PAYMENT → CONFIRMED. `key` is the PaymentId from the callback or the
+ * and move PENDING_PAYMENT → PROCESSING. `key` is the PaymentId from the callback or the
  * InvoiceId from a webhook / session execute; `keyType` selects which.
  *
  * Idempotent and race-safe: the PAID flip is a single conditional UPDATE, so only one of
@@ -1736,12 +1881,12 @@ async function confirmOrderPayment(key, keyType = 'PaymentId') {
 
   // Already settled — don't double-process (callback + webhook can both fire). BUT a prior
   // attempt may have flipped the order PAID and then crashed/failed before it was actually
-  // placed (the PAID flip and the CONFIRMED transition are separate steps). If the order is
-  // PAID yet still sitting in AWAITING_PAYMENT/PENDING, re-drive placement idempotently so it
-  // can never be stranded "PAID but never confirmed" (C1). Stock was already reserved at
+  // placed (the PAID flip and the PROCESSING transition are separate steps). If the order is
+  // PAID yet still sitting in PENDING_PAYMENT, re-drive placement idempotently so it can
+  // never be stranded "PAID but never confirmed" (C1). Stock was already reserved at
   // placement (H1), so this only advances the status; it does not re-deduct.
   if (order.paymentStatus === 'PAID') {
-    if (order.status === 'AWAITING_PAYMENT' || order.status === 'PENDING') {
+    if (order.status === 'PENDING_PAYMENT') {
       await finalizePaidOrder(order, { firstPlacement: false });
     }
     return { isPaid: true, orderId, status: 'Paid', alreadyProcessed: true };

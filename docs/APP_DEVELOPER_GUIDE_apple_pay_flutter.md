@@ -47,7 +47,7 @@ All calls need the logged-in user's token: `Authorization: Bearer <accessToken>`
 ```json
 { "paymentMethod": "MYFATOORAH", "addressId": "<saved-address-uuid>" }
 ```
-→ returns `data.id` = **orderId**, with `status: "AWAITING_PAYMENT"`.
+→ returns `data.id` = **orderId**, with `status: "PENDING_PAYMENT"`.
 
 **(b) Create a payment session for Apple Pay** *(backend endpoint provided for this flow)*:
 `POST /orders/{orderId}/payment-session`
@@ -60,7 +60,7 @@ create it right before showing the Apple Pay button.
 
 **(c) Confirm the result** (source of truth — always do this after paying):
 `GET /orders/{orderId}/status`
-→ `data.paymentStatus === "PAID"` and `data.status === "CONFIRMED"` means success.
+→ `data.paymentStatus === "PAID"` and `data.status === "PROCESSING"` means success.
 
 > Do **not** trust the SDK's local "success" alone — always confirm with `GET /status`. The
 > backend verifies with MyFatoorah server-side (webhook + a reconcile job), so this is reliable
@@ -129,7 +129,7 @@ You need a **real iPhone** — Apple Pay never works on the iOS Simulator.
 4. **VPN to a GCC region** (UAE) on the phone — the MyFatoorah/bank test gateways block some
    countries (e.g. Pakistan). Real customers in-region won't need this.
 5. Run the flow: checkout → tap Apple Pay → native sheet → Face ID → success.
-6. Confirm with `GET /orders/{orderId}/status` → `PAID` / `CONFIRMED`.
+6. Confirm with `GET /orders/{orderId}/status` → `PAID` / `PROCESSING`.
 
 If the Apple Pay button doesn't appear on a real iPhone: Apple Pay isn't enabled on the
 MyFatoorah account yet, the certificate exchange (Section 1) isn't done, the Merchant ID is

@@ -28,7 +28,7 @@ const PRODUCT_DESCRIPTION_REQUIRED_PAIRS = [{ src: 'description', dst: 'descript
 const PRODUCT_OPTION_REQUIRED_PAIRS = [{ src: 'title', dst: 'title_ar' }];
 
 const MAX_IMAGES = 10;
-const ACTIVE_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PROCESSING'];
+const ACTIVE_ORDER_STATUSES = ['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD'];
 const decimalToNumber = (v) => (v == null ? null : Number(v));
 
 function orderedImages(product) {
@@ -730,7 +730,7 @@ async function reorderProducts(items) {
 // scan on this public endpoint. 10k pages × 100/page covers any real catalog.
 const MAX_PAGE = 10000;
 
-async function getAllProducts(page = 1, limit = 10, categoryId = null, visibility = {}) {
+async function getAllProductsOrdered(page, limit, categoryId, visibility, orderBy) {
   const safePage = Math.min(MAX_PAGE, Math.max(1, page));
   const take = Math.min(100, Math.max(1, limit));
   const skip = (safePage - 1) * take;
@@ -744,10 +744,7 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null, visibilit
       where,
       skip,
       take,
-      // Admin-controlled display order first (drag-and-drop sets sortOrder), then
-      // newest. All products default to sortOrder 0, so the effective order is
-      // unchanged until an admin explicitly reorders.
-      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+      orderBy,
       include: {
         category: { select: { id: true, title: true } },
         images: { orderBy: { sortOrder: 'asc' } },
@@ -772,18 +769,43 @@ async function getAllProducts(page = 1, limit = 10, categoryId = null, visibilit
   };
 }
 
+async function getAllProducts(page = 1, limit = 10, categoryId = null, visibility = {}) {
+  // Admin-controlled display order first (drag-and-drop sets sortOrder), then
+  // newest. All products default to sortOrder 0, so the effective order is
+  // unchanged until an admin explicitly reorders.
+  return getAllProductsOrdered(page, limit, categoryId, visibility, [{ sortOrder: 'asc' }, { createdAt: 'desc' }]);
+}
+
+/**
+ * "New Arrivals" feed — pure recency order (createdAt desc), deliberately ignoring
+ * the admin's manual catalogue sortOrder (unlike getAllProducts' default order):
+ * "new arrivals" is explicitly about what was just published, not curated display
+ * order. Uses createdAt as the recency signal — this schema has no separate
+ * publishedAt column, and createdAt is already this codebase's own established
+ * proxy for it (see schema.prisma's `@@index([status, createdAt])` comment).
+ * Mirrors getBestSellers' shape/pagination so the storefront's "View all"
+ * experience is consistent between the two rails.
+ */
+async function getNewArrivals(page = 1, limit = 10, visibility = {}) {
+  // `id` as a stable tiebreaker after createdAt — without it, products sharing an
+  // identical createdAt (e.g. bulk-imported/seeded in one batch) have a
+  // non-deterministic order, which can duplicate or skip a product across
+  // OFFSET-paginated "load more" pages.
+  return getAllProductsOrdered(page, limit, null, visibility, [{ createdAt: 'desc' }, { id: 'asc' }]);
+}
+
 async function getProductsByCategory(categoryId, page = 1, limit = 10, visibility = {}) {
   return getAllProducts(page, limit, categoryId, visibility);
 }
 
-// Best Sellers ranks products by real units sold (non-cancelled orders) in the
-// requesting region. Bounds how many candidate ids we ever assemble across the
+// Best Sellers ranks products by real units sold (non-cancelled, non-refunded orders)
+// in the requesting region. Bounds how many candidate ids we ever assemble across the
 // ranked-sales + fallback tiers below — plenty for any realistic catalog size
 // while keeping the query cost bounded.
 const BEST_SELLERS_CANDIDATE_CAP = 300;
 
-/** Product ids ranked by total units sold (non-cancelled orders), most-sold first.
- *  Scoped to a region when one is given; combined across all regions otherwise
+/** Product ids ranked by total units sold (non-cancelled, non-refunded orders), most-sold
+ *  first. Scoped to a region when one is given; combined across all regions otherwise
  *  (staff/admin reads). Capped at BEST_SELLERS_CANDIDATE_CAP rows. */
 async function getBestSellingProductIds(regionId) {
   const regionFilter = regionId ? Prisma.sql`AND o."regionId" = ${regionId}` : Prisma.empty;
@@ -791,7 +813,7 @@ async function getBestSellingProductIds(regionId) {
     SELECT oi."productId" AS "productId"
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
-    WHERE o.status <> 'CANCELLED' AND oi."productId" IS NOT NULL ${regionFilter}
+    WHERE o.status NOT IN ('CANCELLED', 'REFUNDED') AND oi."productId" IS NOT NULL ${regionFilter}
     GROUP BY oi."productId"
     ORDER BY SUM(oi.quantity) DESC
     LIMIT ${BEST_SELLERS_CANDIDATE_CAP}
@@ -981,6 +1003,8 @@ module.exports = {
   getAllProducts,
   getProductsByCategory,
   getBestSellers,
+  getBestSellingProductIds,
+  getNewArrivals,
   searchProducts,
   getProductById,
   mapProduct,

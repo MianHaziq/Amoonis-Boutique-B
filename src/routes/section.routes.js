@@ -10,6 +10,7 @@ const { resolveRegion } = require('../middleware/region');
 // Shared region/draft validators for create + update.
 const regionStatusValidation = [
   body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
+  body('kind').optional().isIn(['CUSTOM', 'BEST_SELLERS', 'NEW_ARRIVALS']).withMessage('kind must be CUSTOM, BEST_SELLERS, or NEW_ARRIVALS'),
   body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
   body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
 ];

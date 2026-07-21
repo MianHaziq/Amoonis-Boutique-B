@@ -23,8 +23,11 @@ const BLOOM = '#d4316d';
 const BLOOM_DARK = '#b32257';
 const BLOOM_TINT = '#fdf2f6';
 
+// FRONTEND_URL should be set per-environment (local: http://localhost:3000; production: the
+// live Vercel deployment) — see .env.example. The fallback below is a safety net only, so a
+// missing env var points at the real production site instead of a dead placeholder domain.
 function frontendUrl() {
-  return (process.env.FRONTEND_URL || 'https://amoonis-boutique.com').replace(/\/+$/, '');
+  return (process.env.FRONTEND_URL || 'https://amoon-bloom-f.vercel.app').replace(/\/+$/, '');
 }
 
 function orderTrackUrl(orderId) {
@@ -233,24 +236,24 @@ function renderOrderConfirmation(order) {
 /* ------------------------------- Order status update ------------------------------- */
 
 const STATUS_META = {
-  SHIPPED: {
+  PROCESSING: {
     emoji: '📦',
-    heading: 'Your order has shipped!',
-    line: "Great news — it's on its way to you.",
+    heading: 'Your order is being processed!',
+    line: "We're getting your items ready.",
   },
-  DELIVERED: {
+  COMPLETED: {
     emoji: '🎉',
-    heading: 'Your order has been delivered!',
+    heading: 'Your order is complete!',
     line: 'We hope you love it. Thank you for shopping with us.',
   },
 };
 
 /**
- * Lighter-weight status-change email (Shipped / Delivered) — a short, celebratory
+ * Lighter-weight status-change email (Processing / Completed) — a short, celebratory
  * update rather than re-sending the full itemised receipt every time.
  * @param {object} order - Prisma Order (id, orderNumber, totalAmount, currency,
  *   shippingFullName, guestName, createdAt).
- * @param {string} status - 'SHIPPED' | 'DELIVERED'
+ * @param {string} status - 'PROCESSING' | 'COMPLETED'
  */
 function renderOrderStatusUpdate(order, status) {
   const meta = STATUS_META[status] || {

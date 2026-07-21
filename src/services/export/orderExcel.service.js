@@ -78,6 +78,8 @@ async function renderOrdersExcel(res, data, filename) {
     { metric: 'Repeat Customers', value: summary.repeatCustomers, fmt: I },
     { metric: 'Cancelled Orders', value: summary.cancelledOrders, fmt: I },
     { metric: 'Cancelled Order %', value: summary.cancelledOrderPercentage, fmt: PERCENT_FMT },
+    { metric: 'Refunded Orders', value: summary.refundedOrders, fmt: I },
+    { metric: 'Refunded Order %', value: summary.refundedOrderPercentage, fmt: PERCENT_FMT },
   ];
   const summaryRange = writeStyledTable(
     summarySheet,
@@ -132,7 +134,7 @@ async function renderOrdersExcel(res, data, filename) {
   ];
   const orderRange = writeStyledTable(ordersSheet, orderColumns, orderRows, { freeze: true });
   // Conditional formatting: colour the Payment Status and Order Status cells by
-  // tone (PAID/DELIVERED green, PENDING/UNPAID yellow, …) — column indexes
+  // tone (PAID/COMPLETED green, PENDING_PAYMENT/UNPAID yellow, …) — column indexes
   // shifted by 1 from the previous layout since "Region" was inserted before "City".
   const paymentStatusCol = orderColumns.findIndex((c) => c.key === 'paymentStatus') + 1;
   const orderStatusCol = orderColumns.findIndex((c) => c.key === 'status') + 1;

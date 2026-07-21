@@ -1015,7 +1015,7 @@ const options = {
         Order: {
           type: 'object',
           description:
-            '**PENDING → CONFIRMED** reduces **Product.quantity** per line (**409** if insufficient). **CANCELLED** restores stock whenever **inventoryDeducted** is true. Reverting to **PENDING** from confirmed/processing/shipped/delivered also restores. **inventoryDeducted** reflects whether deduction is active.',
+            '**PENDING_PAYMENT → PROCESSING** reduces **Product.quantity** per line (**409** if insufficient). **CANCELLED** restores stock whenever **inventoryDeducted** is true. Reverting to **PENDING_PAYMENT** from processing/completed also restores. **ON_HOLD/REFUNDED/FAILED/DRAFT** are pure labels with no stock side effects. **inventoryDeducted** reflects whether deduction is active.',
           properties: {
             id: { type: 'string', format: 'uuid' },
             userId: { type: 'string', format: 'uuid' },
@@ -1033,12 +1033,12 @@ const options = {
             },
             status: {
               type: 'string',
-              enum: ['AWAITING_PAYMENT', 'PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
-              description: 'AWAITING_PAYMENT = online order created but not yet paid (hidden from lists until paid). On payment it becomes CONFIRMED.',
+              enum: ['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'DRAFT'],
+              description: 'PENDING_PAYMENT = order placed, payment not yet confirmed (a normal, visible order — both COD and unpaid online orders start here). On confirmation it becomes PROCESSING.',
             },
             inventoryDeducted: {
               type: 'boolean',
-              description: 'True after a successful **CONFIRMED** transition deducted catalog stock for this order',
+              description: 'True after a successful **PROCESSING** transition deducted catalog stock for this order',
             },
             createdAt: { type: 'string', format: 'date-time' },
             updatedAt: { type: 'string', format: 'date-time' },
@@ -1064,8 +1064,8 @@ const options = {
           properties: {
             status: {
               type: 'string',
-              enum: ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
-              example: 'CONFIRMED',
+              enum: ['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'DRAFT'],
+              example: 'PROCESSING',
             },
           },
         },
@@ -1076,7 +1076,7 @@ const options = {
             id: { type: 'string', format: 'uuid' },
             status: {
               type: 'string',
-              enum: ['AWAITING_PAYMENT', 'PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
+              enum: ['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'DRAFT'],
             },
             paymentStatus: {
               type: 'string',
@@ -1090,11 +1090,11 @@ const options = {
               type: 'object',
               properties: {
                 currentStep: { type: 'string' },
-                isTerminal: { type: 'boolean', description: 'True when DELIVERED or CANCELLED' },
+                isTerminal: { type: 'boolean', description: 'True when COMPLETED, CANCELLED, REFUNDED, or FAILED' },
                 typicalFlow: {
                   type: 'array',
                   items: { type: 'string' },
-                  description: 'Common fulfillment sequence for UI steppers',
+                  description: 'Common fulfillment sequence for UI steppers (PENDING_PAYMENT, PROCESSING, COMPLETED)',
                 },
                 stepIndex: { type: 'integer', nullable: true },
               },
@@ -1135,14 +1135,14 @@ const options = {
         },
         RevenueAnalyticsSummary: {
           type: 'object',
-          description: 'Totals for the selected window. **revenue** excludes CANCELLED orders.',
+          description: 'Totals for the selected window. **revenue** excludes CANCELLED and REFUNDED orders.',
           properties: {
-            activeOrderCount: { type: 'integer', description: 'Orders with status other than CANCELLED' },
-            revenue: { type: 'number', description: 'Sum of totalAmount for non-cancelled orders' },
+            activeOrderCount: { type: 'integer', description: 'Orders with status other than CANCELLED/REFUNDED' },
+            revenue: { type: 'number', description: 'Sum of totalAmount for non-cancelled, non-refunded orders' },
             averageOrderValue: { type: 'number' },
             cancelledOrderCount: { type: 'integer' },
             cancelledRevenue: { type: 'number', description: 'Sum of totalAmount for cancelled orders' },
-            distinctCustomers: { type: 'integer', description: 'Unique userId among non-cancelled orders' },
+            distinctCustomers: { type: 'integer', description: 'Unique userId among non-cancelled, non-refunded orders' },
           },
         },
         RevenueSeriesPoint: {
@@ -1159,7 +1159,7 @@ const options = {
         OrderStatusBucket: {
           type: 'object',
           properties: {
-            status: { type: 'string', enum: ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'] },
+            status: { type: 'string', enum: ['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'DRAFT'] },
             orderCount: { type: 'integer' },
             revenue: { type: 'number', description: 'Sum of totalAmount for this status in the window' },
           },
@@ -1194,7 +1194,7 @@ const options = {
         },
         KpiAnalyticsPayload: {
           type: 'object',
-          description: 'Single-scan order aggregates plus units sold from line items (non-cancelled).',
+          description: 'Single-scan order aggregates plus units sold from line items (non-cancelled, non-refunded).',
           properties: {
             preset: { type: 'string', nullable: true },
             presetLabel: { type: 'string' },
@@ -1204,11 +1204,11 @@ const options = {
               type: 'object',
               properties: {
                 totalOrdersAllStatuses: { type: 'integer' },
-                grossRevenueAllStatuses: { type: 'number', description: 'Sum of order totals including cancelled' },
-                netSalesCount: { type: 'integer', description: 'Orders excluding CANCELLED' },
-                netRevenue: { type: 'number', description: 'Revenue excluding cancelled orders' },
+                grossRevenueAllStatuses: { type: 'number', description: 'Sum of order totals including cancelled/refunded' },
+                netSalesCount: { type: 'integer', description: 'Orders excluding CANCELLED/REFUNDED' },
+                netRevenue: { type: 'number', description: 'Revenue excluding cancelled and refunded orders' },
                 averageOrderValue: { type: 'number', description: 'netRevenue / netSalesCount' },
-                unitsSold: { type: 'integer', description: 'Sum of line quantities on non-cancelled orders' },
+                unitsSold: { type: 'integer', description: 'Sum of line quantities on non-cancelled, non-refunded orders' },
                 distinctCustomers: { type: 'integer' },
               },
             },
@@ -1223,11 +1223,13 @@ const options = {
               type: 'object',
               description: 'Fulfillment pipeline only; see **cancelled** for CANCELLED rows',
               properties: {
-                PENDING: { $ref: '#/components/schemas/KpiStatusSlice' },
-                CONFIRMED: { $ref: '#/components/schemas/KpiStatusSlice' },
+                PENDING_PAYMENT: { $ref: '#/components/schemas/KpiStatusSlice' },
                 PROCESSING: { $ref: '#/components/schemas/KpiStatusSlice' },
-                SHIPPED: { $ref: '#/components/schemas/KpiStatusSlice' },
-                DELIVERED: { $ref: '#/components/schemas/KpiStatusSlice' },
+                ON_HOLD: { $ref: '#/components/schemas/KpiStatusSlice' },
+                COMPLETED: { $ref: '#/components/schemas/KpiStatusSlice' },
+                REFUNDED: { $ref: '#/components/schemas/KpiStatusSlice' },
+                FAILED: { $ref: '#/components/schemas/KpiStatusSlice' },
+                DRAFT: { $ref: '#/components/schemas/KpiStatusSlice' },
               },
             },
           },

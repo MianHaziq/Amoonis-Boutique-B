@@ -1,13 +1,18 @@
 /**
  * order.expire-unpaid — cancel online orders that were never paid.
  *
- * An online (MyFatoorah) order sits in AWAITING_PAYMENT until payment succeeds. As of the
+ * An online (MyFatoorah) order sits in PENDING_PAYMENT until payment succeeds. As of the
  * stock-reservation change (H1) it HAS reserved (deducted) stock at placement, so cancelling
  * it must RESTORE that stock. If it's still unpaid after ORDER_EXPIRE_HOURS we cancel it so it
  * stops being reconciled and stops holding both stock and a payment invoice. Each order is
  * cancelled in its own row-locked transaction (SELECT ... FOR UPDATE re-checks status +
  * paymentStatus) so an order that just got paid is never cancelled. No push is sent — the
  * customer never completed checkout, so a "cancelled" notice would confuse.
+ *
+ * IMPORTANT: PENDING_PAYMENT is no longer online-only — COD orders start there too (and stay
+ * there, visibly, until an admin manually moves them to PROCESSING). This job must only ever
+ * touch MYFATOORAH orders, or it would auto-cancel legitimate COD orders sitting untouched in
+ * PENDING_PAYMENT.
  */
 
 const prisma = require('../../config/db');
@@ -25,7 +30,8 @@ async function handle() {
 
   const candidates = await prisma.order.findMany({
     where: {
-      status: 'AWAITING_PAYMENT',
+      status: 'PENDING_PAYMENT',
+      paymentMethod: 'MYFATOORAH',
       paymentStatus: { in: ['UNPAID', 'FAILED'] },
       createdAt: { lt: cutoff },
     },
@@ -37,11 +43,13 @@ async function handle() {
     try {
       const done = await prisma.$transaction(async (tx) => {
         // Lock + re-check inside the tx: an order that just got paid (status/paymentStatus
-        // changed) no longer matches and is skipped — we never cancel a paid order.
+        // changed) no longer matches and is skipped — we never cancel a paid order. Also
+        // re-checks paymentMethod so a COD order can never match here.
         const locked = await tx.$queryRaw`
           SELECT id, "inventoryDeducted" FROM "Order"
           WHERE id::text = ${id}
-            AND status = 'AWAITING_PAYMENT'
+            AND status = 'PENDING_PAYMENT'
+            AND "paymentMethod" = 'MYFATOORAH'
             AND "paymentStatus" IN ('UNPAID', 'FAILED')
           FOR UPDATE`;
         if (!Array.isArray(locked) || locked.length === 0) return false;

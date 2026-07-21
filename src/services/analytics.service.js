@@ -167,21 +167,25 @@ function pickTruncForCustomRange(from, toExclusive) {
 const KPI_SELECT = Prisma.sql`
   COUNT(*)::int AS "totalOrdersAllStatuses",
   COALESCE(SUM("totalAmount"), 0) AS "grossRevenueAllStatuses",
-  COUNT(*) FILTER (WHERE status <> 'CANCELLED')::int AS "netOrderCount",
-  COALESCE(SUM("totalAmount") FILTER (WHERE status <> 'CANCELLED'), 0) AS "netRevenue",
+  COUNT(*) FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED'))::int AS "netOrderCount",
+  COALESCE(SUM("totalAmount") FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED')), 0) AS "netRevenue",
   COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledCount",
   COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue",
-  COUNT(*) FILTER (WHERE status = 'PENDING')::int AS "pendingCount",
-  COALESCE(SUM("totalAmount") FILTER (WHERE status = 'PENDING'), 0) AS "pendingRevenue",
-  COUNT(*) FILTER (WHERE status = 'CONFIRMED')::int AS "confirmedCount",
-  COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CONFIRMED'), 0) AS "confirmedRevenue",
+  COUNT(*) FILTER (WHERE status = 'PENDING_PAYMENT')::int AS "pendingPaymentCount",
+  COALESCE(SUM("totalAmount") FILTER (WHERE status = 'PENDING_PAYMENT'), 0) AS "pendingPaymentRevenue",
   COUNT(*) FILTER (WHERE status = 'PROCESSING')::int AS "processingCount",
   COALESCE(SUM("totalAmount") FILTER (WHERE status = 'PROCESSING'), 0) AS "processingRevenue",
-  COUNT(*) FILTER (WHERE status = 'SHIPPED')::int AS "shippedCount",
-  COALESCE(SUM("totalAmount") FILTER (WHERE status = 'SHIPPED'), 0) AS "shippedRevenue",
-  COUNT(*) FILTER (WHERE status = 'DELIVERED')::int AS "deliveredCount",
-  COALESCE(SUM("totalAmount") FILTER (WHERE status = 'DELIVERED'), 0) AS "deliveredRevenue",
-  COUNT(DISTINCT "userId") FILTER (WHERE status <> 'CANCELLED')::int AS "distinctCustomers"
+  COUNT(*) FILTER (WHERE status = 'ON_HOLD')::int AS "onHoldCount",
+  COALESCE(SUM("totalAmount") FILTER (WHERE status = 'ON_HOLD'), 0) AS "onHoldRevenue",
+  COUNT(*) FILTER (WHERE status = 'COMPLETED')::int AS "completedCount",
+  COALESCE(SUM("totalAmount") FILTER (WHERE status = 'COMPLETED'), 0) AS "completedRevenue",
+  COUNT(*) FILTER (WHERE status = 'REFUNDED')::int AS "refundedCount",
+  COALESCE(SUM("totalAmount") FILTER (WHERE status = 'REFUNDED'), 0) AS "refundedRevenue",
+  COUNT(*) FILTER (WHERE status = 'FAILED')::int AS "failedStatusCount",
+  COALESCE(SUM("totalAmount") FILTER (WHERE status = 'FAILED'), 0) AS "failedStatusRevenue",
+  COUNT(*) FILTER (WHERE status = 'DRAFT')::int AS "draftCount",
+  COALESCE(SUM("totalAmount") FILTER (WHERE status = 'DRAFT'), 0) AS "draftRevenue",
+  COUNT(DISTINCT "userId") FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED'))::int AS "distinctCustomers"
 `;
 
 /**
@@ -215,11 +219,11 @@ function buildOrderWhere(range, { alias = '', extra = [] } = {}) {
 async function fetchSummary(range) {
   const rows = await prisma.$queryRaw`
     SELECT
-      COUNT(*) FILTER (WHERE status <> 'CANCELLED')::int AS "activeOrderCount",
-      COALESCE(SUM("totalAmount") FILTER (WHERE status <> 'CANCELLED'), 0) AS "revenue",
+      COUNT(*) FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED'))::int AS "activeOrderCount",
+      COALESCE(SUM("totalAmount") FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED')), 0) AS "revenue",
       COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledOrderCount",
       COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue",
-      COUNT(DISTINCT "userId") FILTER (WHERE status <> 'CANCELLED')::int AS "distinctCustomers"
+      COUNT(DISTINCT "userId") FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED'))::int AS "distinctCustomers"
     FROM "Order"
     ${buildOrderWhere(range)}
   `;
@@ -242,8 +246,8 @@ async function fetchSeries(range, trunc) {
   return prisma.$queryRaw`
     SELECT
       date_trunc(${truncLiteral}, "createdAt" AT TIME ZONE 'UTC') AS "bucket",
-      COUNT(*) FILTER (WHERE status <> 'CANCELLED')::int AS "orderCount",
-      COALESCE(SUM("totalAmount") FILTER (WHERE status <> 'CANCELLED'), 0) AS "revenue",
+      COUNT(*) FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED'))::int AS "orderCount",
+      COALESCE(SUM("totalAmount") FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED')), 0) AS "revenue",
       COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledOrderCount",
       COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue"
     FROM "Order"
@@ -274,8 +278,8 @@ async function fetchSalesByCalendarUnit(range, unit) {
   return prisma.$queryRaw`
     SELECT
       date_trunc(${truncLiteral}, "createdAt" AT TIME ZONE 'UTC') AS "bucket",
-      COUNT(*) FILTER (WHERE status <> 'CANCELLED')::int AS "orderCount",
-      COALESCE(SUM("totalAmount") FILTER (WHERE status <> 'CANCELLED'), 0) AS "revenue",
+      COUNT(*) FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED'))::int AS "orderCount",
+      COALESCE(SUM("totalAmount") FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED')), 0) AS "revenue",
       COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelledOrderCount",
       COALESCE(SUM("totalAmount") FILTER (WHERE status = 'CANCELLED'), 0) AS "cancelledRevenue"
     FROM "Order"
@@ -395,7 +399,7 @@ async function getDailySalesAnalytics(params) {
     granularity: isAllTime ? 'month' : 'day',
     note: isAllTime
       ? 'Preset **all_time** returns **monthly** buckets so the response stays bounded. Use **week** / **month** / custom **from**/**to** for per-day sales.'
-      : 'Each row is one **UTC calendar day**. **netOrderCount** / **netRevenue** exclude cancelled orders; cancelled metrics are shown separately.',
+      : 'Each row is one **UTC calendar day**. **netOrderCount** / **netRevenue** exclude cancelled and refunded orders; cancelled metrics are shown separately.',
     summary,
     points,
   };
@@ -414,12 +418,12 @@ async function fetchUnitsSoldNet(range) {
     SELECT COALESCE(SUM(oi.quantity), 0)::bigint AS "unitsSold"
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
-    ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status <> 'CANCELLED'`] })}
+    ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status NOT IN ('CANCELLED', 'REFUNDED')`] })}
   `;
 }
 
 /**
- * Net line revenue by product category (excludes cancelled orders). One grouped query.
+ * Net line revenue by product category (excludes cancelled and refunded orders). One grouped query.
  */
 async function fetchCategorySales(range) {
   return prisma.$queryRaw`
@@ -434,7 +438,7 @@ async function fetchCategorySales(range) {
     INNER JOIN "OrderItem" oi ON oi."orderId" = o.id
     INNER JOIN "Product" p ON p.id = oi."productId"
     LEFT JOIN "Category" c ON c.id = p."categoryId"
-    ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status <> 'CANCELLED'`] })}
+    ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status NOT IN ('CANCELLED', 'REFUNDED')`] })}
     GROUP BY c.id, c.title
     ORDER BY COALESCE(SUM(oi.quantity * oi.price), 0) DESC NULLS LAST
   `;
@@ -713,16 +717,20 @@ async function getKpiAnalytics(params) {
       unitsSold: Number.isFinite(unitsSold) ? unitsSold : 0,
       distinctCustomers: num(r.distinctCustomers),
     },
+    // netOrderCount/netRevenue above exclude both CANCELLED and REFUNDED; cancelled is
+    // still broken out separately here (unchanged shape) and refunded joins byStatus.
     cancelled: {
       orderCount: num(r.cancelledCount),
       revenue: num(r.cancelledRevenue),
     },
     byStatus: {
-      PENDING: { orderCount: num(r.pendingCount), revenue: num(r.pendingRevenue) },
-      CONFIRMED: { orderCount: num(r.confirmedCount), revenue: num(r.confirmedRevenue) },
+      PENDING_PAYMENT: { orderCount: num(r.pendingPaymentCount), revenue: num(r.pendingPaymentRevenue) },
       PROCESSING: { orderCount: num(r.processingCount), revenue: num(r.processingRevenue) },
-      SHIPPED: { orderCount: num(r.shippedCount), revenue: num(r.shippedRevenue) },
-      DELIVERED: { orderCount: num(r.deliveredCount), revenue: num(r.deliveredRevenue) },
+      ON_HOLD: { orderCount: num(r.onHoldCount), revenue: num(r.onHoldRevenue) },
+      COMPLETED: { orderCount: num(r.completedCount), revenue: num(r.completedRevenue) },
+      REFUNDED: { orderCount: num(r.refundedCount), revenue: num(r.refundedRevenue) },
+      FAILED: { orderCount: num(r.failedStatusCount), revenue: num(r.failedStatusRevenue) },
+      DRAFT: { orderCount: num(r.draftCount), revenue: num(r.draftRevenue) },
     },
   };
 }
@@ -768,14 +776,14 @@ async function getCategorySalesAnalytics(params) {
     currency: w.range.currency ?? settingsRow?.currency ?? 'AED',
     range: rangeMetaPayload(w.range),
     note:
-      'Revenue is the sum of line totals (quantity Ã— captured unit price) on **non-cancelled** orders only. Compare categories for â€œwhich sold moreâ€ in the selected window.',
+      'Revenue is the sum of line totals (quantity Ã— captured unit price) on **non-cancelled, non-refunded** orders only. Compare categories for â€œwhich sold moreâ€ in the selected window.',
     totalNetLineRevenue: Math.round(totalNetRevenue * 100) / 100,
     categories,
   };
 }
 
 /**
- * Net revenue/quantity by product (excludes cancelled orders) â€” the same
+ * Net revenue/quantity by product (excludes cancelled and refunded orders) â€” the same
  * grouping convention as fetchCategorySales, one level down to product. Used
  * to derive best/least-selling product rankings for the Analytics Export.
  */
@@ -790,7 +798,7 @@ async function fetchProductSales(range) {
     FROM "Order" o
     INNER JOIN "OrderItem" oi ON oi."orderId" = o.id
     INNER JOIN "Product" p ON p.id = oi."productId"
-    ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status <> 'CANCELLED'`] })}
+    ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status NOT IN ('CANCELLED', 'REFUNDED')`] })}
     GROUP BY p.id, p.title
     ORDER BY COALESCE(SUM(oi.quantity * oi.price), 0) DESC NULLS LAST
   `;
@@ -798,7 +806,7 @@ async function fetchProductSales(range) {
 
 /**
  * Best/least selling products over a date range. Mirrors getCategorySalesAnalytics's
- * shape/conventions (same range resolution, same "excludes cancelled" rule).
+ * shape/conventions (same range resolution, same "excludes cancelled/refunded" rule).
  */
 async function getProductSalesAnalytics(params) {
   const w = resolveAnalyticsWindow(params);
@@ -819,7 +827,7 @@ async function getProductSalesAnalytics(params) {
     preset: w.preset,
     presetLabel: w.presetLabel,
     range: rangeMetaPayload(w.range),
-    note: 'Revenue is the sum of line totals on non-cancelled orders only, same rule as category sales.',
+    note: 'Revenue is the sum of line totals on non-cancelled, non-refunded orders only, same rule as category sales.',
     bestSellers: list.slice(0, limit),
     leastSellers: [...list].reverse().slice(0, limit),
   };
@@ -865,7 +873,7 @@ async function getInventoryAnalytics() {
 /**
  * Extended order KPIs over the range for the Analytics EXPORT (not shown on the
  * live dashboard): highest/lowest order value, avg items per order, paid vs
- * unpaid, COD vs online, unique + repeat customers, cancelled %. SQL aggregates
+ * unpaid, COD vs online, unique + repeat customers, cancelled/refunded %. SQL aggregates
  * (the range can be all_time / huge, so no in-memory scan). Uses the same
  * buildOrderWhere scoping every other analytics query uses.
  */
@@ -878,15 +886,16 @@ async function getOrderInsights(params) {
   const [totalsRows, itemsRows, custRows] = await Promise.all([
     prisma.$queryRaw`
       SELECT
-        MAX("totalAmount") FILTER (WHERE status <> 'CANCELLED') AS "highest",
-        MIN("totalAmount") FILTER (WHERE status <> 'CANCELLED') AS "lowest",
+        MAX("totalAmount") FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED')) AS "highest",
+        MIN("totalAmount") FILTER (WHERE status NOT IN ('CANCELLED', 'REFUNDED')) AS "lowest",
         COUNT(*) FILTER (WHERE "paymentStatus" = 'PAID')::int AS "paid",
         COUNT(*) FILTER (WHERE "paymentStatus" = 'UNPAID')::int AS "unpaid",
         COUNT(*) FILTER (WHERE "paymentStatus" = 'FAILED')::int AS "failed",
         COUNT(*) FILTER (WHERE "paymentMethod" = 'COD')::int AS "cod",
         COUNT(*) FILTER (WHERE "paymentMethod" = 'MYFATOORAH')::int AS "online",
         COUNT(*)::int AS "totalAll",
-        COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelled"
+        COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS "cancelled",
+        COUNT(*) FILTER (WHERE status = 'REFUNDED')::int AS "refunded"
       FROM "Order"
       ${buildOrderWhere(range)}
     `,
@@ -894,14 +903,14 @@ async function getOrderInsights(params) {
       SELECT COALESCE(SUM(oi.quantity), 0)::bigint AS "units", COUNT(DISTINCT o.id)::int AS "orders"
       FROM "Order" o
       INNER JOIN "OrderItem" oi ON oi."orderId" = o.id
-      ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status <> 'CANCELLED'`] })}
+      ${buildOrderWhere(range, { alias: 'o', extra: [Prisma.sql`o.status NOT IN ('CANCELLED', 'REFUNDED')`] })}
     `,
     prisma.$queryRaw`
       SELECT COUNT(*)::int AS "unique", COUNT(*) FILTER (WHERE c > 1)::int AS "repeat"
       FROM (
         SELECT COALESCE("userId", "guestEmail", "guestPhone") AS k, COUNT(*) AS c
         FROM "Order"
-        ${buildOrderWhere(range, { extra: [Prisma.sql`status <> 'CANCELLED'`, Prisma.sql`COALESCE("userId", "guestEmail", "guestPhone") IS NOT NULL`] })}
+        ${buildOrderWhere(range, { extra: [Prisma.sql`status NOT IN ('CANCELLED', 'REFUNDED')`, Prisma.sql`COALESCE("userId", "guestEmail", "guestPhone") IS NOT NULL`] })}
         GROUP BY 1
       ) t
     `,
@@ -927,6 +936,8 @@ async function getOrderInsights(params) {
     repeatCustomers: num(cust.repeat),
     cancelledOrders: num(t.cancelled),
     cancelledOrderPercentage: totalAll > 0 ? Math.round((num(t.cancelled) / totalAll) * 10000) / 100 : 0,
+    refundedOrders: num(t.refunded),
+    refundedOrderPercentage: totalAll > 0 ? Math.round((num(t.refunded) / totalAll) * 10000) / 100 : 0,
   };
 }
 

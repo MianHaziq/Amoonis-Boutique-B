@@ -84,7 +84,7 @@ The `data` object is the **exact same order shape** returned by the authenticate
     "appliedPromoCode": null,
     "paymentMethod": "COD",
     "paymentStatus": "UNPAID",
-    "status": "PENDING",                // COD orders are placed instantly as PENDING
+    "status": "PENDING_PAYMENT",        // orders are placed instantly as PENDING_PAYMENT
     "currency": "AED",
     "regionId": "43b90023-...",
     "shippingAddress": {
@@ -128,7 +128,7 @@ The `data` object is the **exact same order shape** returned by the authenticate
     "totalAmount": 269.1,          // subtotal - discount (no shipping, no tax)
     "discountAmount": 29.9,
     "appliedPromoCode": "SAVE10",
-    "status": "PENDING",
+    "status": "PENDING_PAYMENT",
     "paymentMethod": "COD"
     // ...same shape as above
   }
@@ -225,7 +225,7 @@ No extra API call is needed — it's automatic and best-effort. **Email is the l
     "guestEmail": "guest@example.com",
     "totalAmount": 698,
     "currency": "AED",
-    "status": "PENDING",
+    "status": "PENDING_PAYMENT",
     "itemCount": 2,
     "createdAt": "...", "updatedAt": "..."
   }
@@ -285,7 +285,7 @@ Show:
 | Items | Sent inline in the request body (guests have no server-side cart). |
 | Pricing / totals | Server-computed & trusted. Total = subtotal − discount. No shipping, no tax. |
 | Inventory | Reserved atomically at order placement (`inventoryDeducted: true`); out-of-stock → `400`. |
-| Order status | Starts `PENDING`; same lifecycle as authed orders (PENDING→CONFIRMED→PROCESSING→SHIPPED→DELIVERED / CANCELLED, admin-driven). |
+| Order status | Starts `PENDING_PAYMENT`; same lifecycle as authed orders (PENDING_PAYMENT→PROCESSING→COMPLETED, or ON_HOLD/CANCELLED/REFUNDED/FAILED/DRAFT, admin-driven). |
 | Promo codes | Work, except `newUsersOnly` codes (rejected for guests). Per-user usage limits are not tracked for guests. |
 | Order retrieval | Guests can only see the order from the `201` response. Tracking requires creating an account. |
 | Linking | Automatic on signup/signin/Google/Apple by matching `email`. |

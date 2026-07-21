@@ -64,7 +64,8 @@ async function renderAnalyticsPdf(res, data, filename) {
       { a: 'Lowest Order Value', av: money(orderInsights.lowestOrderValue, currency), b: 'Repeat Customers', bv: String(orderInsights.repeatCustomers) },
       { a: 'Average Items / Order', av: String(orderInsights.averageItemsPerOrder), b: 'Cancelled Orders', bv: String(orderInsights.cancelledOrders) },
       { a: 'Paid vs Unpaid', av: `${orderInsights.paidOrders} / ${orderInsights.unpaidOrders}`, b: 'Cancelled %', bv: `${orderInsights.cancelledOrderPercentage}%` },
-      { a: 'COD vs Online', av: `${orderInsights.codOrders} / ${orderInsights.onlineOrders}`, b: '', bv: '' },
+      { a: 'COD vs Online', av: `${orderInsights.codOrders} / ${orderInsights.onlineOrders}`, b: 'Refunded Orders', bv: String(orderInsights.refundedOrders) },
+      { a: '', av: '', b: 'Refunded %', bv: `${orderInsights.refundedOrderPercentage}%` },
     ]
   );
 
@@ -163,7 +164,6 @@ async function renderAnalyticsPdf(res, data, filename) {
     orders: String(v.orderCount),
     revenue: money(v.revenue, currency),
   }));
-  statusRows.push({ status: 'RETURNED', orders: 'Not tracked', revenue: '—' });
   drawTable(
     doc,
     [

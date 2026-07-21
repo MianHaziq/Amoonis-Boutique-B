@@ -13,7 +13,7 @@ const analyticsService = require('../services/analytics.service');
  *   description: |
  *     Revenue and order metrics for the admin dashboard (charts). **Admin** or **manager with ANALYTICS**.
  *     All ranges are **UTC**; map to store-local in the client if needed.
- *     **Revenue** (time series) sums `Order.totalAmount` for rows where `status <> CANCELLED`. **GET …/kpi** totals. **GET …/revenue/by-category** ranks categories. **GET …/sales/by-day** = per-calendar-day net sales (gap-filled). Preset **all_time** uses monthly buckets on revenue and sales-by-day routes.
+ *     **Revenue** (time series) sums `Order.totalAmount` for rows where `status NOT IN (CANCELLED, REFUNDED)`. **GET …/kpi** totals. **GET …/revenue/by-category** ranks categories. **GET …/sales/by-day** = per-calendar-day net sales (gap-filled). Preset **all_time** uses monthly buckets on revenue and sales-by-day routes.
  */
 
 const presetValues = analyticsService.PRESETS;
@@ -101,7 +101,7 @@ router.get(
  *     summary: Dashboard KPIs (totals & per-status)
  *     description: |
  *       **Two parallel SQL aggregates:** one row of conditional counts/sums on `Order`, plus **unitsSold** from `OrderItem` (non-cancelled orders only).
- *       Returns **netRevenue** / **netSalesCount** (excluding cancelled), **grossRevenueAllStatuses**, **cancelled**, and **byStatus** (PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, CANCELLED) with order counts and revenue each.
+ *       Returns **netRevenue** / **netSalesCount** (excluding cancelled/refunded), **grossRevenueAllStatuses**, **cancelled**, and **byStatus** (PENDING_PAYMENT, PROCESSING, ON_HOLD, COMPLETED, REFUNDED, FAILED, DRAFT) with order counts and revenue each.
  *     tags: [Admin analytics]
  *     security:
  *       - bearerAuth: []
@@ -206,7 +206,7 @@ router.get(
  *     summary: Sales by calendar day (UTC)
  *     description: |
  *       **One SQL** `GROUP BY date_trunc('day', …)` on `Order` (indexed `createdAt`). Returns every day in the range with **zeros** on days with no orders — ideal for bar/line charts (“how many sales each day”).
- *       **netOrderCount** / **netRevenue** exclude **CANCELLED**; cancelled counts/revenue are per day too.
+ *       **netOrderCount** / **netRevenue** exclude **CANCELLED** and **REFUNDED**; cancelled counts/revenue are per day too.
  *       Preset **all_time** returns **monthly** buckets instead (see **granularity**).
  *     tags: [Admin analytics]
  *     security:

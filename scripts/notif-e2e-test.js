@@ -284,7 +284,7 @@ async function run() {
   const sample = sendJobs[0];
   check('alert is operational (prefKey null — bypasses prefs)', sample && sample.prefKey === null);
   check('alert type is ORDER_PLACED', sample && sample.type === 'ORDER_PLACED' && sample.data.type === 'ORDER_PLACED');
-  check('alert data carries orderId + PENDING status', sample && sample.data.orderId === fakeOrderId && sample.data.status === 'PENDING');
+  check('alert data carries orderId + PENDING status', sample && sample.data.orderId === fakeOrderId && sample.data.status === 'PENDING_PAYMENT');
   check('alert body uses the order NUMBER (#1042) + amount', sample && sample.title === 'New Order' && sample.body.includes('#1042') && sample.body.includes('199 AED'));
 
   // ---------------------------------------------------------------------------

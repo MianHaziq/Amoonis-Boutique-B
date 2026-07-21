@@ -53,8 +53,11 @@ So in the app: check `success`. If `true`, read `data`. If `false`, show `messag
    - `MYFATOORAH` — online payment (cards **and Apple Pay**). The order is placed **only after payment succeeds**.
 
 2. **Order goes through statuses** (field: `status`)
-   `PENDING` → `CONFIRMED` → `PROCESSING` → `SHIPPED` → `DELIVERED` (or `CANCELLED`).
-   Online orders start as **`AWAITING_PAYMENT`** (a "not paid yet" state) and become `CONFIRMED` after payment.
+   `PENDING_PAYMENT` → `PROCESSING` → `COMPLETED` (or `ON_HOLD` / `CANCELLED` / `REFUNDED` / `FAILED` / `DRAFT`).
+   Every order — COD or online — starts as **`PENDING_PAYMENT`**; it's a real, visible order from
+   the moment it's placed. It becomes `PROCESSING` once payment succeeds (online) or an admin
+   confirms it (COD). ⚠️ **Renamed from the old contract** (`PENDING`/`AWAITING_PAYMENT`/`CONFIRMED`/
+   `SHIPPED`/`DELIVERED`) — see `APP_TEAM_CHANGES.md` for the dated breaking-change entry.
 
 3. **Payment has its own status** (field: `paymentStatus`): `UNPAID` → `PAID` (or `FAILED`).
 
@@ -103,7 +106,7 @@ Response (online payment example):
 {
   "success": true,
   "message": "Order placed successfully",
-  "data": { "id": "ORDER-UUID", "status": "AWAITING_PAYMENT", "paymentStatus": "UNPAID", "totalAmount": 250.00, "items": [ … ] }
+  "data": { "id": "ORDER-UUID", "status": "PENDING_PAYMENT", "paymentStatus": "UNPAID", "totalAmount": 250.00, "items": [ … ] }
 }
 ```
 Keep the `data.id` — that's the **orderId** you need next.
@@ -124,10 +127,10 @@ Response:
 `GET {BASE}/orders/{orderId}/status`
 Response:
 ```json
-{ "success": true, "data": { "id": "ORDER-UUID", "status": "CONFIRMED", "paymentStatus": "PAID", "totalAmount": 250.00 } }
+{ "success": true, "data": { "id": "ORDER-UUID", "status": "PROCESSING", "paymentStatus": "PAID", "totalAmount": 250.00 } }
 ```
-- `paymentStatus: "PAID"` + `status: "CONFIRMED"` → **success** ✅
-- Still `AWAITING_PAYMENT` / `UNPAID` → not paid yet (user closed it or is still paying).
+- `paymentStatus: "PAID"` + `status: "PROCESSING"` → **success** ✅
+- Still `PENDING_PAYMENT` / `UNPAID` → not paid yet (user closed it or is still paying).
 - `paymentStatus: "FAILED"` → payment failed; let them retry by calling **/pay** again.
 
 ### Other useful reads
@@ -215,7 +218,7 @@ for it: `apitest.myfatoorah.com`). No real money moves.
    - ⚠️ Sandbox cards can change — confirm the current test cards in your **MyFatoorah test
      dashboard → Documentation** if that one is rejected.
 4. Complete payment → the page redirects → close WebView → call `GET /orders/{id}/status`.
-5. You should see `paymentStatus: PAID`, `status: CONFIRMED`.
+5. You should see `paymentStatus: PAID`, `status: PROCESSING`.
 
 **To test a FAILED payment:** cancel on the MyFatoorah page, or use a failing test card. Then
 `/status` shows `FAILED` (or still `UNPAID`) — your app should let the user tap pay again.
@@ -274,8 +277,8 @@ English or Arabic based on the user's `preferredLanguage`) and a **data** object
 
 | When | data payload | What the app should do on tap |
 |---|---|---|
-| Order placed | `{ "type": "ORDER_PLACED", "orderId": "…", "status": "PENDING" }` | Open that order's detail screen |
-| Order status changed | `{ "type": "ORDER_STATUS", "orderId": "…", "status": "SHIPPED" }` | Open that order's detail screen |
+| Order placed | `{ "type": "ORDER_PLACED", "orderId": "…", "status": "PENDING_PAYMENT" }` | Open that order's detail screen |
+| Order status changed | `{ "type": "ORDER_STATUS", "orderId": "…", "status": "PROCESSING" }` | Open that order's detail screen |
 | Promotion | `{ "type": "PROMOTION", … }` | Open promotions / a target screen |
 | Announcement | `{ "type": "ANNOUNCEMENT", … }` | Open the relevant screen |
 
@@ -298,7 +301,7 @@ user's preference toggle — see B4.)
 Each notification object looks like:
 ```json
 { "id": "…", "type": "ORDER_STATUS", "title": "On the way", "body": "Your order has shipped.",
-  "data": { "type": "ORDER_STATUS", "orderId": "…", "status": "SHIPPED" }, "readAt": null, "createdAt": "…" }
+  "data": { "type": "ORDER_STATUS", "orderId": "…", "status": "PROCESSING" }, "readAt": null, "createdAt": "…" }
 ```
 Show a dot/badge when `readAt` is `null`.
 
@@ -374,40 +377,40 @@ Tick these off:
 **Test 1 — COD order + notification (no money involved)**
 1. `POST /cart` add a product.
 2. `POST /orders/checkout` with `{ "paymentMethod": "COD", "addressId": "…" }`.
-3. Expect: `data.status = "PENDING"`. Within ~1s an **"Order placed"** push arrives.
+3. Expect: `data.status = "PENDING_PAYMENT"`. Within ~1s an **"Order placed"** push arrives.
 4. `GET /notifications` → the notification is listed; `meta.unreadCount` = 1.
 5. `PATCH /notifications/{id}/read` → `unread-count` becomes 0.
 
 **Test 2 — Online card payment (sandbox)**
 1. `POST /cart` add a product.
 2. `POST /orders/checkout` with `{ "paymentMethod": "MYFATOORAH", "addressId": "…" }` → save `orderId`.
-3. `GET /orders/{orderId}/status` → `AWAITING_PAYMENT` / `UNPAID`. (It is **not** in `/orders/history` yet.)
+3. `GET /orders/{orderId}/status` → `PENDING_PAYMENT` / `UNPAID`.
 4. `POST /orders/{orderId}/pay` → open `paymentUrl`.
 5. Pay with the sandbox **test card** (A5).
 6. WebView redirects → close it → poll `GET /orders/{orderId}/status`.
-7. Expect: `PAID` + `CONFIRMED`. An **"Order placed"** push arrives. The order now appears in
+7. Expect: `PAID` + `PROCESSING`. An **"Order placed"** push arrives. The order now appears in
    `/orders/history`, and the cart is empty.
 
 **Test 3 — Express Apple Pay from product page (real iPhone)**
 1. On a product screen, tap **Apple Pay**.
 2. App silently does cart → checkout → pay, opens `paymentUrl`, Apple Pay button shows.
 3. Tap Apple Pay → approve with Face ID/Touch ID (sandbox card in Wallet).
-4. Redirect → confirm with `GET /orders/{id}/status` → `PAID`/`CONFIRMED`. 🎉
+4. Redirect → confirm with `GET /orders/{id}/status` → `PAID`/`PROCESSING`. 🎉
 
 **Test 4 — Payment cancelled / failed**
 1. Do Test 2 but **cancel** on the MyFatoorah page (or use a failing card).
 2. `GET /orders/{orderId}/status` → still `UNPAID` or `FAILED`.
-3. Tap "Retry" → `POST /orders/{orderId}/pay` again → pay successfully → `PAID`/`CONFIRMED`.
+3. Tap "Retry" → `POST /orders/{orderId}/pay` again → pay successfully → `PAID`/`PROCESSING`.
    (This proves retry works and we never lose the order.)
 
 **Test 5 — "Lost connection" safety net (optional, impressive)**
 1. Do Test 2 up to paying successfully, but **kill the app/internet right after paying**
    (before `/status`).
 2. Wait ~3–5 minutes, reopen, `GET /orders/{orderId}/status`.
-3. Expect: it's `PAID`/`CONFIRMED` anyway — the backend's reconcile job caught it. ✅
+3. Expect: it's `PAID`/`PROCESSING` anyway — the backend's reconcile job caught it. ✅
 
 **Test 6 — Status-change notifications**
-1. Take any confirmed order. Have an admin move it `PROCESSING → SHIPPED → DELIVERED`.
+1. Take any confirmed order. Have an admin move it `PROCESSING → COMPLETED`.
 2. Each change → a push + a new inbox item with the right `data.status`.
 
 ---

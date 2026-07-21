@@ -2,7 +2,7 @@ const express = require('express');
 const { body, param, query } = require('express-validator');
 const router = express.Router();
 const orderController = require('../controllers/order.controller');
-const { verifyToken } = require('../middleware/auth');
+const { verifyToken, optionalAuth } = require('../middleware/auth');
 const {
   verifyAdminOrManager,
   requireManagerPermission,
@@ -21,7 +21,7 @@ const { authLimiter } = require('../middleware/rateLimit');
 const idParam = [param('id').isUUID().withMessage('Valid order ID required')];
 const statusBody = [
   body('status')
-    .isIn(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'])
+    .isIn(['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'DRAFT'])
     .withMessage('Invalid status'),
 ];
 
@@ -37,9 +37,9 @@ const statusBody = [
  *
  *       **Recipient name & phone** — **do not send them**. The server reads `fullName` and `phone` from the user profile (collected at signup / Google / Apple) and stamps them onto the order's `shippingAddress` snapshot automatically.
  *
- *       **Payment** — `paymentMethod` is optional and defaults to `COD` (Cash on Delivery), which places the order instantly as `PENDING`.
+ *       **Payment** — `paymentMethod` is optional and defaults to `COD` (Cash on Delivery), which places the order instantly as `PENDING_PAYMENT`.
  *
- *       Pass `MYFATOORAH` to pay online (Apple Pay / cards). The order is **not placed yet**: it's created as `status: AWAITING_PAYMENT` / `paymentStatus: UNPAID`, the cart is **kept**, and it's hidden from order history until paid. Next, call **POST /orders/{id}/pay** to get the payment URL. Once payment succeeds the order becomes `CONFIRMED` / `PAID` and the cart is cleared.
+ *       Pass `MYFATOORAH` to pay online (Apple Pay / cards). The order is created as `status: PENDING_PAYMENT` / `paymentStatus: UNPAID` and the cart is **kept**. Next, call **POST /orders/{id}/pay** to get the payment URL. Once payment succeeds the order becomes `PROCESSING` / `PAID` and the cart is cleared.
  *
  *       **Promo code** — optional. Pass the code string to apply a discount. Returns `400` with a descriptive message if invalid.
  *
@@ -130,7 +130,7 @@ const statusBody = [
  *                 discountAmount: 10.00
  *                 appliedPromoCode: "SAVE10"
  *                 paymentMethod: COD
- *                 status: PENDING
+ *                 status: PENDING_PAYMENT
  *                 shippingAddress:
  *                   fullName: "Ahmed Al Mansouri"
  *                   phone: "+971501234567"
@@ -148,6 +148,8 @@ const checkoutBody = [
     .isIn(['COD', 'MYFATOORAH'])
     .withMessage('paymentMethod must be COD or MYFATOORAH'),
   body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
+  body('deliveryType').optional().isIn(['STANDARD', 'SCHEDULED']).withMessage('deliveryType must be STANDARD or SCHEDULED'),
+  body('scheduledDeliveryAt').optional({ nullable: true }).isISO8601().withMessage('scheduledDeliveryAt must be a valid ISO date'),
   body('shippingAddress').optional().isObject().withMessage('shippingAddress must be an object'),
   body('shippingAddress.fullName').optional().trim(),
   body('shippingAddress.phone').optional().trim(),
@@ -236,6 +238,8 @@ const guestCheckoutBody = [
   body('email').optional({ nullable: true }).trim().isEmail().withMessage('A valid email is required'),
   body('orderMessage').optional({ nullable: true }).trim(),
   body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
+  body('deliveryType').optional().isIn(['STANDARD', 'SCHEDULED']).withMessage('deliveryType must be STANDARD or SCHEDULED'),
+  body('scheduledDeliveryAt').optional({ nullable: true }).isISO8601().withMessage('scheduledDeliveryAt must be a valid ISO date'),
   body('shippingAddress').isObject().withMessage('shippingAddress is required'),
   body('shippingAddress.fullName').trim().notEmpty().withMessage('Full name is required'),
   body('shippingAddress.phone').trim().notEmpty().withMessage('Phone number is required'),
@@ -265,7 +269,7 @@ router.post(
  *     description: |
  *       Places an order for ONE product without touching the user's cart. Use this for the
  *       "Buy with Apple Pay" / "Buy Now" button on a product page. Same options as checkout
- *       (paymentMethod, address, promoCode). For `MYFATOORAH` the order is `AWAITING_PAYMENT`
+ *       (paymentMethod, address, promoCode). For `MYFATOORAH` the order is `PENDING_PAYMENT`
  *       — then call `POST /orders/{id}/payment-session` + `POST /orders/{id}/pay-session` (native
  *       Apple Pay) or `POST /orders/{id}/pay` (hosted page). The cart is left exactly as it was.
  *     tags: [Orders]
@@ -290,7 +294,7 @@ router.post(
  *               giftCardSelected: { type: boolean, description: 'Only charged/kept if the product has giftCardEnabled.' }
  *               customName: { type: string, description: 'Only charged/kept if the product has customNameEnabled.' }
  *     responses:
- *       201: { description: Order placed (or AWAITING_PAYMENT for online) }
+ *       201: { description: Order placed (PENDING_PAYMENT until online payment completes) }
  *       400: { description: Validation / availability error }
  */
 const buyNowBody = [
@@ -300,6 +304,8 @@ const buyNowBody = [
   body('addressId').optional().isUUID().withMessage('addressId must be a valid UUID'),
   body('shippingAddress').optional().isObject().withMessage('shippingAddress must be an object'),
   body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
+  body('deliveryType').optional().isIn(['STANDARD', 'SCHEDULED']).withMessage('deliveryType must be STANDARD or SCHEDULED'),
+  body('scheduledDeliveryAt').optional({ nullable: true }).isISO8601().withMessage('scheduledDeliveryAt must be a valid ISO date'),
   body('message').optional().trim(),
   body('selectedOptions').optional({ nullable: true }).isObject().withMessage('selectedOptions must be an object'),
   body('giftCardSelected').optional().isBoolean().withMessage('giftCardSelected must be a boolean'),
@@ -320,7 +326,7 @@ router.post(
  *   post:
  *     summary: Start online payment (MyFatoorah — Apple Pay / cards)
  *     description: |
- *       Creates a MyFatoorah payment for a PENDING order whose `paymentMethod` is `MYFATOORAH`
+ *       Creates a MyFatoorah payment for a PENDING_PAYMENT order whose `paymentMethod` is `MYFATOORAH`
  *       and returns a hosted **paymentUrl**. Open it in a webview/browser; Apple Pay appears on
  *       iPhones, card entry elsewhere. The order is only marked paid after MyFatoorah's redirect
  *       hits the callback and the server re-verifies the payment. Requires user JWT.
@@ -367,7 +373,7 @@ router.post(
  *     description: |
  *       Native Apple Pay flow for the mobile app. Returns a one-time `sessionId` the
  *       MyFatoorah SDK uses to show the **native Apple Pay sheet**. The secret API key
- *       stays on the server. Order must be `AWAITING_PAYMENT` / unpaid / MYFATOORAH.
+ *       stays on the server. Order must be `PENDING_PAYMENT` / unpaid / MYFATOORAH.
  *     tags: [Orders]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
@@ -395,7 +401,7 @@ router.post(
  *     description: |
  *       The app sends back the `sessionId` (now carrying the Apple Pay token). The server
  *       executes the charge, re-verifies it with MyFatoorah, and on success marks the order
- *       PAID/CONFIRMED (deducting stock). Idempotent. `isPaid: true` = order placed.
+ *       PAID/PROCESSING (deducting stock). Idempotent. `isPaid: true` = order placed.
  *     tags: [Orders]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
@@ -437,7 +443,7 @@ router.post(
  *     description: |
  *       MyFatoorah redirects the customer's browser here after payment, appending `paymentId`.
  *       The server calls GetPaymentStatus to confirm the payment, marks the order PAID and
- *       CONFIRMED on success, and returns a small result page. **Public** (no JWT) — MyFatoorah
+ *       PROCESSING on success, and returns a small result page. **Public** (no JWT) — MyFatoorah
  *       calls it. Never trust this redirect alone; the server re-verifies before confirming.
  *     tags: [Orders]
  *     parameters:
@@ -502,7 +508,7 @@ router.post('/payment/webhook', orderController.paymentWebhook);
  *         name: status
  *         schema:
  *           type: string
- *           enum: [PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, CANCELLED]
+ *           enum: [PENDING_PAYMENT, PROCESSING, ON_HOLD, COMPLETED, CANCELLED, REFUNDED, FAILED, DRAFT]
  *     responses:
  *       200:
  *         description: Paginated order summaries with item counts
@@ -517,7 +523,7 @@ router.get(
   [
     query('page').optional().isInt({ min: 1 }),
     query('limit').optional().isInt({ min: 1, max: 100 }),
-    query('status').optional().isIn(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']),
+    query('status').optional().isIn(['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'DRAFT']),
   ],
   handleValidationErrors,
   orderController.getMyOrderHistory
@@ -545,7 +551,7 @@ router.get(
  *         name: status
  *         schema:
  *           type: string
- *           enum: [PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, CANCELLED]
+ *           enum: [PENDING_PAYMENT, PROCESSING, ON_HOLD, COMPLETED, CANCELLED, REFUNDED, FAILED, DRAFT]
  *       - in: query
  *         name: userId
  *         schema: { type: string, format: uuid }
@@ -573,7 +579,7 @@ router.get(
   [
     query('page').optional().isInt({ min: 1 }),
     query('limit').optional().isInt({ min: 1, max: 100 }),
-    query('status').optional().isIn(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']),
+    query('status').optional().isIn(['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'DRAFT']),
     query('userId').optional().isUUID(),
     query('region').optional().isString().trim(),
     query('dateFrom').optional().isISO8601(),
@@ -611,7 +617,7 @@ router.get(
  *         schema: { type: string, format: date-time }
  *       - in: query
  *         name: status
- *         schema: { type: string, enum: [PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, CANCELLED] }
+ *         schema: { type: string, enum: [PENDING_PAYMENT, PROCESSING, ON_HOLD, COMPLETED, CANCELLED, REFUNDED, FAILED, DRAFT] }
  *       - in: query
  *         name: paymentStatus
  *         schema: { type: string, enum: [UNPAID, PAID, FAILED] }
@@ -633,7 +639,7 @@ router.get(
   [
     query('dateFrom').isISO8601().withMessage('dateFrom is required (ISO 8601)'),
     query('dateTo').isISO8601().withMessage('dateTo is required (ISO 8601)'),
-    query('status').optional().isIn(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']),
+    query('status').optional().isIn(['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'DRAFT']),
     query('paymentStatus').optional().isIn(['UNPAID', 'PAID', 'FAILED']),
     query('region').optional().isString().trim(),
     query('format').isIn(['xlsx', 'pdf', 'csv']).withMessage('format must be xlsx, pdf or csv'),
@@ -664,7 +670,7 @@ router.get(
  *         name: status
  *         schema:
  *           type: string
- *           enum: [PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, CANCELLED]
+ *           enum: [PENDING_PAYMENT, PROCESSING, ON_HOLD, COMPLETED, CANCELLED, REFUNDED, FAILED, DRAFT]
  *         description: Filter by order status
  *     responses:
  *       200:
@@ -684,8 +690,9 @@ router.get(
   [
     query('page').optional().isInt({ min: 1 }),
     query('limit').optional().isInt({ min: 1, max: 100 }),
-    query('status').optional().isIn(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED']),
+    query('status').optional().isIn(['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'DRAFT']),
     query('region').optional().isString().trim(),
+    query('deliveryType').optional().isIn(['STANDARD', 'SCHEDULED']),
   ],
   handleValidationErrors,
   orderController.getAllOrdersAdmin
@@ -698,11 +705,12 @@ router.get(
  *     summary: Get order status (lightweight)
  *     description: |
  *       Returns **id**, **status**, timestamps, **totalAmount**, and a small **progress** object for UI (typical fulfillment flow).
- *       Customers may only read their own orders; admin and managers with **ORDERS** may read any.
+ *       **Public** (no JWT required) — the order id (a UUID) is the tracking credential, the same
+ *       way a shipping tracking number works. No JWT is required and no PII (name/address/phone/
+ *       items) is returned, only status/amount/timestamps. Lets a guest checkout customer track
+ *       their order (they have no account to sign in with) via the link in their confirmation email.
  *       Intended for post-checkout polling without loading full line items.
  *     tags: [Orders]
- *     security:
- *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: id
@@ -724,8 +732,7 @@ router.get(
  */
 router.get(
   '/:id/status',
-  verifyToken,
-  attachOrderStaffAccess,
+  optionalAuth,
   authLimiter,
   idParam,
   handleValidationErrors,
@@ -758,7 +765,7 @@ router.get(
  *               data:
  *                 id: 550e8400-e29b-41d4-a716-446655440000
  *                 totalAmount: 99.97
- *                 status: PENDING
+ *                 status: PENDING_PAYMENT
  *                 items: []
  *       403:
  *         description: Not allowed to view this order
@@ -781,9 +788,9 @@ router.get(
  *   patch:
  *     summary: Update order status (admin)
  *     description: |
- *       Set order status (admin/manager with ORDERS). Values: PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, CANCELLED.
- *       **PENDING → CONFIRMED** subtracts **Product.quantity** from each line (transactional). **409** if any line exceeds available stock.
- *       **CANCELLED** always restores stock when **inventoryDeducted** was true (e.g. after confirm). Revert to **PENDING** from a shipped/confirmed track also restores. Response includes **inventoryDeducted**.
+ *       Set order status (admin/manager with ORDERS). Values: PENDING_PAYMENT, PROCESSING, ON_HOLD, COMPLETED, CANCELLED, REFUNDED, FAILED, DRAFT.
+ *       **PENDING_PAYMENT → PROCESSING** subtracts **Product.quantity** from each line (transactional). **409** if any line exceeds available stock.
+ *       **CANCELLED** always restores stock when **inventoryDeducted** was true (e.g. after confirm). Revert to **PENDING_PAYMENT** from PROCESSING/COMPLETED also restores. **ON_HOLD/REFUNDED/FAILED/DRAFT** are pure labels with no stock/promo side effects. Response includes **inventoryDeducted**.
  *     tags: [Orders]
  *     security:
  *       - bearerAuth: []
@@ -799,7 +806,7 @@ router.get(
  *           schema:
  *             $ref: '#/components/schemas/OrderStatusUpdate'
  *           example:
- *             status: CONFIRMED
+ *             status: PROCESSING
  *     responses:
  *       200:
  *         description: Status updated

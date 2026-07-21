@@ -22,6 +22,7 @@ const REGION_SELECT = {
   currency: true,
   legalEntity: true,
   shippingFlatRate: true,
+  standardDeliveryDays: true,
   iso2: true,
   contactEmail: true,
   contactPhone: true,
@@ -65,6 +66,17 @@ function parseShippingFlatRate(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) {
     throw Object.assign(new Error('shippingFlatRate must be a non-negative number'), { code: 'VALIDATION' });
+  }
+  return n;
+}
+
+/** Blank/null/undefined -> null (not configured, no ETA shown); otherwise a
+ *  non-negative whole number of days, capped at 90 to reject garbage input. */
+function parseStandardDeliveryDays(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 90) {
+    throw Object.assign(new Error('standardDeliveryDays must be a whole number between 0 and 90'), { code: 'VALIDATION' });
   }
   return n;
 }
@@ -241,7 +253,7 @@ async function createRegion(data) {
     if (makeDefault) {
       await tx.region.updateMany({ data: { isDefault: false }, where: { isDefault: true } });
     }
-    return tx.region.create({
+    const created = await tx.region.create({
       data: {
         code,
         name,
@@ -249,6 +261,7 @@ async function createRegion(data) {
         currency: data.currency ? String(data.currency).trim().toUpperCase() : 'AED',
         legalEntity: trimOrNull(data.legalEntity),
         shippingFlatRate: parseShippingFlatRate(data.shippingFlatRate),
+        standardDeliveryDays: parseStandardDeliveryDays(data.standardDeliveryDays),
         iso2: parseIso2(data.iso2),
         contactEmail: trimOrNull(data.contactEmail),
         contactPhone: trimOrNull(data.contactPhone),
@@ -264,6 +277,40 @@ async function createRegion(data) {
       },
       select: REGION_SELECT,
     });
+
+    // Populate the new region with the whole existing catalog so its storefront
+    // isn't blank the moment it's created. Without this, ProductRegion/
+    // CategoryRegion/SectionRegion have no rows for the region ("no rows =
+    // visible in none"), so products, categories AND homepage sections all show
+    // nothing — and a section in particular only renders once it has in-region
+    // PRODUCTS, so linking all three together is what actually makes the home
+    // populate. Admins can still curate DOWN afterwards (unlink per item, or
+    // hide the region). Idempotent via createMany; the new region has no links
+    // yet so there's nothing to skip.
+    const [productIds, categoryIds, sectionIds] = await Promise.all([
+      tx.product.findMany({ select: { id: true } }),
+      tx.category.findMany({ select: { id: true } }),
+      tx.section.findMany({ select: { id: true } }),
+    ]);
+    if (productIds.length > 0) {
+      await tx.productRegion.createMany({
+        data: productIds.map((p) => ({ productId: p.id, regionId: created.id })),
+        skipDuplicates: true,
+      });
+    }
+    if (categoryIds.length > 0) {
+      await tx.categoryRegion.createMany({
+        data: categoryIds.map((c) => ({ categoryId: c.id, regionId: created.id })),
+        skipDuplicates: true,
+      });
+    }
+    if (sectionIds.length > 0) {
+      await tx.sectionRegion.createMany({
+        data: sectionIds.map((s) => ({ sectionId: s.id, regionId: created.id })),
+        skipDuplicates: true,
+      });
+    }
+    return created;
   });
   invalidateCache();
   return region;
@@ -293,6 +340,9 @@ async function updateRegion(id, data) {
   if (data.legalEntity !== undefined) payload.legalEntity = trimOrNull(data.legalEntity);
   if (data.shippingFlatRate !== undefined) {
     payload.shippingFlatRate = parseShippingFlatRate(data.shippingFlatRate);
+  }
+  if (data.standardDeliveryDays !== undefined) {
+    payload.standardDeliveryDays = parseStandardDeliveryDays(data.standardDeliveryDays);
   }
   if (data.iso2 !== undefined) payload.iso2 = parseIso2(data.iso2);
   if (data.contactEmail !== undefined) payload.contactEmail = trimOrNull(data.contactEmail);
@@ -416,27 +466,30 @@ async function deleteRegion(id) {
 }
 
 /**
- * Bulk-links ALL existing products and/or categories to a region in one shot.
+ * Bulk-links ALL existing products, categories and/or sections to a region in
+ * one shot.
  *
- * A brand-new region starts with zero products and zero categories visible —
- * `ProductRegion`/`CategoryRegion` have no rows for it, by the same
- * "no rows = visible in none" design every other region-scoped entity uses.
+ * A brand-new region starts with zero products, categories and sections visible
+ * — `ProductRegion`/`CategoryRegion`/`SectionRegion` have no rows for it, by the
+ * same "no rows = visible in none" design every region-scoped entity uses.
  * That's correct for a deliberate, curated rollout, but it means creating a
- * region gives an admin an empty storefront with no obvious way to populate
- * it — sections/banners can be linked to the new region individually, but
- * their PRODUCTS won't show unless those products are separately linked too.
- * This is the fix: one action that mirrors "make my whole existing catalog
- * available in this new region too," which is what an admin expanding into a
- * new market actually wants almost all the time.
+ * region gives an admin an empty storefront with no obvious way to populate it.
+ *
+ * Crucially, a section is only ever *rendered* on the storefront when it also
+ * resolves to at least one in-region product (the home hides empty rails), so
+ * linking sections without also linking their products would still show nothing
+ * — hence this action links all three together. This mirrors "make my whole
+ * existing catalog available in this new region too," which is what an admin
+ * expanding into a new market wants almost all the time.
  *
  * Idempotent (`skipDuplicates`) — safe to run more than once, only adds the
  * links that are missing, never duplicates or removes anything.
  */
-async function bulkAssignRegion(regionId, { products = false, categories = false } = {}) {
+async function bulkAssignRegion(regionId, { products = false, categories = false, sections = false } = {}) {
   const region = await prisma.region.findUnique({ where: { id: regionId } });
   if (!region) return null;
 
-  const result = { productsLinked: 0, categoriesLinked: 0 };
+  const result = { productsLinked: 0, categoriesLinked: 0, sectionsLinked: 0 };
 
   if (products) {
     const allProducts = await prisma.product.findMany({ select: { id: true } });
@@ -460,7 +513,41 @@ async function bulkAssignRegion(regionId, { products = false, categories = false
     }
   }
 
+  if (sections) {
+    const allSections = await prisma.section.findMany({ select: { id: true } });
+    if (allSections.length > 0) {
+      const { count } = await prisma.sectionRegion.createMany({
+        data: allSections.map((s) => ({ sectionId: s.id, regionId })),
+        skipDuplicates: true,
+      });
+      result.sectionsLinked = count;
+    }
+  }
+
   return result;
+}
+
+/**
+ * Reorder regions by assigning explicit sortOrder values (admin drag-and-drop).
+ * Accepts an array of { id, sortOrder }. Runs in a single transaction, then
+ * invalidates the in-memory region cache so the storefront picker order (which
+ * is served from cache, ordered by sortOrder) reflects the new order at once.
+ * Mirrors sectionService.reorderSections.
+ * @param {{ id: string, sortOrder: number }[]} items
+ */
+async function reorderRegions(items) {
+  const clean = (Array.isArray(items) ? items : [])
+    .filter((it) => it && typeof it.id === 'string' && Number.isInteger(it.sortOrder))
+    .map((it) => ({ id: it.id, sortOrder: it.sortOrder }));
+  if (clean.length === 0) return { count: 0 };
+
+  await prisma.$transaction(
+    clean.map((it) =>
+      prisma.region.update({ where: { id: it.id }, data: { sortOrder: it.sortOrder } })
+    )
+  );
+  invalidateCache();
+  return { count: clean.length };
 }
 
 module.exports = {
@@ -474,5 +561,6 @@ module.exports = {
   updateRegion,
   deleteRegion,
   bulkAssignRegion,
+  reorderRegions,
   invalidateCache,
 };

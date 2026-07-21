@@ -30,7 +30,7 @@ Ordered by blast radius × likelihood. The top three can lose money or hand over
 
 1. **AUTH-1 — Forge-able admin tokens.** The live `.env` ships `JWT_SECRET=your-jwt-secret` and startup never rejects it.
 2. **AUTH-2 — Rate limiting silently off.** `trust proxy` unset behind Railway → every brute-force guard keys on the proxy IP.
-3. **PAY-1 — Charged + oversold.** A cancelled-then-paid order can flip to PAID and silently un-cancel to CONFIRMED with stock already returned and never re-deducted.
+3. **PAY-1 — Charged + oversold.** A cancelled-then-paid order can flip to PAID and silently un-cancel to PROCESSING with stock already returned and never re-deducted.
 4. **AUTH-4 — Account deletion without a password.** Omit the `password` field and the re-auth check is skipped entirely.
 5. **AUTH-3 — CORS reflects any origin with credentials**, exposing the browser-based admin panel.
 6. **CFG-1 — Maintenance mode is decorative.** Nothing server-side reads it; checkout stays open.
@@ -48,22 +48,27 @@ timing races and the absence of a state machine, not the happy path.
 ### 🟠 PAY-1 (High) — Expire-vs-pay race un-cancels an order and oversells stock
 **Location:** `order.service.js:1331 → 1406 → 1416` (confirmOrderPayment) vs `orderExpire.job.js:38-87`
 
-**Impact:** `confirmOrderPayment` reads the order once, then the PAID claim at line 1406 guards
+**Impact:** `confirmOrderPayment` reads the order once, then the PAID claim guards
 only on `paymentStatus != 'PAID'` — not on `status` — and acts on the stale snapshot. If the
 expire job cancels the order (restoring stock, `inventoryDeducted:false`) in the gap, a late
-payment still claims it PAID, `finalizePaidOrder` sees the stale `AWAITING_PAYMENT`, and drives
-it to CONFIRMED. `updateOrderStatus` then sees `CANCELLED→CONFIRMED` so it does **not**
+payment still claims it PAID, `finalizePaidOrder` sees the stale `PENDING_PAYMENT`, and drives
+it to PROCESSING. `updateOrderStatus` then sees `CANCELLED→PROCESSING` so it does **not**
 re-deduct. Net: customer charged, order silently un-cancelled, stock oversold, manual refund.
 
-**Fix:** Make the claim status-aware (`status IN ('AWAITING_PAYMENT','PENDING')`) and re-read the
+> Status values renamed 2026-07-21 (see `APP_TEAM_CHANGES_2026-07-21.md`) — this bug's mechanics
+> are otherwise unchanged, but the order-status admin UI now exposes 8 targets (was 6), including
+> ON_HOLD/REFUNDED/FAILED/DRAFT, from any current status with the same lack of a transition
+> legality check described in PAY-2 below — a slightly wider surface for the same underlying gap.
+
+**Fix:** Make the claim status-aware (`status IN ('PENDING_PAYMENT')`) and re-read the
 order under `SELECT … FOR UPDATE` before `finalizePaidOrder`, so a cancelled order routes to the
 `order_cancelled_needs_refund` path instead of confirming.
 
 ### 🟡 PAY-2 (Medium) — No order state machine; any status transition is allowed
-**Location:** `order.service.js:1014` (updateOrderStatus)
+**Location:** `order.service.js` (updateOrderStatus)
 
 **Impact:** The handler validates only that the target is a known status, not that the transition
-is legal. `DELIVERED→CANCELLED` restores stock for goods already shipped; `CANCELLED→CONFIRMED`
+is legal. `COMPLETED→CANCELLED` restores stock for goods already delivered; `CANCELLED→PROCESSING`
 un-cancels and confirms without re-deducting (oversell). Admin-only, but a fat-finger corrupts
 inventory and fulfilment state.
 

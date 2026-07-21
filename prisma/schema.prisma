@@ -35,6 +35,11 @@ model Region {
   // no fee has been configured yet — orders ship free until an admin sets one
   // (matches the pre-existing de-facto behavior, so nothing regresses).
   shippingFlatRate               Decimal? @db.Decimal(10, 2)
+  // Typical delivery lead time for Standard Delivery in this region, in whole
+  // days (e.g. 1 for UAE, 3 for KSA). Null means not configured — the storefront
+  // shows no ETA. Snapshotted onto Order.estimatedDeliveryDays at checkout time
+  // so a later change here doesn't retroactively alter historical orders.
+  standardDeliveryDays           Int?
   // ISO 3166-1 alpha-2 code (e.g. "AE", "SA") — renders the region's flag in the
   // storefront's country/region pickers. Null shows a neutral placeholder until
   // an admin sets it (deliberately not required — regions worked without a flag
@@ -261,6 +266,9 @@ model Section {
   image     String?
   sortOrder Int           @default(0)
   status    PublishStatus @default(DRAFT)
+  /// CUSTOM (default) for every existing section — zero behavior change until an
+  /// admin explicitly flags a section as BEST_SELLERS/NEW_ARRIVALS.
+  kind      SectionKind   @default(CUSTOM)
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
 
@@ -692,7 +700,7 @@ model Order {
   appliedPromoCode      String?
   appliedPromoCodeId    String?
   paymentMethod         PaymentMethod @default(COD)
-  status                OrderStatus   @default(PENDING)
+  status                OrderStatus   @default(PENDING_PAYMENT)
   /// Online-payment state. COD orders stay UNPAID until delivered/collected; MyFatoorah orders flip to PAID once GetPaymentStatus confirms it.
   paymentStatus         PaymentStatus @default(UNPAID)
   /// MyFatoorah InvoiceId returned by SendPayment (the payment we created for this order). Null for COD.
@@ -718,6 +726,16 @@ model Order {
   /// Flat shipping fee charged on this order, snapshot from Region.shippingFlatRate
   /// at checkout time. Null/0 = free (no rate configured for the region at the time).
   shippingAmount        Decimal?      @db.Decimal(10, 2)
+  /// STANDARD (default, today's behavior) or SCHEDULED (customer picked a future
+  /// date/time at checkout).
+  deliveryType          DeliveryType  @default(STANDARD)
+  /// Customer-chosen future delivery date+time. Only set when deliveryType = SCHEDULED;
+  /// always null for STANDARD (enforced server-side regardless of client input).
+  scheduledDeliveryAt   DateTime?
+  /// Snapshot of Region.standardDeliveryDays at checkout time, only set when
+  /// deliveryType = STANDARD — so a later change to the region's setting doesn't
+  /// retroactively alter this order's displayed ETA (same reasoning as shippingAmount).
+  estimatedDeliveryDays Int?
   /// When true, Product.quantity has been reduced for this order’s line items (set on PENDING→CONFIRMED; cleared on cancel/revert).
   inventoryDeducted     Boolean       @default(false)
   /// Whether placing this order should clear the user's cart. True for normal cart checkout;
@@ -747,6 +765,7 @@ model Order {
   @@index([createdAt, status])
   @@index([addressId])
   @@index([regionId])
+  @@index([scheduledDeliveryAt])
 }
 
 model OrderItem {
@@ -985,6 +1004,17 @@ enum PublishStatus {
   PUBLISHED
 }
 
+/// CUSTOM (default) is a plain admin-curated rail (e.g. "Ramadan Deals") — behaves
+/// exactly as before. BEST_SELLERS/NEW_ARRIVALS additionally auto-fill remaining
+/// slots (up to the storefront's per-rail cap) with real top-selling / newly
+/// published products not already curated into the section — see
+/// section.service.js's augmentDynamicSection.
+enum SectionKind {
+  CUSTOM
+  BEST_SELLERS
+  NEW_ARRIVALS
+}
+
 /// Which client a banner targets. MOBILE (default) preserves the existing Flutter
 /// app behavior; WEB banners (including hero videos) are served only to the website.
 enum BannerPlatform {
@@ -1040,16 +1070,28 @@ enum UserStatus {
   INACTIVE
 }
 
+// WooCommerce-aligned order lifecycle (client requirement). PENDING_PAYMENT replaces
+// both the old hidden AWAITING_PAYMENT and the old visible PENDING — every order,
+// online or COD, starts here and is a real, visible order from the moment it's placed.
+// The old CONFIRMED/PROCESSING/SHIPPED steps collapse into PROCESSING; DELIVERED
+// becomes COMPLETED. ON_HOLD/REFUNDED/FAILED/DRAFT are new — see order.service.js
+// updateOrderStatus for exactly which transitions touch stock (only PENDING_PAYMENT->
+// PROCESSING deducts, ->CANCELLED / FULFILLING_STATUSES->PENDING_PAYMENT restores;
+// ON_HOLD/REFUNDED/FAILED/DRAFT are pure labels with no stock/promo side effects).
 enum OrderStatus {
-  // Online-payment order created but not yet paid. Hidden from order history / admin
-  // lists / analytics until payment succeeds, at which point it becomes CONFIRMED.
-  AWAITING_PAYMENT
-  PENDING
-  CONFIRMED
+  PENDING_PAYMENT
   PROCESSING
-  SHIPPED
-  DELIVERED
+  ON_HOLD
+  COMPLETED
   CANCELLED
+  REFUNDED
+  FAILED
+  DRAFT
+}
+
+enum DeliveryType {
+  STANDARD
+  SCHEDULED
 }
 
 enum PaymentMethod {

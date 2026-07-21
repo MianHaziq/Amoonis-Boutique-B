@@ -23,17 +23,17 @@ function orderPlaced({ userId, guestEmail, orderId } = {}) {
     prefKey: 'orderStatus',
     type: 'ORDER_PLACED',
     copyKey: 'ORDER_PLACED',
-    data: { type: 'ORDER_PLACED', orderId, status: 'PENDING' },
+    data: { type: 'ORDER_PLACED', orderId, status: 'PENDING_PAYMENT' },
   });
 }
 
 /**
- * Order moved to a new lifecycle status by staff (CONFIRMED…CANCELLED). Same
- * userId/guestEmail contract as orderPlaced above.
+ * Order moved to a new lifecycle status by staff (PROCESSING…CANCELLED/REFUNDED/etc.).
+ * Same userId/guestEmail contract as orderPlaced above.
  */
 function orderStatusChange({ userId, guestEmail, orderId, status } = {}) {
-  // PENDING is already covered by the "order placed" push.
-  if (status === 'PENDING') return Promise.resolve(null);
+  // PENDING_PAYMENT is already covered by the "order placed" push.
+  if (status === 'PENDING_PAYMENT') return Promise.resolve(null);
   if (!userId && !guestEmail) return Promise.resolve(null);
   return enqueue(QUEUES.PUSH_SEND, {
     userId: userId || undefined,
@@ -73,12 +73,12 @@ function orderConfirmationEmail({ orderId, to } = {}) {
 }
 
 // Only these lifecycle transitions get a customer-facing status email — matches the
-// site's three "moments that matter": placed (orderConfirmationEmail, above), shipped,
-// delivered. CONFIRMED/PROCESSING/CANCELLED are covered by push/in-app only.
-const STATUS_EMAIL_STATUSES = new Set(['SHIPPED', 'DELIVERED']);
+// site's three "moments that matter": placed (orderConfirmationEmail, above), processing,
+// completed. ON_HOLD/CANCELLED/REFUNDED/FAILED are covered by push/in-app only.
+const STATUS_EMAIL_STATUSES = new Set(['PROCESSING', 'COMPLETED']);
 
 /**
- * Order status-change email (Shipped / Delivered). No `to` here — the email.send job
+ * Order status-change email (Processing / Completed). No `to` here — the email.send job
  * resolves the recipient itself (user's account email, or the guest's email) so this
  * fires the same way for a guest order as a signed-in one; the job silently no-ops if
  * the order somehow has neither.

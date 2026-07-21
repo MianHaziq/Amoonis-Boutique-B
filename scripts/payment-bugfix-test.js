@@ -42,17 +42,17 @@ async function mkOrder(userId, productId, { status, qty, total, paymentMethod })
     {
       const u = await mkUser(); ids.users.push(u.id);
       const p = await mkProduct(10); ids.products.push(p.id);
-      const o = await mkOrder(u.id, p.id, { status: 'PENDING', qty: 3, total: 15, paymentMethod: 'COD' }); ids.orders.push(o.id);
+      const o = await mkOrder(u.id, p.id, { status: 'PENDING_PAYMENT', qty: 3, total: 15, paymentMethod: 'COD' }); ids.orders.push(o.id);
 
       // Fire 6 concurrent CONFIRM calls — only one may deduct.
       const results = await Promise.allSettled(
-        Array.from({ length: 6 }, () => orderService.updateOrderStatus(o.id, 'CONFIRMED'))
+        Array.from({ length: 6 }, () => orderService.updateOrderStatus(o.id, 'PROCESSING'))
       );
       const errored = results.filter((r) => r.status === 'rejected');
       const prod = await prisma.product.findUnique({ where: { id: p.id }, select: { quantity: true } });
       const ord = await prisma.order.findUnique({ where: { id: o.id }, select: { status: true, inventoryDeducted: true } });
       check('FIX1: 6 concurrent confirms deduct stock exactly once (10→7)', prod.quantity === 7, `quantity=${prod.quantity}`);
-      check('FIX1: order ends CONFIRMED + inventoryDeducted', ord.status === 'CONFIRMED' && ord.inventoryDeducted === true);
+      check('FIX1: order ends CONFIRMED + inventoryDeducted', ord.status === 'PROCESSING' && ord.inventoryDeducted === true);
       check('FIX1: no confirm threw an unexpected error', errored.length === 0, errored.map((e) => e.reason && e.reason.message).join('; '));
     }
 
@@ -60,7 +60,7 @@ async function mkOrder(userId, productId, { status, qty, total, paymentMethod })
     {
       const u = await mkUser(); ids.users.push(u.id);
       const p = await mkProduct(10); ids.products.push(p.id);
-      const o = await mkOrder(u.id, p.id, { status: 'AWAITING_PAYMENT', qty: 2, total: 100, paymentMethod: 'MYFATOORAH' }); ids.orders.push(o.id);
+      const o = await mkOrder(u.id, p.id, { status: 'PENDING_PAYMENT', qty: 2, total: 100, paymentMethod: 'MYFATOORAH' }); ids.orders.push(o.id);
 
       paymentService.verifyPayment = async () => ({
         isPaid: true, status: 'Paid', invoiceId: 'inv', invoiceValue: 1, currency: CCY, orderId: o.id, transactionId: 't',
@@ -69,7 +69,7 @@ async function mkOrder(userId, productId, { status, qty, total, paymentMethod })
       const ord = await prisma.order.findUnique({ where: { id: o.id }, select: { status: true, paymentStatus: true, inventoryDeducted: true } });
       const prod = await prisma.product.findUnique({ where: { id: p.id }, select: { quantity: true } });
       check('FIX2a: underpayment NOT marked paid/confirmed', res.isPaid === false && res.reason === 'amount_mismatch_underpaid');
-      check('FIX2a: order left AWAITING_PAYMENT + paymentStatus FAILED', ord.status === 'AWAITING_PAYMENT' && ord.paymentStatus === 'FAILED');
+      check('FIX2a: order left AWAITING_PAYMENT + paymentStatus FAILED', ord.status === 'PENDING_PAYMENT' && ord.paymentStatus === 'FAILED');
       check('FIX2a: stock NOT deducted on underpayment', prod.quantity === 10 && ord.inventoryDeducted === false);
     }
 
@@ -77,7 +77,7 @@ async function mkOrder(userId, productId, { status, qty, total, paymentMethod })
     {
       const u = await mkUser(); ids.users.push(u.id);
       const p = await mkProduct(10); ids.products.push(p.id);
-      const o = await mkOrder(u.id, p.id, { status: 'AWAITING_PAYMENT', qty: 4, total: 100, paymentMethod: 'MYFATOORAH' }); ids.orders.push(o.id);
+      const o = await mkOrder(u.id, p.id, { status: 'PENDING_PAYMENT', qty: 4, total: 100, paymentMethod: 'MYFATOORAH' }); ids.orders.push(o.id);
 
       paymentService.verifyPayment = async () => ({
         isPaid: true, status: 'Paid', invoiceId: 'inv2', invoiceValue: 100, currency: CCY, orderId: o.id, transactionId: 't2',
@@ -86,7 +86,7 @@ async function mkOrder(userId, productId, { status, qty, total, paymentMethod })
       await sleep(400); // let fire-and-forget notify/email settle
       const ord = await prisma.order.findUnique({ where: { id: o.id }, select: { status: true, paymentStatus: true, inventoryDeducted: true } });
       const prod = await prisma.product.findUnique({ where: { id: p.id }, select: { quantity: true } });
-      check('FIX2b: correct full payment confirms (PAID + CONFIRMED)', res.isPaid === true && ord.paymentStatus === 'PAID' && ord.status === 'CONFIRMED');
+      check('FIX2b: correct full payment confirms (PAID + CONFIRMED)', res.isPaid === true && ord.paymentStatus === 'PAID' && ord.status === 'PROCESSING');
       check('FIX2b: stock deducted once (10→6)', prod.quantity === 6, `quantity=${prod.quantity}`);
     }
 
@@ -94,7 +94,7 @@ async function mkOrder(userId, productId, { status, qty, total, paymentMethod })
     {
       const u = await mkUser(); ids.users.push(u.id);
       const p = await mkProduct(10); ids.products.push(p.id);
-      const o = await mkOrder(u.id, p.id, { status: 'AWAITING_PAYMENT', qty: 1, total: 100, paymentMethod: 'MYFATOORAH' }); ids.orders.push(o.id);
+      const o = await mkOrder(u.id, p.id, { status: 'PENDING_PAYMENT', qty: 1, total: 100, paymentMethod: 'MYFATOORAH' }); ids.orders.push(o.id);
 
       // Use a currency genuinely different from what we charged in, so this is a real
       // cross-currency case (not a same-currency underpayment).
@@ -105,7 +105,7 @@ async function mkOrder(userId, productId, { status, qty, total, paymentMethod })
       const res = await orderService.confirmOrderPayment('inv3', 'InvoiceId');
       await sleep(400);
       const ord = await prisma.order.findUnique({ where: { id: o.id }, select: { status: true, paymentStatus: true } });
-      check('FIX2c: cross-currency payment NOT stranded (confirms)', res.isPaid === true && ord.paymentStatus === 'PAID' && ord.status === 'CONFIRMED');
+      check('FIX2c: cross-currency payment NOT stranded (confirms)', res.isPaid === true && ord.paymentStatus === 'PAID' && ord.status === 'PROCESSING');
     }
   } catch (err) {
     console.error('\n💥 threw:', err);

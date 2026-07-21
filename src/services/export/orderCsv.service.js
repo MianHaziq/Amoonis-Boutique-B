@@ -51,6 +51,8 @@ function renderOrdersCsv(res, data, filename) {
       ['Repeat Customers', summary.repeatCustomers],
       ['Cancelled Orders', summary.cancelledOrders],
       ['Cancelled %', summary.cancelledOrderPercentage],
+      ['Refunded Orders', summary.refundedOrders],
+      ['Refunded %', summary.refundedOrderPercentage],
     ]),
     {
       title: 'Revenue By Currency',

@@ -67,10 +67,11 @@ async function deleteRegion(req, res, next) {
  */
 async function bulkAssign(req, res, next) {
   try {
-    const { products, categories } = req.body;
+    const { products, categories, sections } = req.body;
     const result = await regionService.bulkAssignRegion(req.params.id, {
       products: !!products,
       categories: !!categories,
+      sections: !!sections,
     });
     if (!result) return error(res, 'Region not found', 404);
     return success(res, result, 'Region catalog visibility updated', 200);
@@ -79,4 +80,18 @@ async function bulkAssign(req, res, next) {
   }
 }
 
-module.exports = { listRegions, createRegion, updateRegion, deleteRegion, bulkAssign };
+/**
+ * PATCH /regions/order – Reorder regions (admin/manager).
+ * Body: { items: [{ id, sortOrder }] }.
+ */
+async function reorderRegions(req, res, next) {
+  try {
+    const result = await regionService.reorderRegions(req.body.items);
+    return success(res, null, 'Region order updated successfully', 200, result);
+  } catch (err) {
+    if (err.code === 'P2025') return error(res, 'One or more regions not found', 404);
+    next(err);
+  }
+}
+
+module.exports = { listRegions, createRegion, updateRegion, deleteRegion, bulkAssign, reorderRegions };

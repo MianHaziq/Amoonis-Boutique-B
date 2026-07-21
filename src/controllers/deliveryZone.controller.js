@@ -69,4 +69,19 @@ async function deleteZone(req, res, next) {
   }
 }
 
-module.exports = { listZones, createZone, updateZone, deleteZone };
+/**
+ * PATCH /delivery-zones/order – Reorder zones (admin/manager).
+ * Body: { items: [{ id, sortOrder }] }. sortOrder is per-region, so the client
+ * reorders within a single region at a time.
+ */
+async function reorderZones(req, res, next) {
+  try {
+    const result = await deliveryZoneService.reorderZones(req.body.items);
+    return success(res, null, 'Delivery zone order updated successfully', 200, result);
+  } catch (err) {
+    if (err.code === 'P2025') return error(res, 'One or more delivery zones not found', 404);
+    next(err);
+  }
+}
+
+module.exports = { listZones, createZone, updateZone, deleteZone, reorderZones };

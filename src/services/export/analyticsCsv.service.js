@@ -29,6 +29,8 @@ function renderAnalyticsCsv(res, data, filename) {
       ['Repeat Customers', orderInsights.repeatCustomers],
       ['Cancelled Orders', orderInsights.cancelledOrders],
       ['Cancelled %', orderInsights.cancelledOrderPercentage],
+      ['Refunded Orders', orderInsights.refundedOrders],
+      ['Refunded %', orderInsights.refundedOrderPercentage],
     ]),
     {
       title: 'Revenue by Day',
@@ -111,7 +113,6 @@ function renderAnalyticsCsv(res, data, filename) {
       ],
       rows: [
         ...Object.entries(orderStatusCounts).map(([status, v]) => ({ status, orderCount: v.orderCount, revenue: v.revenue })),
-        { status: 'RETURNED (not tracked)', orderCount: 'N/A', revenue: 'N/A' },
       ],
     },
   ];

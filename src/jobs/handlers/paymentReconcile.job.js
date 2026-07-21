@@ -3,7 +3,7 @@
  *
  * MyFatoorah confirms a payment two ways: the browser redirect back to our callback
  * URL, and a server-to-server webhook. If BOTH are lost (customer closes the app mid-pay,
- * webhook misconfigured/dropped), a genuinely-paid order is stranded in AWAITING_PAYMENT
+ * webhook misconfigured/dropped), a genuinely-paid order is stranded in PENDING_PAYMENT
  * and the customer is charged with no order — silent revenue loss. This scheduled job is
  * the safety net: it re-checks each pending invoice directly with MyFatoorah.
  *
@@ -29,7 +29,7 @@ async function handle() {
   const orders = await prisma.order.findMany({
     where: {
       paymentMethod: 'MYFATOORAH',
-      status: 'AWAITING_PAYMENT',
+      status: 'PENDING_PAYMENT',
       paymentStatus: { in: ['UNPAID', 'FAILED'] },
       paymentInvoiceId: { not: null },
       createdAt: { lte: new Date(now - minAgeMs), gte: new Date(now - maxAgeMs) },

@@ -42,7 +42,7 @@ async function cartCount(userId) {
     {
       const { order, error } = await orderService.buyNow(user.id, { productId: prodBuy.id, quantity: 2, paymentMethod: 'COD', shippingAddress: ADDR });
       if (order) ids.orders.push(order.id);
-      check('1: COD buy-now placed as PENDING with the single product', !error && order.status === 'PENDING' && order.items.length === 1);
+      check('1: COD buy-now placed as PENDING with the single product', !error && order.status === 'PENDING_PAYMENT' && order.items.length === 1);
       check('1: cart left untouched after COD buy-now', (await cartCount(user.id)) === 1);
     }
 
@@ -50,7 +50,7 @@ async function cartCount(userId) {
     {
       const { order, error } = await orderService.buyNow(user.id, { productId: prodBuy.id, quantity: 1, paymentMethod: 'MYFATOORAH', shippingAddress: ADDR });
       if (order) ids.orders.push(order.id);
-      check('2: online buy-now is AWAITING_PAYMENT', !error && order.status === 'AWAITING_PAYMENT');
+      check('2: online buy-now is AWAITING_PAYMENT', !error && order.status === 'PENDING_PAYMENT');
       const flag = await prisma.order.findUnique({ where: { id: order.id }, select: { clearCartOnPayment: true } });
       check('2: clearCartOnPayment=false on buy-now order', flag.clearCartOnPayment === false);
 
@@ -60,7 +60,7 @@ async function cartCount(userId) {
       await new Promise((r) => setTimeout(r, 300));
       const ord = await prisma.order.findUnique({ where: { id: order.id }, select: { status: true, paymentStatus: true } });
       const prod = await prisma.product.findUnique({ where: { id: prodBuy.id }, select: { quantity: true } });
-      check('2: payment placed the order (CONFIRMED/PAID)', res.isPaid === true && ord.status === 'CONFIRMED' && ord.paymentStatus === 'PAID');
+      check('2: payment placed the order (CONFIRMED/PAID)', res.isPaid === true && ord.status === 'PROCESSING' && ord.paymentStatus === 'PAID');
       // Stock is now RESERVED at placement (H1): the COD buy-now above (qty 2) deducted 2 at
       // placement, and this online buy-now (qty 1) deducted 1 at placement (payment confirm
       // does NOT re-deduct). So 10 - 2 - 1 = 7. (Previously placement reserved nothing and
@@ -88,7 +88,7 @@ async function cartCount(userId) {
     {
       const { order, error } = await orderService.createOrder(user.id, { paymentMethod: 'COD', shippingAddress: ADDR });
       if (order) ids.orders.push(order.id);
-      check('5: cart checkout still works (PENDING)', !error && order.status === 'PENDING');
+      check('5: cart checkout still works (PENDING)', !error && order.status === 'PENDING_PAYMENT');
       check('5: cart checkout cleared the cart', (await cartCount(user.id)) === 0);
     }
   } catch (err) {

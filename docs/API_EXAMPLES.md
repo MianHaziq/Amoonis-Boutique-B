@@ -166,7 +166,7 @@ Base URL: `/api/v1` (or `/api`). All success responses use the format: `{ succes
     "userId": "...",
     "orderMessage": "Leave at door",
     "totalAmount": 99.97,
-    "status": "PENDING",
+    "status": "PENDING_PAYMENT",
     "createdAt": "...",
     "updatedAt": "...",
     "items": [
@@ -187,9 +187,9 @@ Base URL: `/api/v1` (or `/api`). All success responses use the format: `{ succes
 - Same shape as checkout `data`.
 
 **GET /orders** (admin only, paginated)
-- Query: `?page=1&limit=10&status=PENDING`
+- Query: `?page=1&limit=10&status=PENDING_PAYMENT`
 - Response: `data` = array of orders (with `user`, `itemCount`), `meta.pagination`.
 
 **PATCH /orders/:id/status** (admin)
-- Body: `{ "status": "CONFIRMED" }` (or PROCESSING, SHIPPED, DELIVERED, CANCELLED).
+- Body: `{ "status": "PROCESSING" }` (or ON_HOLD, COMPLETED, CANCELLED, REFUNDED, FAILED, DRAFT).
 - Response: full order in `data`.

@@ -5,6 +5,10 @@
 > the three payment paths, the **Apple Pay button on the product page**, notifications, and a
 > checklist of what you (app dev) build. Read top to bottom.
 
+> ⚠️ **BREAKING CHANGE (see `APP_TEAM_CHANGES.md` for the dated entry): Order `status` values were
+> renamed.** Any code matching on the old strings (`PENDING`, `AWAITING_PAYMENT`, `CONFIRMED`,
+> `SHIPPED`, `DELIVERED`) must be updated — see Section 2.
+
 ---
 
 ## 0. Basics
@@ -39,8 +43,12 @@ You integrate against the endpoints below; the confirmation/stock/jobs are autom
 
 ## 2. Order & payment states (know these)
 
-- **Order `status`:** `PENDING` → `CONFIRMED` → `PROCESSING` → `SHIPPED` → `DELIVERED`
-  (or `CANCELLED`). Online orders start at **`AWAITING_PAYMENT`** until paid.
+- **Order `status`:** `PENDING_PAYMENT` → `PROCESSING` → `COMPLETED`
+  (or `ON_HOLD` / `CANCELLED` / `REFUNDED` / `FAILED` / `DRAFT`). Every order — COD or online —
+  starts at **`PENDING_PAYMENT`**; it's a real, visible order from the moment it's placed (there is
+  no longer a separate hidden "awaiting payment" state). `ON_HOLD`/`REFUNDED`/`FAILED`/`DRAFT` are
+  admin-set labels only — the app never needs to trigger them itself, but must be able to *display*
+  any of the 8 values without crashing (don't use an exhaustive switch with no default/fallback case).
 - **`paymentStatus`:** `UNPAID` → `PAID` (or `FAILED`).
 - **Cart:** COD clears it immediately; online keeps it until payment succeeds (then auto-clears).
 
@@ -82,15 +90,15 @@ Response (online):
   "message": "Order placed successfully",
   "data": {
     "id": "ORDER-UUID",
-    "status": "AWAITING_PAYMENT",
+    "status": "PENDING_PAYMENT",
     "paymentStatus": "UNPAID",
     "totalAmount": 250.00,
     "items": [ /* line items */ ]
   }
 }
 ```
-- COD → `status: "PENDING"` (order placed instantly).
-- MYFATOORAH → `status: "AWAITING_PAYMENT"` (placed only after payment).
+- Both COD and MYFATOORAH → `status: "PENDING_PAYMENT"` at creation. It moves to `PROCESSING`
+  once payment is confirmed (online) or an admin confirms it (COD).
 Keep `data.id` = **orderId** for the next steps.
 
 ---
@@ -98,7 +106,7 @@ Keep `data.id` = **orderId** for the next steps.
 ## 5. The three payment paths
 
 ### Path A — Cash on Delivery (COD)
-Just call checkout with `paymentMethod: "COD"`. Order is `PENDING`. Done. (An "Order placed"
+Just call checkout with `paymentMethod: "COD"`. Order is `PENDING_PAYMENT`. Done. (An "Order placed"
 push is sent automatically.)
 
 ### Path B — Online hosted page (cards + Apple Pay inside a web view)
@@ -108,7 +116,7 @@ push is sent automatically.)
 3. User pays (on iPhone the Apple Pay button shows on the page).
 4. Detect the redirect to `.../orders/payment/callback` (success) or `.../payment/error` →
    close the browser.
-5. `GET /orders/{orderId}/status` → `PAID`/`CONFIRMED` = success.
+5. `GET /orders/{orderId}/status` → `PAID`/`PROCESSING` = success.
 - Simplest, works today, no Apple setup. Good fallback / Android path.
 
 ### Path C — Native Apple Pay (native sheet, no web page) ← the target UX
@@ -128,7 +136,7 @@ Two backend endpoints (your secret key never goes in the app):
 ```json
 { "isPaid": true, "orderId": "ORDER-UUID", "status": "Paid", "paymentUrl": null }
 ```
-- `isPaid: true` → **order placed** (CONFIRMED/PAID, stock deducted). Show success.
+- `isPaid: true` → **order placed** (PROCESSING/PAID, stock deducted). Show success.
 - `isPaid: false` → declined → show retry.
 - (Idempotent and safe; backend re-verifies with MyFatoorah.)
 
@@ -144,13 +152,13 @@ cart is left exactly as it was).
 ```
 User taps "Buy with Apple Pay" on a product:
 1. POST /orders/buy-now  { productId, quantity, paymentMethod:"MYFATOORAH", addressId:<default> }
-                                                       -> orderId (AWAITING_PAYMENT)
+                                                       -> orderId (PENDING_PAYMENT)
 2. POST /orders/{orderId}/payment-session              -> sessionId
 3. MyFatoorah Flutter SDK: native Apple Pay sheet      -> Face ID
 4. POST /orders/{orderId}/pay-session { sessionId }    -> isPaid:true -> ORDER PLACED
-5. (optional) GET /orders/{orderId}/status             -> CONFIRMED/PAID
+5. (optional) GET /orders/{orderId}/status             -> PROCESSING/PAID
 ```
-For a COD "Buy Now", just call step 1 with `paymentMethod:"COD"` — placed (`PENDING`) instantly, no payment steps.
+For a COD "Buy Now", just call step 1 with `paymentMethod:"COD"` — placed (`PENDING_PAYMENT`) instantly, no payment steps.
 
 **`POST /orders/buy-now` request:**
 ```json
@@ -162,7 +170,7 @@ For a COD "Buy Now", just call step 1 with `paymentMethod:"COD"` — placed (`PE
   "promoCode": "WELCOME10"                // optional
 }
 ```
-Response = same shape as checkout (`data.id` = orderId; `AWAITING_PAYMENT` for online, `PENDING` for COD).
+Response = same shape as checkout (`data.id` = orderId; `PENDING_PAYMENT` for both online and COD).
 
 **Important things to handle:**
 - **Pre-checks before showing the express button:** the user must have a **default address** and
@@ -180,10 +188,10 @@ Response = same shape as checkout (`data.id` = orderId; `AWAITING_PAYMENT` for o
 - `GET /orders/{id}` → full detail (items, address, totals).
 - `GET /orders/{id}/status` →
   ```json
-  { "id": "...", "status": "CONFIRMED", "paymentStatus": "PAID", "totalAmount": 250.00,
-    "progress": { "currentStep": "CONFIRMED", "isTerminal": false, "typicalFlow": [...], "stepIndex": 1 } }
+  { "id": "...", "status": "PROCESSING", "paymentStatus": "PAID", "totalAmount": 250.00,
+    "progress": { "currentStep": "PROCESSING", "isTerminal": false, "typicalFlow": [...], "stepIndex": 1 } }
   ```
-- `GET /orders/history?page=1&limit=10&status=DELIVERED` → user's orders (online orders appear
+- `GET /orders/history?page=1&limit=10&status=COMPLETED` → user's orders (online orders appear
   here only **after** payment). `meta.pagination` for paging.
 
 ---
@@ -214,7 +222,7 @@ On logout: `DELETE /user/push/token` `{ "fcmToken": "FCM-TOKEN" }`.
 | Event | `data` payload | On tap |
 |---|---|---|
 | Order placed | `{ "type":"ORDER_PLACED", "orderId":"...", "status":"PENDING" }` | open that order |
-| Order status changed | `{ "type":"ORDER_STATUS", "orderId":"...", "status":"SHIPPED" }` | open that order |
+| Order status changed | `{ "type":"ORDER_STATUS", "orderId":"...", "status":"PROCESSING" }` | open that order |
 | Promotion | `{ "type":"PROMOTION", ... }` | open promo screen |
 | Announcement | `{ "type":"ANNOUNCEMENT", ... }` | open relevant screen |
 Titles/bodies are pre-translated to the user's language. Read `data.type` / `data.orderId` to navigate.

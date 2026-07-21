@@ -42,15 +42,17 @@ const TONE = {
 };
 
 // Order/payment status → semantic tone (drives conditional formatting).
-// "Completed"(DELIVERED)=green, in-progress=blue, PENDING=yellow, CANCELLED=red.
+// COMPLETED=green, PROCESSING=blue, PENDING_PAYMENT=yellow, CANCELLED/FAILED=red,
+// ON_HOLD/REFUNDED/DRAFT=gray (paused/settled-elsewhere/not-yet-real, kept visually calm).
 const ORDER_STATUS_TONE = {
-  DELIVERED: 'green',
-  CONFIRMED: 'blue',
+  PENDING_PAYMENT: 'yellow',
   PROCESSING: 'blue',
-  SHIPPED: 'blue',
-  PENDING: 'yellow',
-  AWAITING_PAYMENT: 'gray',
+  ON_HOLD: 'gray',
+  COMPLETED: 'green',
   CANCELLED: 'red',
+  REFUNDED: 'gray',
+  FAILED: 'red',
+  DRAFT: 'gray',
 };
 
 const PAYMENT_STATUS_TONE = {

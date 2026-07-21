@@ -174,9 +174,9 @@ GET /api/v1/notifications?page=1&limit=20&unreadOnly=false
     {
       "id": "uuid",
       "type": "ORDER_STATUS",
-      "title": "On the way",
-      "body": "Your order has shipped.",
-      "data": { "type": "ORDER_STATUS", "orderId": "uuid", "status": "SHIPPED" },
+      "title": "Processing your order",
+      "body": "We're getting your items ready.",
+      "data": { "type": "ORDER_STATUS", "orderId": "uuid", "status": "PROCESSING" },
       "readAt": null,
       "createdAt": "2026-06-17T12:34:56.000Z"
     }
@@ -212,12 +212,12 @@ Every push has a `notification` block (for the OS tray) and a `data` block (for 
 
 ```json
 {
-  "notification": { "title": "On the way", "body": "Your order has shipped." },
+  "notification": { "title": "Processing your order", "body": "We're getting your items ready." },
   "data": {
     "brand": "Amoon Bloom",
     "type": "ORDER_STATUS",
     "orderId": "<uuid>",
-    "status": "SHIPPED"
+    "status": "PROCESSING"
   }
 }
 ```
@@ -228,16 +228,21 @@ Server already sets: **Android** `priority: high`; **iOS** `aps.sound = "default
 
 ## 5. Events that trigger notifications
 
+> ⚠️ **BREAKING CHANGE:** order status values were renamed — see `APP_TEAM_CHANGES.md` for the
+> dated entry. `PENDING`/`AWAITING_PAYMENT` → `PENDING_PAYMENT`; `CONFIRMED`/`SHIPPED` merged into
+> `PROCESSING`; `DELIVERED` → `COMPLETED`. Two new statuses (`REFUNDED`, `FAILED`) now also send a
+> push; `ON_HOLD`/`DRAFT` do not (see notify.js — only ON_HOLD is admin-set-only with no push).
+
 | Event | `data.type` | Extra `data` fields | Preference channel | Audience |
 |---|---|---|---|---|
-| Order placed — **COD** | `ORDER_PLACED` | `orderId`, `status: "PENDING"` | `orderStatus`* | the buyer |
-| Order placed — **online payment** | `ORDER_STATUS` (`CONFIRMED`) | `orderId`, `status: "CONFIRMED"` | `orderStatus`* | the buyer |
-| **New order — staff alert** 🆕 | `ORDER_PLACED` | `orderId`, `status: "PENDING"` | none (operational) | all **ADMIN + MANAGER** (buyer excluded) |
-| Order confirmed | `ORDER_STATUS` | `orderId`, `status: "CONFIRMED"` | `orderStatus`* | the buyer |
-| Order processing | `ORDER_STATUS` | `orderId`, `status: "PROCESSING"` | `orderStatus`* | the buyer |
-| Order shipped | `ORDER_STATUS` | `orderId`, `status: "SHIPPED"` | `orderStatus`* | the buyer |
-| Order delivered | `ORDER_STATUS` | `orderId`, `status: "DELIVERED"` | `orderStatus`* | the buyer |
+| Order placed — **COD or online** | `ORDER_PLACED` | `orderId`, `status: "PENDING_PAYMENT"` | `orderStatus`* | the buyer |
+| **New order — staff alert** 🆕 | `ORDER_PLACED` | `orderId`, `status: "PENDING_PAYMENT"` | none (operational) | all **ADMIN + MANAGER** (buyer excluded) |
+| Order processing (confirmed/paid) | `ORDER_STATUS` | `orderId`, `status: "PROCESSING"` | `orderStatus`* | the buyer |
+| Order on hold | `ORDER_STATUS` | `orderId`, `status: "ON_HOLD"` | `orderStatus`* | the buyer |
+| Order completed | `ORDER_STATUS` | `orderId`, `status: "COMPLETED"` | `orderStatus`* | the buyer |
 | Order cancelled | `ORDER_STATUS` | `orderId`, `status: "CANCELLED"` | `orderStatus`* | the buyer |
+| Order refunded | `ORDER_STATUS` | `orderId`, `status: "REFUNDED"` | `orderStatus`* | the buyer |
+| Order failed | `ORDER_STATUS` | `orderId`, `status: "FAILED"` | `orderStatus`* | the buyer |
 | **New promo code goes live** 🆕 | `PROMOTION` | `promoCode`, `promoCodeId` | `promotions` | **all users**, or **new users only** if the code is new-user-only |
 | Admin announcement | `ANNOUNCEMENT` | (campaign-specific) | `announcements` | broadcast |
 
@@ -247,7 +252,7 @@ Server already sets: **Android** `priority: high`; **iOS** `aps.sound = "default
 When a customer places an order, **all ADMINs and MANAGERs who hold the `ORDERS` permission** also receive a push with `data.type = "ORDER_PLACED"` (title **"New Order"**, body e.g. *"Order #1042 placed — 199 AED."* using the real sequential order number). This is **operational** — it is *not* gated by the staff member's personal notification preferences, so they always get alerted. The buyer is excluded (an admin buying as a customer won't be double-notified). Since the type is `ORDER_PLACED`, route it by the logged-in user's **role**: ADMIN/MANAGER → admin order screen, customer → customer order screen (you've already implemented this).
 
 **Notes for the customer order flow:**
-- **COD** orders send **`ORDER_PLACED`** at checkout. **Online-payment** orders skip `ORDER_PLACED` and send **`ORDER_STATUS` = `CONFIRMED`** once payment succeeds (the order auto-confirms), so the customer gets exactly one push, not two.
+- **COD** orders send **`ORDER_PLACED`** at checkout. **Online-payment** orders skip `ORDER_PLACED` and send **`ORDER_STATUS` = `PROCESSING`** once payment succeeds (the order auto-confirms), so the customer gets exactly one push, not two.
 - **Promotions/announcements are now localized per user** (EN/AR) — the same as order notifications. The body you receive is already in the recipient's language.
 - Orders now have a human-friendly **`orderNumber`** (sequential, e.g. `1042`) returned in the order API payload — prefer showing it over the UUID.
 

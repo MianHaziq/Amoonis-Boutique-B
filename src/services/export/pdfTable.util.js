@@ -90,7 +90,7 @@ function drawTable(doc, columns, rows, opts = {}) {
     for (const col of columns) {
       const val = row[col.key] ?? '';
       // Conditional formatting: colour the status column's text by tone
-      // (DELIVERED green, PENDING yellow, CANCELLED red, …) when the caller
+      // (COMPLETED green, PENDING_PAYMENT yellow, CANCELLED/FAILED red, …) when the caller
       // marks which column holds the status.
       if (opts.statusKey && col.key === opts.statusKey) {
         const tone = TONE[toneForStatus(String(val))];

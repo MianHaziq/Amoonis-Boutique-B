@@ -47,6 +47,8 @@ const createValidation = [
     .withMessage('legalEntity must be a string up to 200 characters'),
   body('shippingFlatRate').optional({ nullable: true }).isFloat({ min: 0 })
     .withMessage('shippingFlatRate must be a non-negative number'),
+  body('standardDeliveryDays').optional({ nullable: true }).isInt({ min: 0, max: 90 })
+    .withMessage('standardDeliveryDays must be an integer between 0 and 90'),
   body('iso2').optional({ nullable: true }).isString().trim().isLength({ min: 2, max: 2 })
     .withMessage('iso2 must be a 2-letter country code (e.g. AE, SA)'),
   ...legalFieldsRequiredValidation,
@@ -66,6 +68,8 @@ const updateValidation = [
     .withMessage('legalEntity must be a string up to 200 characters'),
   body('shippingFlatRate').optional({ nullable: true }).isFloat({ min: 0 })
     .withMessage('shippingFlatRate must be a non-negative number'),
+  body('standardDeliveryDays').optional({ nullable: true }).isInt({ min: 0, max: 90 })
+    .withMessage('standardDeliveryDays must be an integer between 0 and 90'),
   body('iso2').optional({ nullable: true }).isString().trim().isLength({ min: 2, max: 2 })
     .withMessage('iso2 must be a 2-letter country code (e.g. AE, SA)'),
   ...legalFieldsOptionalValidation,
@@ -75,6 +79,12 @@ const updateValidation = [
 ];
 
 const idParam = [param('id').isUUID().withMessage('Valid region ID required')];
+
+const reorderValidation = [
+  body('items').isArray({ min: 1 }).withMessage('items must be a non-empty array'),
+  body('items.*.id').isUUID().withMessage('Each item.id must be a valid region ID'),
+  body('items.*.sortOrder').isInt({ min: 0 }).withMessage('Each item.sortOrder must be a non-negative integer'),
+];
 
 /**
  * @swagger
@@ -135,6 +145,27 @@ router.post(
   createValidation,
   handleValidationErrors,
   regionController.createRegion
+);
+
+/**
+ * @swagger
+ * /regions/order:
+ *   patch:
+ *     summary: Reorder regions (admin/manager)
+ *     description: Set region display order by sending [{ id, sortOrder }]. Drives the storefront region picker order.
+ *     tags: [Regions]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Region order updated }
+ *       404: { description: One or more regions not found }
+ */
+router.patch(
+  '/order',
+  verifyAdminOrManager,
+  requireManagerPermission('REGIONS'),
+  reorderValidation,
+  handleValidationErrors,
+  regionController.reorderRegions
 );
 
 /**
@@ -230,6 +261,7 @@ router.delete(
  *             properties:
  *               products: { type: boolean, example: true, description: Link every existing product to this region }
  *               categories: { type: boolean, example: true, description: Link every existing category to this region }
+ *               sections: { type: boolean, example: true, description: Link every existing homepage section to this region }
  *     responses:
  *       200:
  *         description: Counts of newly-created links (already-linked items are skipped, not recounted)
@@ -245,6 +277,7 @@ router.delete(
  *                   properties:
  *                     productsLinked: { type: integer, example: 32 }
  *                     categoriesLinked: { type: integer, example: 4 }
+ *                     sectionsLinked: { type: integer, example: 3 }
  *       404: { description: Region not found }
  */
 router.post(
@@ -252,7 +285,11 @@ router.post(
   verifyAdminOrManager,
   requireManagerPermission('REGIONS'),
   idParam,
-  [body('products').optional().isBoolean(), body('categories').optional().isBoolean()],
+  [
+    body('products').optional().isBoolean(),
+    body('categories').optional().isBoolean(),
+    body('sections').optional().isBoolean(),
+  ],
   handleValidationErrors,
   regionController.bulkAssign
 );

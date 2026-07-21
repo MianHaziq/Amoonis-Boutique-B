@@ -15,7 +15,16 @@ const regionService = require('../region.service');
 // (see the Order Export plan: async/job-queue delivery is a future phase).
 const MAX_EXPORT_ROWS = 10000;
 
-const VALID_STATUSES = ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
+const VALID_STATUSES = [
+  'PENDING_PAYMENT',
+  'PROCESSING',
+  'ON_HOLD',
+  'COMPLETED',
+  'CANCELLED',
+  'REFUNDED',
+  'FAILED',
+  'DRAFT',
+];
 const VALID_PAYMENT_STATUSES = ['UNPAID', 'PAID', 'FAILED'];
 
 function decimalToNumber(v) {
@@ -74,10 +83,10 @@ async function getOrdersForExport(filters = {}) {
 
   const where = {
     createdAt: { gte: new Date(dateFrom), lte: new Date(dateTo) },
-    // Mirrors listStatusFilter's convention: AWAITING_PAYMENT (unpaid online
-    // checkouts) are never "placed" orders and are excluded unless explicitly
-    // requested via `status`.
-    ...(status ? { status } : { status: { not: 'AWAITING_PAYMENT' } }),
+    // Mirrors listStatusFilter's convention: no hidden state to exclude by default —
+    // PENDING_PAYMENT is a real, visible order (WooCommerce parity), same as every
+    // other status. An explicit `status` still narrows the export as before.
+    ...(status ? { status } : {}),
     ...(paymentStatus ? { paymentStatus } : {}),
   };
 
@@ -112,6 +121,7 @@ async function getOrdersForExport(filters = {}) {
   let codOrders = 0;
   let onlineOrders = 0;
   let cancelledOrders = 0;
+  let refundedOrders = 0;
   // Distinct-customer identity key: account id for authed, else guest email or
   // phone. Counts how many orders each customer placed → unique vs repeat.
   const customerOrderCounts = new Map();
@@ -149,6 +159,7 @@ async function getOrdersForExport(filters = {}) {
     if (order.paymentMethod === 'COD') codOrders += 1;
     else onlineOrders += 1;
     if (order.status === 'CANCELLED') cancelledOrders += 1;
+    if (order.status === 'REFUNDED') refundedOrders += 1;
 
     const customerKey = order.userId || order.guestEmail || order.guestPhone || null;
     if (customerKey) customerOrderCounts.set(customerKey, (customerOrderCounts.get(customerKey) || 0) + 1);
@@ -228,6 +239,8 @@ async function getOrdersForExport(filters = {}) {
     repeatCustomers,
     cancelledOrders,
     cancelledOrderPercentage: orders.length > 0 ? round2((cancelledOrders / orders.length) * 100) : 0,
+    refundedOrders,
+    refundedOrderPercentage: orders.length > 0 ? round2((refundedOrders / orders.length) * 100) : 0,
   };
 
   // Display-friendly UTC labels for the range (raw ISO reads as clutter in a report).

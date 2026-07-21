@@ -35,6 +35,12 @@ const updateValidation = [
 
 const idParam = [param('id').isUUID().withMessage('Valid zone ID required')];
 
+const reorderValidation = [
+  body('items').isArray({ min: 1 }).withMessage('items must be a non-empty array'),
+  body('items.*.id').isUUID().withMessage('Each item.id must be a valid zone ID'),
+  body('items.*.sortOrder').isInt({ min: 0 }).withMessage('Each item.sortOrder must be a non-negative integer'),
+];
+
 /**
  * @swagger
  * /delivery-zones:
@@ -75,6 +81,27 @@ router.post(
   createValidation,
   handleValidationErrors,
   deliveryZoneController.createZone
+);
+
+/**
+ * @swagger
+ * /delivery-zones/order:
+ *   patch:
+ *     summary: Reorder delivery zones (admin/manager)
+ *     description: Set zone display order by sending [{ id, sortOrder }]. sortOrder is scoped per-region, so reorder within a single region at a time.
+ *     tags: [DeliveryZones]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: Zone order updated }
+ *       404: { description: One or more zones not found }
+ */
+router.patch(
+  '/order',
+  verifyAdminOrManager,
+  requireManagerPermission('DELIVERY_ZONES'),
+  reorderValidation,
+  handleValidationErrors,
+  deliveryZoneController.reorderZones
 );
 
 /**

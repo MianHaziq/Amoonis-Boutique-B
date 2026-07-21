@@ -67,7 +67,7 @@ process.on('SIGINT', async () => { console.log('\n[ctrl+c] cleaning up…'); awa
     const order = await prisma.order.create({
       data: {
         userId: user.id,
-        status: 'AWAITING_PAYMENT',
+        status: 'PENDING_PAYMENT',
         paymentStatus: 'UNPAID',
         paymentMethod: 'MYFATOORAH',
         totalAmount: 1, // 1.000 in your test currency
@@ -108,7 +108,7 @@ process.on('SIGINT', async () => { console.log('\n[ctrl+c] cleaning up…'); awa
     } else {
       const ord = await prisma.order.findUnique({ where: { id: order.id }, select: { status: true, paymentStatus: true } });
       const prod = await prisma.product.findUnique({ where: { id: product.id }, select: { quantity: true } });
-      const ok = ord.paymentStatus === 'PAID' && ord.status === 'CONFIRMED' && prod.quantity === 8;
+      const ok = ord.paymentStatus === 'PAID' && ord.status === 'PROCESSING' && prod.quantity === 8;
       console.log(`${ok ? '✅ SUCCESS' : '❌ MISMATCH'} — order ${ord.status}/${ord.paymentStatus}, stock 10→${prod.quantity} (expected 8)`);
     }
   } catch (err) {

@@ -72,8 +72,8 @@ async function buildOrderStatus(orderId, status) {
   if (!to) return null;
   order.currency = order.currency || 'AED';
   const subjectByStatus = {
-    SHIPPED: `Your Amoon Bloom order #${order.orderNumber} has shipped`,
-    DELIVERED: `Your Amoon Bloom order #${order.orderNumber} was delivered`,
+    PROCESSING: `Your Amoon Bloom order #${order.orderNumber} is being processed`,
+    COMPLETED: `Your Amoon Bloom order #${order.orderNumber} is complete`,
   };
   return {
     to,

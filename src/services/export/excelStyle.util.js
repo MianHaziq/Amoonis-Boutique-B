@@ -140,7 +140,7 @@ function addSumFormulaRow(sheet, columns, { firstDataRow, lastDataRow }, sumKeys
 
 /**
  * Conditional formatting: colour the status cell of every data row by semantic
- * tone (DELIVERED green, PENDING yellow, CANCELLED red, …). Done as concrete
+ * tone (COMPLETED green, PENDING_PAYMENT yellow, CANCELLED/FAILED red, …). Done as concrete
  * per-cell fills (not ExcelJS rule objects) so it renders identically in Excel,
  * Google Sheets and LibreOffice.
  */

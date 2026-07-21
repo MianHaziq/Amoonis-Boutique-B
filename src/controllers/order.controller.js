@@ -101,7 +101,8 @@ async function getAllOrdersAdmin(req, res, next) {
       // zero rows instead of silently falling back to "all regions".
       regionId = region ? region.id : '00000000-0000-0000-0000-000000000000';
     }
-    const result = await orderService.getAllOrdersAdmin(page, limit, status, regionId);
+    const deliveryType = req.query.deliveryType || null;
+    const result = await orderService.getAllOrdersAdmin(page, limit, status, regionId, deliveryType);
     return success(res, result.data, 'Orders fetched successfully', 200, {
       pagination: {
         page: result.page,
@@ -208,12 +209,13 @@ async function getAdminOrderHistory(req, res, next) {
   }
 }
 
+// Public (optionalAuth) — the order id (a UUID) is the tracking credential, same as a shipping
+// tracking number, so this never filters by ownership. Only status/amount/timestamps are
+// returned (no PII), which is what makes that acceptable — see the route's swagger doc.
 async function getOrderStatusOnly(req, res, next) {
   try {
     const { id } = req.params;
-    const userId = req.userId;
-    const canViewAny = req.isAdmin === true || req.canViewAllOrders === true;
-    const snapshot = await orderService.getOrderStatusOnly(id, canViewAny ? null : userId);
+    const snapshot = await orderService.getOrderStatusOnly(id);
     if (!snapshot) return error(res, 'Order not found', 404);
     return success(res, snapshot, 'Order status fetched successfully');
   } catch (err) {

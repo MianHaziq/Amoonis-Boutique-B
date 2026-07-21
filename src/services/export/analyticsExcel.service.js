@@ -53,6 +53,8 @@ async function renderAnalyticsExcel(res, data, filename) {
     { metric: 'Cancelled Orders', value: kpi.cancelled.orderCount, fmt: I },
     { metric: `Cancelled Revenue (${currency})`, value: kpi.cancelled.revenue, fmt: C },
     { metric: 'Cancelled Order %', value: orderInsights.cancelledOrderPercentage, fmt: PERCENT_FMT },
+    { metric: 'Refunded Orders', value: orderInsights.refundedOrders, fmt: I },
+    { metric: 'Refunded Order %', value: orderInsights.refundedOrderPercentage, fmt: PERCENT_FMT },
   ];
   const summaryRange = writeStyledTable(
     summarySheet,
@@ -179,7 +181,6 @@ async function renderAnalyticsExcel(res, data, filename) {
     orderCount: v.orderCount,
     revenue: v.revenue,
   }));
-  statusRows.push({ status: 'RETURNED (not tracked)', orderCount: 'N/A', revenue: 'N/A' });
   const statusRange = writeStyledTable(
     statusSheet,
     [

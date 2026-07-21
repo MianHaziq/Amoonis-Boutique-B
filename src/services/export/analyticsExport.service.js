@@ -63,9 +63,9 @@ async function getAnalyticsForExport(params = {}) {
       ).map((m) => ({ ...m, netRevenue: Math.round(m.netRevenue * 100) / 100 }))
     : dailySales.points.map((p) => ({ month: p.month, netOrderCount: p.netOrderCount, netRevenue: p.netRevenue }));
 
-  // "Returned Orders" was requested in the spec but OrderStatus has no RETURNED
-  // state anywhere in this system — surfaced explicitly as untracked rather
-  // than fabricating a 0.
+  // REFUNDED is a real, tracked OrderStatus (kpi.byStatus.REFUNDED) — merged in here
+  // alongside CANCELLED (which lives in a separate top-level `kpi.cancelled` field,
+  // not `kpi.byStatus`) so this export sees every status bucket in one object.
   const orderStatusCounts = {
     ...kpi.byStatus,
     CANCELLED: kpi.cancelled,
@@ -87,7 +87,6 @@ async function getAnalyticsForExport(params = {}) {
     inventory,
     orderInsights,
     orderStatusCounts,
-    returnedOrdersNote: 'Not tracked in this system — no return/refund order status exists yet.',
   };
 }
 

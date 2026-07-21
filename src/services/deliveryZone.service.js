@@ -109,6 +109,27 @@ async function deleteZone(id) {
   return zone;
 }
 
+/**
+ * Reorder zones by assigning explicit sortOrder values (admin drag-and-drop).
+ * Accepts an array of { id, sortOrder }. Runs in a single transaction. Zones are
+ * ordered per-region, so callers reorder within one region at a time — this only
+ * writes the sortOrder each id was given. Mirrors sectionService.reorderSections.
+ * @param {{ id: string, sortOrder: number }[]} items
+ */
+async function reorderZones(items) {
+  const clean = (Array.isArray(items) ? items : [])
+    .filter((it) => it && typeof it.id === 'string' && Number.isInteger(it.sortOrder))
+    .map((it) => ({ id: it.id, sortOrder: it.sortOrder }));
+  if (clean.length === 0) return { count: 0 };
+
+  await prisma.$transaction(
+    clean.map((it) =>
+      prisma.deliveryZone.update({ where: { id: it.id }, data: { sortOrder: it.sortOrder } })
+    )
+  );
+  return { count: clean.length };
+}
+
 module.exports = {
   getZoneById,
   assertValidZone,
@@ -116,4 +137,5 @@ module.exports = {
   createZone,
   updateZone,
   deleteZone,
+  reorderZones,
 };

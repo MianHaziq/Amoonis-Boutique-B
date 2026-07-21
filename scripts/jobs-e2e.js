@@ -51,8 +51,8 @@ async function waitFor(fn, { tries = 30, every = 300 } = {}) {
       userId: user.id,
       prefKey: 'orderStatus',
       type: 'ORDER_STATUS',
-      status: 'SHIPPED',
-      data: { type: 'ORDER_STATUS', orderId: 'e2e-order', status: 'SHIPPED' },
+      status: 'PROCESSING',
+      data: { type: 'ORDER_STATUS', orderId: 'e2e-order', status: 'PROCESSING' },
     });
     const notif = await waitFor(() =>
       prisma.notification.findFirst({ where: { userId: user.id } })

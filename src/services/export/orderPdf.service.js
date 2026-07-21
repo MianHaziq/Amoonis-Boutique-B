@@ -88,7 +88,8 @@ async function renderOrdersPdf(res, data, filename) {
       },
       { a: 'Average Items / Order', av: String(summary.averageItemsPerOrder), b: 'Cancelled Orders', bv: String(summary.cancelledOrders) },
       { a: 'Paid vs Unpaid', av: `${summary.paidOrders} / ${summary.unpaidOrders}`, b: 'Cancelled %', bv: `${summary.cancelledOrderPercentage}%` },
-      { a: 'COD vs Online', av: `${summary.codOrders} / ${summary.onlineOrders}`, b: '', bv: '' },
+      { a: 'COD vs Online', av: `${summary.codOrders} / ${summary.onlineOrders}`, b: 'Refunded Orders', bv: String(summary.refundedOrders) },
+      { a: '', av: '', b: 'Refunded %', bv: `${summary.refundedOrderPercentage}%` },
     ]
   );
 

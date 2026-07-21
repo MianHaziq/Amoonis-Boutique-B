@@ -42,10 +42,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const { order, error } = await orderService.buyNow(u.id, { productId: p.id, quantity: 3, paymentMethod: 'COD', shippingAddress: ADDR });
       track(order);
       const prod = await prisma.product.findUnique({ where: { id: p.id }, select: { quantity: true } });
-      check('2: qty == stock allowed (PENDING), stock not yet deducted', !error && order.status === 'PENDING' && prod.quantity === 3);
+      check('2: qty == stock allowed (PENDING), stock not yet deducted', !error && order.status === 'PENDING_PAYMENT' && prod.quantity === 3);
 
       // 3) Admin confirm → stock deducted by full qty
-      await orderService.updateOrderStatus(order.id, 'CONFIRMED');
+      await orderService.updateOrderStatus(order.id, 'PROCESSING');
       const prod2 = await prisma.product.findUnique({ where: { id: p.id }, select: { quantity: true } });
       check('3: admin confirm deducts full qty (3→0)', prod2.quantity === 0, `quantity=${prod2.quantity}`);
     }
@@ -117,7 +117,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       paymentService.verifyPayment = origVerify;
       const ord = await prisma.order.findUnique({ where: { id: order.id }, select: { status: true, paymentStatus: true } });
       const prod = await prisma.product.findUnique({ where: { id: p.id }, select: { quantity: true } });
-      check('9: paid-but-no-stock → PAID and NOT auto-confirmed (no crash)', res.isPaid === true && ord.paymentStatus === 'PAID' && ord.status !== 'CONFIRMED');
+      check('9: paid-but-no-stock → PAID and NOT auto-confirmed (no crash)', res.isPaid === true && ord.paymentStatus === 'PAID' && ord.status !== 'PROCESSING');
       check('9: stock not driven negative', prod.quantity === 0, `quantity=${prod.quantity}`);
     }
 
@@ -134,7 +134,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const oa = await prisma.order.findUnique({ where: { id: a.id }, select: { status: true } });
       const ob = await prisma.order.findUnique({ where: { id: b.id }, select: { status: true } });
       const prod = await prisma.product.findUnique({ where: { id: p.id }, select: { quantity: true } });
-      const confirmedCount = [oa.status, ob.status].filter((s) => s === 'CONFIRMED').length;
+      const confirmedCount = [oa.status, ob.status].filter((s) => s === 'PROCESSING').length;
       check('10: exactly ONE of two competing orders confirmed', confirmedCount === 1, `statuses=${oa.status}/${ob.status}`);
       check('10: stock never negative (ends at 0)', prod.quantity === 0, `quantity=${prod.quantity}`);
     }

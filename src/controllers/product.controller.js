@@ -120,6 +120,25 @@ async function getBestSellers(req, res, next) {
   }
 }
 
+async function getNewArrivals(req, res, next) {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const visibility = await visibilityFromReq(req);
+    const result = await productService.getNewArrivals(page, limit, visibility);
+    return success(res, result.items, 'New arrivals fetched successfully', 200, {
+      pagination: {
+        page: result.page,
+        limit: result.limit,
+        total: result.total,
+        totalPages: result.totalPages,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function searchProducts(req, res, next) {
   try {
     const q = req.query.q != null ? String(req.query.q) : '';
@@ -161,6 +180,7 @@ module.exports = {
   getAllProducts,
   getProductsByCategory,
   getBestSellers,
+  getNewArrivals,
   searchProducts,
   getProductById,
 };

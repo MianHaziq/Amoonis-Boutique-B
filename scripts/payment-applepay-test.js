@@ -18,7 +18,7 @@ const TAG = `ap_${Date.now()}`;
 let pass = 0, fail = 0;
 const check = (n, ok, extra = '') => { console.log(`${ok ? '✅' : '❌'} ${n}${extra ? ' — ' + extra : ''}`); ok ? pass++ : fail++; };
 
-async function seed({ status = 'AWAITING_PAYMENT', method = 'MYFATOORAH', paid = 'UNPAID', qty = 2, total = 1 } = {}) {
+async function seed({ status = 'PENDING_PAYMENT', method = 'MYFATOORAH', paid = 'UNPAID', qty = 2, total = 1 } = {}) {
   const u = await prisma.user.create({ data: { email: `${TAG}_${Math.random().toString(36).slice(2)}@e.com`, fullName: 'AP Tester', status: 'ACTIVE' } });
   const p = await prisma.product.create({ data: { title: `${TAG} prod`, price: 0.5, quantity: 10 } });
   const o = await prisma.order.create({ data: { userId: u.id, status, paymentStatus: paid, paymentMethod: method, totalAmount: total, shippingFullName: 'AP Tester' } });
@@ -50,7 +50,7 @@ async function seed({ status = 'AWAITING_PAYMENT', method = 'MYFATOORAH', paid =
       const ord = await prisma.order.findUnique({ where: { id: o.id }, select: { status: true, paymentStatus: true, paymentInvoiceId: true } });
       const prod = await prisma.product.findUnique({ where: { id: p.id }, select: { quantity: true } });
       check('B: execute returns isPaid=true', res.isPaid === true);
-      check('B: order placed (CONFIRMED/PAID) + invoiceId stored', ord.status === 'CONFIRMED' && ord.paymentStatus === 'PAID' && ord.paymentInvoiceId === 'MOCK_INV_1');
+      check('B: order placed (CONFIRMED/PAID) + invoiceId stored', ord.status === 'PROCESSING' && ord.paymentStatus === 'PAID' && ord.paymentInvoiceId === 'MOCK_INV_1');
       check('B: stock deducted once (10→8)', prod.quantity === 8, `quantity=${prod.quantity}`);
       paymentService.executePayment = origExec;
       paymentService.verifyPayment = origVerify;
@@ -64,14 +64,14 @@ async function seed({ status = 'AWAITING_PAYMENT', method = 'MYFATOORAH', paid =
       const res = await orderService.executeOrderPayment(o.id, u.id, 'SESSION_X');
       const ord = await prisma.order.findUnique({ where: { id: o.id }, select: { status: true, paymentStatus: true } });
       const prod = await prisma.product.findUnique({ where: { id: p.id }, select: { quantity: true } });
-      check('B2: declined → not paid, order stays AWAITING_PAYMENT, no stock deducted', res.isPaid === false && ord.status === 'AWAITING_PAYMENT' && prod.quantity === 10);
+      check('B2: declined → not paid, order stays AWAITING_PAYMENT, no stock deducted', res.isPaid === false && ord.status === 'PENDING_PAYMENT' && prod.quantity === 10);
       paymentService.executePayment = origExec;
       paymentService.verifyPayment = origVerify;
     }
 
     // C) guards
     {
-      const { u, p, o } = await seed({ method: 'COD', status: 'PENDING' }); created.push({ u, p, o });
+      const { u, p, o } = await seed({ method: 'COD', status: 'PENDING_PAYMENT' }); created.push({ u, p, o });
       const r1 = await orderService.createPaymentSession(o.id, u.id);
       check('C: session rejected for COD order', r1.error === 'This order is not set up for online payment');
       const r2 = await orderService.executeOrderPayment(o.id, u.id, '');

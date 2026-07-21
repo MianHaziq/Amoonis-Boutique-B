@@ -584,6 +584,29 @@ router.get('/best-sellers', publicLimiter, attachStaffIfPresent, resolveRegion, 
 
 /**
  * @swagger
+ * /products/new-arrivals:
+ *   get:
+ *     summary: List newest-published products (paginated)
+ *     description: Pure recency order (createdAt desc) — ignores the admin's manual catalogue sortOrder, unlike GET /products. Public, rate-limited. Honors the X-Region header (storefront) and region/status filters (staff).
+ *     tags: [Products]
+ *     parameters:
+ *       - $ref: '#/components/parameters/XRegionHeader'
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 10 }
+ *       - $ref: '#/components/parameters/RegionFilterQuery'
+ *       - $ref: '#/components/parameters/StatusFilterQuery'
+ *     responses:
+ *       200:
+ *         description: Paginated newest-first products
+ */
+router.get('/new-arrivals', publicLimiter, attachStaffIfPresent, resolveRegion, pagination, handleValidationErrors, productController.getNewArrivals);
+
+/**
+ * @swagger
  * /products/category/{categoryId}:
  *   get:
  *     summary: List products by category (paginated)
