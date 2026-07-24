@@ -28,11 +28,16 @@ const addValidation = [
 const updateQtyValidation = [
   body('productId').isUUID().withMessage('Valid productId is required'),
   body('quantity').isInt({ min: 0 }).withMessage('Quantity must be 0 or more'),
+  // Optional variant line selector (backward-compatible; legacy clients omit it).
+  body('variantKey').optional({ nullable: true }).isString(),
+  body('selectedOptions').optional({ nullable: true }).isObject(),
 ];
 
 const updateItemMessageValidation = [
   body('productId').isUUID().withMessage('Valid productId is required'),
   body('message').optional().trim(),
+  body('variantKey').optional({ nullable: true }).isString(),
+  body('selectedOptions').optional({ nullable: true }).isObject(),
 ];
 
 /**
@@ -262,6 +267,8 @@ router.get('/', cartController.getCart);
  */
 router.delete('/item/:productId', [
   param('productId').isUUID().withMessage('Valid productId required'),
+  // Optional: target a single variant line (?variantKey=…); omitted removes all.
+  query('variantKey').optional({ nullable: true }).isString(),
 ], handleValidationErrors, cartController.removeFromCart);
 
 /**

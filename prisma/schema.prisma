@@ -662,6 +662,11 @@ model CartItem {
   /// Chosen variant, e.g. {"Colour":"Pink","Size":"M"} — keyed by the product's
   /// ProductOption.title. Carried through to OrderItem.selectedOptions at checkout.
   selectedOptions  Json?
+  /// Stable, normalized serialization of `selectedOptions` (sorted "title=value|…",
+  /// "" when no variant). Makes the cart VARIANT-AWARE: the same product in two
+  /// different colours is two distinct lines (Amazon/Shopify-style) instead of one
+  /// line whose selection is overwritten. Part of the uniqueness key below.
+  variantKey       String   @default("")
   // Gift card / custom name add-on selections. `message` above doubles as the
   // gift card's personalized note when giftCardSelected is true.
   giftCardSelected Boolean  @default(false)
@@ -672,7 +677,10 @@ model CartItem {
   cart    Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  @@unique([cartId, productId])
+  // One line per (cart, product, variant) — was [cartId, productId], which forced
+  // a single line per product and clobbered the variant on re-add. Legacy rows and
+  // no-variant adds use variantKey "", so they stay one-per-product as before.
+  @@unique([cartId, productId, variantKey])
   @@index([cartId])
   @@index([productId])
 }

@@ -1,6 +1,20 @@
 const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
 const productService = require('./product.service');
+const { variantKeyOf } = require('../utils/variantKey');
+
+/**
+ * Which cart LINE a mutation targets, as a variantKey. Callers may pass an
+ * explicit `variantKey` (preferred — echoed from the cart the client is showing)
+ * or a `selectedOptions` map we normalize. Returns `undefined` when NEITHER is
+ * given: legacy productId-only clients, for which callers keep the historical
+ * "match by product" behaviour (one line → that line; used before variants).
+ */
+function resolveTargetVariantKey({ variantKey, selectedOptions } = {}) {
+  if (typeof variantKey === 'string') return variantKey;
+  if (selectedOptions !== undefined) return variantKeyOf(selectedOptions);
+  return undefined;
+}
 
 function decimalToNumber(v) {
   return v == null ? null : Number(v);
@@ -104,16 +118,24 @@ async function addToCart(userId, {
   const qty = Math.max(1, parseInt(quantity, 10) || 1);
   const cart = await getOrCreateCart(userId);
 
-  const existing = await prisma.cartItem.findUnique({
-    where: {
-      cartId_productId: { cartId: cart.id, productId },
-    },
+  // Variant-aware line identity: the same product in a different variant is a
+  // separate line. Re-adding the SAME variant (same key) still merges quantity.
+  const variantKey = variantKeyOf(selectedOptions);
+  // All existing lines for this product (across variants). Stock is product-level
+  // (not per-variant), so the availability check must be against the SUM of every
+  // variant line + the amount being added — not just the line we're merging into —
+  // otherwise two variant lines could each pass yet together exceed stock. Mirrors
+  // the order-time aggregate reservation.
+  const productLines = await prisma.cartItem.findMany({
+    where: { cartId: cart.id, productId },
+    select: { id: true, quantity: true, variantKey: true },
   });
+  const existing = productLines.find((l) => l.variantKey === variantKey) || null;
+  const currentTotalQty = productLines.reduce((sum, l) => sum + l.quantity, 0);
 
-  // Validate the resulting cart quantity against available stock (M11) so the user gets
-  // early feedback instead of only failing at checkout. addToCart is additive, so the
-  // check is against the existing line quantity plus the amount being added.
-  const desiredQty = (existing ? existing.quantity : 0) + qty;
+  // Validate the resulting TOTAL cart quantity for this product against available
+  // stock (M11) so the user gets early feedback instead of only failing at checkout.
+  const desiredQty = currentTotalQty + qty;
   if (product.quantity != null && desiredQty > product.quantity) {
     return {
       cart: null,
@@ -137,9 +159,9 @@ async function addToCart(userId, {
       data: {
         quantity: existing.quantity + qty,
         ...(message !== undefined && { message: message || null }),
-        // Cart lines are still one-per-product (@@unique([cartId, productId])),
-        // not variant-aware — adding a different variant of an already-cart'd
-        // product overwrites the selection on that single line (last wins).
+        // This branch is the SAME variant (same variantKey) — merge quantity and
+        // refresh the add-ons. A DIFFERENT variant has a different key, so the
+        // findUnique above misses and the else-branch creates a separate line.
         ...(selectedOptions !== undefined && {
           selectedOptions: selectedOptions && Object.keys(selectedOptions).length > 0 ? selectedOptions : Prisma.DbNull,
         }),
@@ -153,6 +175,7 @@ async function addToCart(userId, {
         cartId: cart.id,
         productId,
         quantity: qty,
+        variantKey,
         message: message || null,
         selectedOptions: selectedOptions && Object.keys(selectedOptions).length > 0 ? selectedOptions : Prisma.DbNull,
         giftCardSelected: effectiveGiftCardSelected ?? false,
@@ -164,22 +187,30 @@ async function addToCart(userId, {
   return { cart: await getOrCreateCart(userId), error: null };
 }
 
-async function updateQuantity(userId, { productId, quantity }) {
+async function updateQuantity(userId, { productId, quantity, variantKey, selectedOptions }) {
   const cart = await getOrCreateCart(userId);
   const qty = Math.max(0, parseInt(quantity, 10));
+  // The line to act on: exact variant when the client names one, else (legacy
+  // productId-only client) the product's line(s).
+  const vk = resolveTargetVariantKey({ variantKey, selectedOptions });
   if (qty === 0) {
     await prisma.cartItem.deleteMany({
       where: {
         cartId: cart.id,
         productId,
+        ...(vk !== undefined ? { variantKey: vk } : {}),
       },
     });
   } else {
-    const item = await prisma.cartItem.findUnique({
-      where: {
-        cartId_productId: { cartId: cart.id, productId },
-      },
-    });
+    const item =
+      vk !== undefined
+        ? await prisma.cartItem.findUnique({
+            where: { cartId_productId_variantKey: { cartId: cart.id, productId, variantKey: vk } },
+          })
+        : await prisma.cartItem.findFirst({
+            where: { cartId: cart.id, productId },
+            orderBy: { createdAt: 'asc' },
+          });
     if (!item) return { cart: null, error: 'Product not in cart' };
     // Validate the new absolute quantity against available stock (M11).
     const product = await prisma.product.findUnique({
@@ -204,10 +235,13 @@ async function updateQuantity(userId, { productId, quantity }) {
   return { cart: await getOrCreateCart(userId), error: null };
 }
 
-async function removeFromCart(userId, productId) {
+async function removeFromCart(userId, productId, { variantKey, selectedOptions } = {}) {
   const cart = await getOrCreateCart(userId);
+  // Exact variant line when named; otherwise (legacy) remove every line of the
+  // product — the historical productId-only "remove product" behaviour.
+  const vk = resolveTargetVariantKey({ variantKey, selectedOptions });
   await prisma.cartItem.deleteMany({
-    where: { cartId: cart.id, productId },
+    where: { cartId: cart.id, productId, ...(vk !== undefined ? { variantKey: vk } : {}) },
   });
   return getOrCreateCart(userId);
 }
@@ -224,16 +258,21 @@ async function updateCartMessage(userId, orderMessage) {
 /**
  * Update the per-item message (e.g. gift note, engraving) for a product in the cart.
  * @param {string} userId - Authenticated user ID
- * @param {{ productId: string, message: string | null }} payload
+ * @param {{ productId: string, message: string | null, variantKey?: string, selectedOptions?: object }} payload
  * @returns {{ cart: object | null, error: string | null }}
  */
-async function updateItemMessage(userId, { productId, message }) {
+async function updateItemMessage(userId, { productId, message, variantKey, selectedOptions }) {
   const cart = await getOrCreateCart(userId);
-  const item = await prisma.cartItem.findUnique({
-    where: {
-      cartId_productId: { cartId: cart.id, productId },
-    },
-  });
+  const vk = resolveTargetVariantKey({ variantKey, selectedOptions });
+  const item =
+    vk !== undefined
+      ? await prisma.cartItem.findUnique({
+          where: { cartId_productId_variantKey: { cartId: cart.id, productId, variantKey: vk } },
+        })
+      : await prisma.cartItem.findFirst({
+          where: { cartId: cart.id, productId },
+          orderBy: { createdAt: 'asc' },
+        });
   if (!item) return { cart: null, error: 'Product not in cart' };
   const newMessage = message !== undefined && message !== null ? (String(message).trim() || null) : item.message;
   await prisma.cartItem.update({
@@ -266,6 +305,15 @@ async function getCart(userId, currency = 'AED', regionId = null) {
       quantity: i.quantity,
       message: i.message,
       selectedOptions: i.selectedOptions ?? null,
+      // Variant discriminator for this line — clients echo it back on
+      // quantity/message/remove so the RIGHT line is targeted when a product has
+      // several variant lines. "" for no-variant/legacy lines.
+      variantKey: i.variantKey ?? '',
+      // Photo of the chosen variant (e.g. the "Black" bouquet), so the cart
+      // drawer/page shows it instead of the product's default primary image.
+      // Derived from the RAW option rows (i.product), which carry the per-value
+      // image arrays that mapProduct's display shape strips.
+      selectedImage: productService.resolveVariantImage(i.product.productOptions, i.selectedOptions),
       giftCardSelected: i.giftCardSelected,
       customName: i.customName,
       lineTotal:

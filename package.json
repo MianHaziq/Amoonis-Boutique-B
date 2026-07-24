@@ -7,6 +7,7 @@
     "start": "node server.js",
     "worker": "node worker.js",
     "seed": "node prisma/seed.js",
+    "predev": "lsof -ti tcp:5000 | xargs kill -9 2>/dev/null || true",
     "dev": "nodemon server.js",
     "build": "prisma generate",
     "db:migrate": "prisma migrate deploy",

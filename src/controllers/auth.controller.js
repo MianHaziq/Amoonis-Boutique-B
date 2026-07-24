@@ -227,8 +227,32 @@ const googleLogin = async (req, res, next) => {
         return error(res, 'Invalid or expired Google token', 401);
       }
     } else {
-      // Flow 2: Access token verification (from useGoogleLogin custom button)
+      // Flow 2: Access token verification (from useGoogleLogin custom button).
+      // Google access tokens are bearer tokens NOT bound to our app: the
+      // userinfo endpoint alone will resolve the profile of ANY Google user
+      // for a token minted by ANY OAuth client that holds the email/profile
+      // scope. Trusting it directly = account takeover. So we first verify the
+      // token's audience against our own client id(s) via tokeninfo, and only
+      // then read the profile.
       try {
+        if (GOOGLE_AUDIENCE.length === 0) {
+          return error(res, 'Google Sign In is not configured', 503);
+        }
+
+        // 1. Confirm this access token was issued for one of OUR client ids.
+        const tokenInfoResponse = await fetch(
+          `https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${encodeURIComponent(accessToken)}`
+        );
+        if (!tokenInfoResponse.ok) {
+          return error(res, 'Invalid or expired Google access token', 401);
+        }
+        const tokenInfo = await tokenInfoResponse.json();
+        const tokenAudience = tokenInfo.aud || tokenInfo.azp;
+        if (!tokenAudience || !GOOGLE_AUDIENCE.includes(tokenAudience)) {
+          return error(res, 'Google access token was not issued for this application', 401);
+        }
+
+        // 2. Audience verified — safe to trust the profile behind this token.
         const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
           headers: { Authorization: `Bearer ${accessToken}` },
         });

@@ -21,6 +21,7 @@
 const prisma = require('../../config/db');
 const emailService = require('../../services/email.service');
 const templates = require('../../emails/templates');
+const productService = require('../../services/product.service');
 const { QUEUES } = require('../queues');
 
 const ORDER_ITEMS_INCLUDE = {
@@ -31,10 +32,26 @@ const ORDER_ITEMS_INCLUDE = {
     selectedOptions: true,
     giftCardSelected: true,
     customName: true,
+    // Per-line prep/lead-days snapshot — used to compute the email's delivery dates
+    // (matches the storefront's getOrderDeliveryView).
+    resolvedLeadDays: true,
     product: {
       select: {
         title: true,
         images: { select: { url: true }, orderBy: { sortOrder: 'asc' }, take: 1 },
+        // Option rows (with per-value image arrays) so the email can show the
+        // chosen variant's photo, matching the storefront/receipt.
+        productOptions: {
+          orderBy: { sortOrder: 'asc' },
+          select: {
+            title: true,
+            title_ar: true,
+            options: true,
+            options_ar: true,
+            optionImages: true,
+            optionImageSets: true,
+          },
+        },
       },
     },
   },
@@ -59,6 +76,15 @@ async function buildOrderConfirmation(orderId) {
   // `order.currency` is the region's currency snapshotted at placement time (multi-currency,
   // added alongside Region.currency) — null only for legacy pre-multi-currency orders.
   order.currency = order.currency || 'AED';
+  // Attach the chosen variant's photo per line so the email thumbnail matches
+  // the colour/variant the shopper picked (falls back to the primary image in
+  // the template when null).
+  for (const it of order.items || []) {
+    it.selectedImage = productService.resolveVariantImage(
+      it.product?.productOptions,
+      it.selectedOptions
+    );
+  }
   return {
     subject: `Your Amoon Bloom order #${order.orderNumber} is placed`,
     html: templates.renderOrderConfirmation(order),

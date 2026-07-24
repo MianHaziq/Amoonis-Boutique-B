@@ -58,6 +58,32 @@ function formatDate(d) {
 }
 
 /**
+ * Delivery dates for the confirmation email — mirrors the storefront's
+ * getOrderDeliveryView (src/features/orders/delivery.ts). Dates only, no time.
+ *  - expected: createdAt + effective lead days (estimatedDeliveryDays snapshot for
+ *    STANDARD; slowest line's resolvedLeadDays for SCHEDULED where that snapshot is null).
+ *  - reserved: the customer's chosen date (SCHEDULED only).
+ *  - final: the reserved date when scheduled, otherwise the expected arrival.
+ */
+function orderDeliveryDates(order) {
+  const items = Array.isArray(order.items) ? order.items : [];
+  const isScheduled = order.deliveryType === 'SCHEDULED' && !!order.scheduledDeliveryAt;
+  const maxLead = items.reduce(
+    (m, it) => Math.max(m, it && it.resolvedLeadDays != null ? it.resolvedLeadDays : 0),
+    0
+  );
+  const leadDays =
+    order.estimatedDeliveryDays != null ? order.estimatedDeliveryDays : maxLead || null;
+  let expected = null;
+  if (leadDays != null && order.createdAt) {
+    expected = new Date(order.createdAt);
+    expected.setDate(expected.getDate() + leadDays);
+  }
+  const reserved = isScheduled ? new Date(order.scheduledDeliveryAt) : null;
+  return { isScheduled, expected, reserved, final: isScheduled ? reserved : expected };
+}
+
+/**
  * Shared shell: branded logo header + white card + contact footer. `subtitle`
  * is optional. `regionContact` (optional — only order-linked emails have one)
  * overrides the footer's legal entity / support email with the order's
@@ -130,7 +156,9 @@ function renderOrderConfirmation(order) {
   const itemRows = items
     .map((it) => {
       const title = it.productTitle || it.product?.title || 'Item';
-      const image = it.product?.images?.[0]?.url;
+      // Prefer the chosen variant's photo (attached by email.job) so the
+      // thumbnail matches the colour the shopper picked; else the primary image.
+      const image = it.selectedImage || it.product?.images?.[0]?.url;
       const qty = it.quantity ?? 1;
       const line = Number(it.price) * qty;
       const variant =
@@ -199,6 +227,19 @@ function renderOrderConfirmation(order) {
 
   const paymentMethodLabel = order.paymentMethod === 'MYFATOORAH' ? 'Card (online)' : 'Cash on delivery';
 
+  const dd = orderDeliveryDates(order);
+  const deliveryRows = [
+    `<tr><td style="padding:3px 0;color:${MUTED};">Delivery Type</td><td style="padding:3px 0;text-align:right;">${esc(dd.isScheduled ? 'Reserved Delivery' : 'Standard Delivery')}</td></tr>`,
+    dd.expected ? `<tr><td style="padding:3px 0;color:${MUTED};">Expected Delivery Date</td><td style="padding:3px 0;text-align:right;">${esc(formatDate(dd.expected))}</td></tr>` : '',
+    dd.reserved ? `<tr><td style="padding:3px 0;color:${MUTED};">Customer Reserved Date</td><td style="padding:3px 0;text-align:right;">${esc(formatDate(dd.reserved))}</td></tr>` : '',
+    dd.final ? `<tr><td style="padding:3px 0;color:${MUTED};font-weight:600;">Final Delivery Date</td><td style="padding:3px 0;text-align:right;font-weight:600;">${esc(formatDate(dd.final))}</td></tr>` : '',
+  ].join('');
+  const deliverySection = `
+    <div style="margin:20px 0 4px;">
+      <p style="margin:0 0 6px;font-size:12px;color:${MUTED};text-transform:uppercase;letter-spacing:.4px;">Delivery</p>
+      <table style="width:100%;border-collapse:collapse;font-size:14px;">${deliveryRows}</table>
+    </div>`;
+
   const body = `
     ${name ? `<p style="margin:0 0 14px;color:${MUTED};">Hi ${esc(name)},</p>` : ''}
     <h2 style="margin:0 0 6px;font-size:20px;">Your order is placed successfully 🎉</h2>
@@ -228,6 +269,7 @@ function renderOrderConfirmation(order) {
         </td>
       </tr>
     </table>
+    ${deliverySection}
     ${ctaButton('Track your order', orderTrackUrl(order.id))}`;
 
   return layout('Order confirmation', body, `Order #${order.orderNumber} · ${formatDate(order.createdAt)}`, order.region);

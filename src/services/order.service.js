@@ -84,6 +84,11 @@ function toOrderResponsePayload(order) {
     vatRatePercent: decimalToNumber(i.vatRatePercent) ?? 0,
     vatAmount: decimalToNumber(i.vatAmount) ?? 0,
     selectedOptions: i.selectedOptions ?? null,
+    // Photo of the chosen variant for the receipt / account / admin order views,
+    // derived from the RAW option rows on the joined product (null when the
+    // product was deleted or the variant carries no image — surfaces fall back
+    // to the product's primary image).
+    selectedImage: productService.resolveVariantImage(i.product?.productOptions, i.selectedOptions),
     giftCardSelected: i.giftCardSelected ?? false,
     customName: i.customName ?? null,
     // Snapshot of the resolved "ships within N day(s)" prep/booking lead time at order
@@ -507,17 +512,22 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // Early stock visibility check — surfaces OUT_OF_STOCK before order creation so the
   // mobile app can show a friendly message instead of completing checkout for unavailable
   // items. Final atomic enforcement still happens at PENDING_PAYMENT→PROCESSING.
+  // Aggregate requested quantity PER PRODUCT across all lines — a product can now
+  // span several variant lines (e.g. Black + White), and stock is product-level, so
+  // the check must be against the summed quantity (matches the atomic reservation's
+  // aggregateOrderLineQtyByProduct). A per-line check would let two variant lines
+  // each pass yet together exceed stock.
   const outOfStock = [];
-  for (const it of lineItems) {
-    const p = productById.get(it.productId);
+  for (const [productId, requested] of aggregateOrderLineQtyByProduct(lineItems)) {
+    const p = productById.get(productId);
     if (!p) {
       return { order: null, error: 'A product in your order is no longer available' };
     }
-    if (p.quantity < it.quantity) {
+    if (p.quantity < requested) {
       outOfStock.push({
         productId: p.id,
         title: p.title,
-        requested: it.quantity,
+        requested,
         available: p.quantity,
       });
     }

@@ -35,10 +35,14 @@ async function addToCart(req, res, next) {
 async function updateQuantity(req, res, next) {
   try {
     const userId = req.userId;
-    const { productId, quantity } = req.body;
+    // variantKey/selectedOptions are OPTIONAL — a legacy productId-only client
+    // omits them and keeps the historical single-line behaviour.
+    const { productId, quantity, variantKey, selectedOptions } = req.body;
     const { cart, error: errMsg } = await cartService.updateQuantity(userId, {
       productId,
       quantity,
+      variantKey,
+      selectedOptions,
     });
     if (errMsg) return error(res, errMsg, 400);
     const region = await regionFromReq(req);
@@ -52,10 +56,12 @@ async function updateQuantity(req, res, next) {
 async function updateItemMessage(req, res, next) {
   try {
     const userId = req.userId;
-    const { productId, message } = req.body;
+    const { productId, message, variantKey, selectedOptions } = req.body;
     const { error: errMsg } = await cartService.updateItemMessage(userId, {
       productId,
       message,
+      variantKey,
+      selectedOptions,
     });
     if (errMsg) return error(res, errMsg, 404);
     const region = await regionFromReq(req);
@@ -70,7 +76,12 @@ async function removeFromCart(req, res, next) {
   try {
     const userId = req.userId;
     const { productId } = req.params;
-    await cartService.removeFromCart(userId, productId);
+    // Optional variant discriminator via query (?variantKey=) or body — omitted
+    // by legacy clients, which then remove every line of the product as before.
+    const variantKey =
+      typeof req.query.variantKey === 'string' ? req.query.variantKey : req.body?.variantKey;
+    const selectedOptions = req.body?.selectedOptions;
+    await cartService.removeFromCart(userId, productId, { variantKey, selectedOptions });
     const region = await regionFromReq(req);
     const data = await cartService.getCart(userId, region?.currency || 'AED', region?.id || null);
     return success(res, data, 'Product removed from cart');

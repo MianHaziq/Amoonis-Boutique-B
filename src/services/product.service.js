@@ -1035,6 +1035,49 @@ async function getProductById(id, visibility = {}) {
   return visibility.isStaff ? mapped : applyRegionCurrency(mapped);
 }
 
+/**
+ * Resolve the representative image for a chosen variant, so the cart, order,
+ * email, and admin surfaces show the photo of the colour/variant the shopper
+ * picked rather than the product's default primary image.
+ *
+ * `selectedOptions` is the {title: value} snapshot captured at add-to-cart time
+ * (keyed by the option-group title in whatever locale the shopper used).
+ * `productOptions` are the RAW ProductOption rows (with `optionImages` /
+ * `optionImageSets`), NOT the trimmed display shape. Matches the title against
+ * EN and AR, and the value against `options`/`options_ar`, then returns that
+ * value's first image (a full image-set entry wins over the single legacy
+ * image). Returns null when nothing matches or the variant carries no image —
+ * callers fall back to the product's primary image.
+ */
+function resolveVariantImage(productOptions, selectedOptions) {
+  if (
+    !selectedOptions ||
+    typeof selectedOptions !== 'object' ||
+    Array.isArray(selectedOptions) ||
+    !Array.isArray(productOptions)
+  ) {
+    return null;
+  }
+  for (const group of productOptions) {
+    if (!group) continue;
+    const chosen =
+      selectedOptions[group.title] ??
+      (group.title_ar ? selectedOptions[group.title_ar] : undefined);
+    if (!chosen) continue;
+    const en = Array.isArray(group.options) ? group.options : [];
+    const ar = Array.isArray(group.options_ar) ? group.options_ar : [];
+    let idx = en.indexOf(chosen);
+    if (idx < 0) idx = ar.indexOf(chosen);
+    if (idx < 0) continue;
+    const set = Array.isArray(group.optionImageSets) ? group.optionImageSets[idx] : null;
+    const fromSet = Array.isArray(set) ? set.find((u) => u && String(u).trim()) : null;
+    const single = Array.isArray(group.optionImages) ? group.optionImages[idx] : null;
+    const img = String(fromSet || single || '').trim();
+    if (img) return img;
+  }
+  return null;
+}
+
 module.exports = {
   createProduct,
   updateProduct,
@@ -1051,6 +1094,7 @@ module.exports = {
   applyRegionCurrency,
   regionPriceFromRow,
   optionExtraCharge,
+  resolveVariantImage,
   decimalToNumber,
   attachResolvedDeliveryLeadDays,
 };
