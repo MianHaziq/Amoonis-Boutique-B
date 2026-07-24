@@ -13,6 +13,12 @@ const regionStatusValidation = [
   body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
   body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
   body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
+  // Overrides Settings.defaultDeliveryLeadDays for every product in this category that
+  // doesn't set its own Product.deliveryLeadDays. null clears it (falls through to the
+  // global default) — distinct from Region.standardDeliveryDays (courier transit time).
+  body('deliveryLeadDays')
+    .optional({ values: 'null' })
+    .isInt({ min: 0, max: 30 }).withMessage('deliveryLeadDays must be a whole number between 0 and 30'),
 ];
 
 /**

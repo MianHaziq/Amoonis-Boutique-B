@@ -58,7 +58,7 @@ const { resolveRegion } = require('../middleware/region');
  *                   - title: Size
  *                     title_ar: المقاس
  *                     options: [S, M, L, XL]
- *                     options_ar: [صغير, وسط, كبير, كبير جداً]
+ *                     options_ar: [صغير, وسط, كبير, كبير جدا]
  *             withImages:
  *               summary: With gallery (no Arabic)
  *               value:
@@ -160,6 +160,12 @@ const createValidation = [
     .custom(isTwoDecimals).withMessage('customNamePrice supports at most 2 decimal places'),
   body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a non-negative integer'),
   body('categoryId').optional({ values: 'null' }).isUUID().withMessage('categoryId must be a valid UUID when provided'),
+  // Overrides Category.deliveryLeadDays / Settings.defaultDeliveryLeadDays for this
+  // product specifically. null clears it (falls through the chain) — distinct from
+  // Region.standardDeliveryDays (courier transit time), see prisma/schema.prisma.
+  body('deliveryLeadDays')
+    .optional({ values: 'null' })
+    .isInt({ min: 0, max: 30 }).withMessage('deliveryLeadDays must be a whole number between 0 and 30'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),
   body('descriptions.*.title_ar').optional().trim(),
@@ -249,6 +255,11 @@ const updateValidation = [
   // moved) is rejected with 409 instead of silently clobbering.
   body('expectedUpdatedAt').optional().isISO8601().withMessage('expectedUpdatedAt must be an ISO 8601 timestamp'),
   body('categoryId').optional({ values: 'null' }).isUUID().withMessage('categoryId must be a valid UUID when provided'),
+  // Overrides Category.deliveryLeadDays / Settings.defaultDeliveryLeadDays for this
+  // product specifically. null clears it back to "no override".
+  body('deliveryLeadDays')
+    .optional({ values: 'null' })
+    .isInt({ min: 0, max: 30 }).withMessage('deliveryLeadDays must be a whole number between 0 and 30'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),
   body('descriptions.*.title_ar').optional().trim(),
@@ -353,7 +364,7 @@ router.post(
  *                   - title: Size
  *                     title_ar: المقاس
  *                     options: [S, M, L, XL]
- *                     options_ar: [صغير, وسط, كبير, كبير جداً]
+ *                     options_ar: [صغير, وسط, كبير, كبير جدا]
  *             fullUpdate:
  *               summary: Update several fields (no Arabic)
  *               value:

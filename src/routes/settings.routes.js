@@ -67,6 +67,16 @@ router.get('/', verifyAdminOrManager, requireManagerPermission('SETTINGS'), getS
  *                 type: boolean
  *                 description: When false, only signed-in customers can submit product reviews.
  *                 example: true
+ *               defaultDeliveryLeadDays:
+ *                 type: integer
+ *                 minimum: 0
+ *                 maximum: 30
+ *                 description: |
+ *                   Global fallback "ships within N day(s)" prep/booking lead time (whole
+ *                   days), used when a product has no Category.deliveryLeadDays or
+ *                   Product.deliveryLeadDays override. Distinct from Region.standardDeliveryDays
+ *                   (courier transit time).
+ *                 example: 1
  *     responses:
  *       200:
  *         description: Settings updated

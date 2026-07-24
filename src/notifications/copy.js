@@ -20,13 +20,13 @@ const COPY = {
     ORDER_FAILED: { title: 'Order issue', body: 'There was an issue with your order. We’ll be in touch.' },
   },
   ar: {
-    ORDER_PLACED: { title: 'تم استلام الطلب', body: 'شكراً لك! تم استلام طلبك من أمون بلوم.' },
+    ORDER_PLACED: { title: 'تم استلام الطلب', body: 'شكرا لك! تم استلام طلبك من أمون بلوم.' },
     ORDER_PROCESSING: { title: 'طلبك قيد المعالجة', body: 'نقوم بتجهيز منتجاتك الآن.' },
-    ORDER_ON_HOLD: { title: 'الطلب معلّق', body: 'طلبك معلّق مؤقتاً ريثما تتم مراجعته.' },
+    ORDER_ON_HOLD: { title: 'الطلب معلق', body: 'طلبك معلق مؤقتا ريثما تتم مراجعته.' },
     ORDER_COMPLETED: { title: 'اكتمل الطلب', body: 'تم إتمام طلبك. نتمنى لك تجربة سعيدة!' },
     ORDER_CANCELLED: { title: 'تم إلغاء الطلب', body: 'تم إلغاء طلبك.' },
     ORDER_REFUNDED: { title: 'تم استرداد الطلب', body: 'تم استرداد قيمة طلبك.' },
-    ORDER_FAILED: { title: 'مشكلة في الطلب', body: 'حدثت مشكلة في طلبك، سنتواصل معك قريباً.' },
+    ORDER_FAILED: { title: 'مشكلة في الطلب', body: 'حدثت مشكلة في طلبك، سنتواصل معك قريبا.' },
   },
 };
 

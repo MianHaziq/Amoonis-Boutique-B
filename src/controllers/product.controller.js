@@ -8,6 +8,7 @@ async function createProduct(req, res, next) {
     const data = productService.mapProduct(product);
     return success(res, data, 'Product created successfully', 201);
   } catch (err) {
+    if (err.code === 'VALIDATION') return error(res, err.message, 400);
     if (err.code === 'REGION_NOT_FOUND') return error(res, err.message, 400);
     if (err.code === 'INVALID_PRICE') return error(res, err.message, 400);
     if (err.code === 'P2025') return error(res, 'Category not found', 404);
@@ -23,6 +24,7 @@ async function updateProduct(req, res, next) {
     const data = productService.mapProduct(product);
     return success(res, data, 'Product updated successfully');
   } catch (err) {
+    if (err.code === 'VALIDATION') return error(res, err.message, 400);
     if (err.code === 'REGION_NOT_FOUND') return error(res, err.message, 400);
     if (err.code === 'INVALID_PRICE') return error(res, err.message, 400);
     // CAT-3: optimistic-concurrency conflict — the product changed since the client read it.

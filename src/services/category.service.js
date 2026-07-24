@@ -3,6 +3,7 @@ const { autoTranslate, fillBilingualGapsFromTwin } = require('../utils/bilingual
 const regionService = require('./region.service');
 const productService = require('./product.service');
 const { buildVisibilityWhere } = require('../utils/regionVisibility');
+const { parseDeliveryLeadDays } = require('../utils/deliveryLeadDays');
 
 const CATEGORY_BILINGUAL = [
   { src: 'title', dst: 'title_ar' },
@@ -49,6 +50,10 @@ function mapCategory(category) {
 async function createCategory(data) {
   const status = normalizeStatus(data.status);
   const regionIds = await resolveWriteRegionIds(data.regionIds);
+  // Optional override of Settings.defaultDeliveryLeadDays for every product in this
+  // category that doesn't set its own Product.deliveryLeadDays. null/undefined -> no
+  // override (falls through to the global default).
+  const deliveryLeadDays = parseDeliveryLeadDays(data.deliveryLeadDays);
 
   const draft = {
     title: data.title ?? null,
@@ -68,6 +73,7 @@ async function createCategory(data) {
       image: data.image ?? null,
       totalProducts: 0,
       status,
+      deliveryLeadDays,
       ...(regionIds.length > 0
         ? { regions: { create: regionIds.map((regionId) => ({ regionId })) } }
         : {}),
@@ -106,6 +112,9 @@ async function updateCategory(id, data) {
         ...(draft.description_ar !== undefined && { description_ar: draft.description_ar ?? null }),
         ...(data.image !== undefined && { image: data.image }),
         ...(data.status !== undefined && { status: normalizeStatus(data.status, existing?.status) }),
+        // Optional override; omit to leave untouched, or send null to clear it back to
+        // "no override" (falls through to Settings.defaultDeliveryLeadDays).
+        ...(data.deliveryLeadDays !== undefined && { deliveryLeadDays: parseDeliveryLeadDays(data.deliveryLeadDays) }),
       },
     });
     if (newRegionIds !== null) {
@@ -171,7 +180,7 @@ async function getCategoryById(id, includeProducts = false, visibility = {}) {
             take: 100,
             orderBy: { createdAt: 'desc' },
             include: {
-              category: { select: { id: true, title: true } },
+              category: { select: { id: true, title: true, deliveryLeadDays: true } },
               images: { orderBy: { sortOrder: 'asc' } },
               descriptions: { orderBy: { sortOrder: 'asc' } },
               productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -188,7 +197,13 @@ async function getCategoryById(id, includeProducts = false, visibility = {}) {
   if (!category) return null;
   const { products, ...rest } = category;
   const mapped = mapCategory(rest);
-  if (products) mapped.products = products.map(productService.mapProduct);
+  if (products) {
+    mapped.products = products.map(productService.mapProduct);
+    // Same resolved lead-time field the storefront product endpoints expose (see
+    // product.service.js's attachResolvedDeliveryLeadDays) — this nested list is
+    // consumed the same way (e.g. GET /categories/:id), so it must carry it too.
+    await productService.attachResolvedDeliveryLeadDays(mapped.products);
+  }
   return mapped;
 }
 

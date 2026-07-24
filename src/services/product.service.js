@@ -3,6 +3,11 @@ const prisma = require('../config/db');
 const { autoTranslate, autoTranslateMany, fillBilingualGapsFromTwin } = require('../utils/bilingual');
 const regionService = require('./region.service');
 const { buildVisibilityWhere } = require('../utils/regionVisibility');
+const {
+  parseDeliveryLeadDays,
+  resolveDeliveryLeadDays,
+  getDefaultDeliveryLeadDays,
+} = require('../utils/deliveryLeadDays');
 
 // Standard include for region join rows on a product read (staff/admin only).
 const REGION_INCLUDE = {
@@ -196,6 +201,30 @@ async function attachRatingAggregates(mappedProducts) {
 }
 
 /**
+ * Attaches `resolvedDeliveryLeadDays` (always a number, never null) to each already-mapped
+ * product — the product's own deliveryLeadDays override, falling back to its category's
+ * override, falling back to the global Settings.defaultDeliveryLeadDays. The raw (possibly
+ * null) `deliveryLeadDays` override stays on the product/category as-is (admin edit forms
+ * rely on it to distinguish "no override" from "explicitly set"); this only ADDS the
+ * resolved number for the storefront.
+ *
+ * Fetches Settings once per call (cached briefly by getDefaultDeliveryLeadDays — see
+ * utils/deliveryLeadDays.js), not once per product, so a page of 100 products costs at
+ * most one Settings round trip, not 100.
+ */
+async function attachResolvedDeliveryLeadDays(mappedProducts) {
+  const defaultLeadDays = await getDefaultDeliveryLeadDays();
+  for (const p of mappedProducts) {
+    p.resolvedDeliveryLeadDays = resolveDeliveryLeadDays({
+      productLeadDays: p.deliveryLeadDays,
+      categoryLeadDays: p.category?.deliveryLeadDays ?? null,
+      defaultLeadDays,
+    });
+  }
+  return mappedProducts;
+}
+
+/**
  * Same resolution as applyRegionCurrency, but works directly on a raw Prisma product
  * row (Decimal fields) instead of an already-mapped product — used where only the
  * numeric price is needed (order totals, cart line totals), not the full product shape.
@@ -358,6 +387,9 @@ function buildRegionPriceMap(regionPrices) {
 async function createProduct(data) {
   const categoryId = data.categoryId ? String(data.categoryId).trim() || null : null;
   const status = normalizeStatus(data.status);
+  // Optional override of Category.deliveryLeadDays / Settings.defaultDeliveryLeadDays for
+  // this product specifically. null/undefined -> no override (falls through the chain).
+  const deliveryLeadDays = parseDeliveryLeadDays(data.deliveryLeadDays);
   // CAT-2: a discount must never exceed the base price (guard here too, not only in the
   // route validator, so non-HTTP callers can't create an inverted price).
   if (data.discountedPrice != null && data.price != null && Number(data.discountedPrice) > Number(data.price)) {
@@ -411,6 +443,7 @@ async function createProduct(data) {
         giftCardExtraPrice: data.giftCardExtraPrice != null ? Number(data.giftCardExtraPrice) : null,
         customNameEnabled: !!data.customNameEnabled,
         customNamePrice: data.customNamePrice != null ? Number(data.customNamePrice) : null,
+        deliveryLeadDays,
         quantity,
         status,
         ...(regionIds.length > 0
@@ -447,7 +480,7 @@ async function createProduct(data) {
           : {}),
       },
       include: {
-        category: { select: { id: true, title: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -565,6 +598,9 @@ async function updateProduct(id, data) {
     ...(data.customNamePrice !== undefined && {
       customNamePrice: data.customNamePrice != null ? Number(data.customNamePrice) : null,
     }),
+    // Optional override; omit the field to leave it untouched, or send null to clear it
+    // back to "no override" (falls through to Category.deliveryLeadDays / the global default).
+    ...(data.deliveryLeadDays !== undefined && { deliveryLeadDays: parseDeliveryLeadDays(data.deliveryLeadDays) }),
     ...(data.quantity !== undefined && { quantity: Math.max(0, parseInt(data.quantity, 10) || 0) }),
     ...(data.categoryId !== undefined && { categoryId: data.categoryId || null }),
     ...(data.status !== undefined && { status: normalizeStatus(data.status, existing.status) }),
@@ -661,7 +697,7 @@ async function updateProduct(id, data) {
   return prisma.product.findUnique({
     where: { id },
     include: {
-      category: { select: { id: true, title: true } },
+      category: { select: { id: true, title: true, deliveryLeadDays: true } },
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -746,7 +782,7 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
       take,
       orderBy,
       include: {
-        category: { select: { id: true, title: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -758,6 +794,7 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
 
   const mapped = items.map(mapProduct);
   await attachRatingAggregates(mapped);
+  await attachResolvedDeliveryLeadDays(mapped);
   return {
     // Storefront-only: overlay the requesting region's currency (AED/SAR) so `price`/
     // `discountedPrice` are already correct for the region. Staff/admin keep raw fields.
@@ -882,7 +919,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
     const products = await prisma.product.findMany({
       where: { ...where, id: { in: pageIds } },
       include: {
-        category: { select: { id: true, title: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -893,6 +930,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
     products.sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
     items = products.map(mapProduct);
     await attachRatingAggregates(items);
+    await attachResolvedDeliveryLeadDays(items);
   }
 
   return {
@@ -954,7 +992,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
       take,
       orderBy: { createdAt: 'desc' },
       include: {
-        category: { select: { id: true, title: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -966,6 +1004,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
 
   const mappedResults = items.map(mapProduct);
   await attachRatingAggregates(mappedResults);
+  await attachResolvedDeliveryLeadDays(mappedResults);
   return {
     items: visibility.isStaff
       ? mappedResults
@@ -982,7 +1021,7 @@ async function getProductById(id, visibility = {}) {
   const product = await prisma.product.findFirst({
     where: { id, ...buildVisibilityWhere(visibility) },
     include: {
-      category: { select: { id: true, title: true } },
+      category: { select: { id: true, title: true, deliveryLeadDays: true } },
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -992,6 +1031,7 @@ async function getProductById(id, visibility = {}) {
   if (!product) return null;
   const mapped = mapProduct(product);
   await attachRatingAggregates([mapped]);
+  await attachResolvedDeliveryLeadDays([mapped]);
   return visibility.isStaff ? mapped : applyRegionCurrency(mapped);
 }
 
@@ -1012,4 +1052,5 @@ module.exports = {
   regionPriceFromRow,
   optionExtraCharge,
   decimalToNumber,
+  attachResolvedDeliveryLeadDays,
 };

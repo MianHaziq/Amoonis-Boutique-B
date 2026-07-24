@@ -16,6 +16,11 @@ function effectivePrice(product) {
 
 // Product include for cart (images + descriptions + productOptions for display)
 const cartProductInclude = {
+  // deliveryLeadDays feeds the per-line "ships within N days" note the storefront shows
+  // in the cart drawer / cart page / checkout review — resolved below via
+  // attachResolvedDeliveryLeadDays so an authenticated user's server-hydrated cart
+  // carries the same value the PDP snapshotted at add-to-cart time.
+  category: { select: { id: true, title: true, deliveryLeadDays: true } },
   images: { orderBy: { sortOrder: 'asc' } },
   descriptions: { orderBy: { sortOrder: 'asc' } },
   productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -269,6 +274,10 @@ async function getCart(userId, currency = 'AED', regionId = null) {
         i.quantity,
     };
   });
+  // Resolve each line's "ships within N days" lead time (product -> category -> global
+  // default). Mutates the product objects in place; one Settings fetch for the whole
+  // cart (cached), not one per line.
+  await productService.attachResolvedDeliveryLeadDays(items.map((i) => i.product));
   const totalAmount = items.reduce((sum, i) => sum + i.lineTotal, 0);
   return {
     id: cart.id,

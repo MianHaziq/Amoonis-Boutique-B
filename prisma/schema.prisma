@@ -350,6 +350,12 @@ model Settings {
   /// signed in or not — can submit a review (guests provide name + email). When
   /// false, only signed-in customers can submit; guest submissions are rejected.
   allowGuestReviews Boolean  @default(true)
+  /// Fallback "ships within N day(s)" prep/booking lead time (whole days) used when
+  /// neither the product nor its category overrides it. Distinct from
+  /// Region.standardDeliveryDays (courier/regional transit time, not prep time) —
+  /// the storefront's estimated delivery date is computed from both. See
+  /// Category.deliveryLeadDays / Product.deliveryLeadDays for the override chain.
+  defaultDeliveryLeadDays Int      @default(1)
   updatedAt         DateTime @updatedAt
 }
 
@@ -442,6 +448,10 @@ model Category {
   image          String?
   totalProducts  Int           @default(0)
   status         PublishStatus @default(DRAFT)
+  /// Overrides Settings.defaultDeliveryLeadDays for every product in this category
+  /// that doesn't set its own Product.deliveryLeadDays. Null = no override (falls
+  /// through to the global default).
+  deliveryLeadDays Int?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
@@ -471,6 +481,10 @@ model Product {
   // fee. Only enabled on select products (mugs/cups/boxes), never bouquets.
   customNameEnabled  Boolean       @default(false)
   customNamePrice    Decimal?      @db.Decimal(10, 2)
+  // Overrides both Category.deliveryLeadDays and Settings.defaultDeliveryLeadDays
+  // for this product specifically. Null = no override (falls through the chain:
+  // product -> category -> global default).
+  deliveryLeadDays   Int?
   quantity           Int           @default(0)
   categoryId         String?
   status             PublishStatus @default(DRAFT)
@@ -791,6 +805,12 @@ model OrderItem {
   // perProductMessage above doubles as the gift card's note when set.
   giftCardSelected  Boolean  @default(false)
   customName        String?
+  /// Resolved "ships within N day(s)" lead time for this line, snapshotted at order
+  /// time from the product/category/global chain (see Product.deliveryLeadDays) —
+  /// so a later admin change to those settings never retroactively alters a
+  /// historical order's displayed lead time. Null for orders placed before this
+  /// feature existed.
+  resolvedLeadDays  Int?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 

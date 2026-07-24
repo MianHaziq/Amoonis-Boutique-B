@@ -8,6 +8,7 @@ const regionService = require('../services/region.service');
 const deliveryZoneService = require('../services/deliveryZone.service');
 const productService = require('../services/product.service');
 const vatService = require('../services/vat.service');
+const { resolveDeliveryLeadDays, getDefaultDeliveryLeadDays } = require('../utils/deliveryLeadDays');
 
 function decimalToNumber(v) {
   return v == null ? null : Number(v);
@@ -85,6 +86,11 @@ function toOrderResponsePayload(order) {
     selectedOptions: i.selectedOptions ?? null,
     giftCardSelected: i.giftCardSelected ?? false,
     customName: i.customName ?? null,
+    // Snapshot of the resolved "ships within N day(s)" prep/booking lead time at order
+    // creation time (product -> category -> global default chain) — see
+    // prisma/schema.prisma's OrderItem.resolvedLeadDays comment. Null only for orders
+    // placed before this feature existed.
+    resolvedLeadDays: i.resolvedLeadDays ?? null,
   }));
   return {
     id: order.id,
@@ -346,8 +352,12 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // Snapshot the region's standard delivery lead time onto the order at checkout time
   // (mirrors the shippingAmount snapshot below) — only meaningful for STANDARD orders;
   // SCHEDULED orders have a customer-chosen date instead, not a day-count estimate.
-  const estimatedDeliveryDays =
-    deliveryType === 'STANDARD' ? orderRegion?.standardDeliveryDays ?? null : null;
+  //
+  // This is computed further down (after productRows/resolvedLeadDaysByProductId are
+  // available) as: max(region's courier transit days, the slowest line's prep/booking
+  // lead time) — see maxResolvedLeadDaysAcrossOrderItems below. Region.standardDeliveryDays
+  // alone used to be the whole estimate; now a product needing more prep time than the
+  // courier's transit window can push the estimate out further.
 
   // Online payment currently only works for the gateway's configured currency (AED).
   // A region charging a different currency (e.g. Saudi/SAR) must use Cash on Delivery
@@ -441,9 +451,46 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       giftCardExtraPrice: true,
       customNameEnabled: true,
       customNamePrice: true,
+      // Prep/booking lead-time override chain (see prisma/schema.prisma) — resolved and
+      // snapshotted per line below as OrderItem.resolvedLeadDays.
+      deliveryLeadDays: true,
+      category: { select: { deliveryLeadDays: true } },
     },
   });
   const productById = new Map(productRows.map((p) => [p.id, p]));
+
+  // Resolve + snapshot each line's "ships within N day(s)" lead time NOW, at order
+  // creation, so a later admin change to the product/category/global default never
+  // retroactively alters a historical order (see OrderItem.resolvedLeadDays comment).
+  // Settings is fetched once per order (cached briefly — see utils/deliveryLeadDays.js),
+  // not once per line.
+  const defaultLeadDaysForOrder = await getDefaultDeliveryLeadDays();
+  const resolvedLeadDaysByProductId = new Map(
+    productRows.map((p) => [
+      p.id,
+      resolveDeliveryLeadDays({
+        productLeadDays: p.deliveryLeadDays,
+        categoryLeadDays: p.category?.deliveryLeadDays ?? null,
+        defaultLeadDays: defaultLeadDaysForOrder,
+      }),
+    ])
+  );
+  // The slowest-prepping line on the order drives the STANDARD delivery estimate below —
+  // e.g. one flower line (2-day prep) in an order otherwise full of 1-day gift boxes means
+  // the whole order can't ship before day 2.
+  const maxResolvedLeadDaysAcrossOrderItems = Math.max(
+    0,
+    ...[...resolvedLeadDaysByProductId.values()]
+  );
+  // STANDARD estimate = the LATER of the region's courier transit time and the slowest
+  // line's own prep/booking lead time (they're sequential: a product isn't handed to the
+  // courier until it's prepped) — see the comment above where estimatedDeliveryDays was
+  // first declared for why this replaced the old "region days only" formula. SCHEDULED
+  // orders keep a customer-chosen date instead of a day-count estimate.
+  const estimatedDeliveryDays =
+    deliveryType === 'STANDARD'
+      ? Math.max(orderRegion?.standardDeliveryDays ?? 0, maxResolvedLeadDaysAcrossOrderItems)
+      : null;
 
   // Only honor gift-card/custom-name selections the product actually offers — mirrors
   // the same guard in cart.service.addToCart. Needed again here because an order can
@@ -783,6 +830,11 @@ async function createOrderCore(userId, params = {}, opts = {}) {
               : Prisma.DbNull,
           giftCardSelected: !!item.giftCardSelected,
           customName: item.customName ?? null,
+          // Snapshot of the resolved prep/booking lead time (see
+          // resolvedLeadDaysByProductId above) — never re-derived later from live
+          // product/category/settings data, so a later admin change never retroactively
+          // alters a historical order's displayed lead time.
+          resolvedLeadDays: resolvedLeadDaysByProductId.get(item.productId) ?? null,
         })),
       }),
       // Clear the cart only for a cart checkout (clearCart) paid up front (COD). Online
@@ -1230,6 +1282,7 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
       selectedOptions: i.selectedOptions ?? null,
       giftCardSelected: i.giftCardSelected ?? false,
       customName: i.customName ?? null,
+      resolvedLeadDays: i.resolvedLeadDays ?? null,
       product: mapOrderItemProduct(i),
       createdAt: i.createdAt,
       updatedAt: i.updatedAt,

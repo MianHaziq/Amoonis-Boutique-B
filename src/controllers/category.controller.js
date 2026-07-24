@@ -7,6 +7,7 @@ async function createCategory(req, res, next) {
     const category = await categoryService.createCategory(req.body);
     return success(res, category, 'Category created successfully', 201);
   } catch (err) {
+    if (err.code === 'VALIDATION') return error(res, err.message, 400);
     if (err.code === 'REGION_NOT_FOUND') return error(res, err.message, 400);
     if (err.code === 'P2002') {
       return error(res, 'Category with this title may already exist', 409);
@@ -21,6 +22,7 @@ async function updateCategory(req, res, next) {
     const category = await categoryService.updateCategory(id, req.body);
     return success(res, category, 'Category updated successfully');
   } catch (err) {
+    if (err.code === 'VALIDATION') return error(res, err.message, 400);
     if (err.code === 'REGION_NOT_FOUND') return error(res, err.message, 400);
     if (err.code === 'P2025') return error(res, 'Category not found', 404);
     if (err.code === 'P2002') return error(res, 'Title already in use', 409);

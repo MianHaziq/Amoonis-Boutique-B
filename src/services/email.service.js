@@ -76,12 +76,14 @@ async function sendEmail(to, subject, html) {
 async function deliver(to, subject, html) {
   if (!to) throw new Error('email recipient (to) is required');
 
+  let resendError = null;
   const resendClient = getResend();
   if (resendClient) {
     const from = process.env.FROM_EMAIL || process.env.RESEND_FROM || 'Amoon Bloom <onboarding@resend.dev>';
     const { data, error } = await resendClient.emails.send({ from, to: [to], subject, html });
     if (!error) return { sent: true, transport: 'resend', id: data?.id };
     // Resend failed — try SMTP before giving up.
+    resendError = error;
     console.warn('[EMAIL] Resend failed, trying SMTP:', error.message || error);
   }
 
@@ -92,6 +94,12 @@ async function deliver(to, subject, html) {
     return { sent: true, transport: 'smtp' };
   }
 
+  // Surface the real Resend rejection reason (e.g. "verify a domain at resend.com/domains")
+  // rather than a generic "not configured" message when a key IS set but the send itself
+  // was rejected — this was previously swallowed, making the actual cause invisible in logs.
+  if (resendError) {
+    throw new Error(`Resend rejected the send and no SMTP fallback is configured: ${resendError.message || resendError}`);
+  }
   throw new Error('No email transport configured (set RESEND_API_KEY or SMTP_HOST)');
 }
 

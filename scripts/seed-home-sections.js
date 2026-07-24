@@ -40,13 +40,13 @@ async function newestProductIds(take, whereExtra = {}) {
     const plan = [
       {
         title: 'Best sellers',
-        title_ar: 'الأكثر مبيعاً',
+        title_ar: 'الأكثر مبيعا',
         sortOrder: 0,
         productIds: bestSellerIds,
       },
       {
         title: 'New arrivals',
-        title_ar: 'وصل حديثاً',
+        title_ar: 'وصل حديثا',
         sortOrder: 1,
         productIds: newArrivalIds,
       },
