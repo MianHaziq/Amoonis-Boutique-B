@@ -1,7 +1,7 @@
 const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
 const productService = require('./product.service');
-const { variantKeyOf } = require('../utils/variantKey');
+const { variantKeyOf, lineVariantKey } = require('../utils/variantKey');
 
 /**
  * Which cart LINE a mutation targets, as a variantKey. Callers may pass an
@@ -118,9 +118,19 @@ async function addToCart(userId, {
   const qty = Math.max(1, parseInt(quantity, 10) || 1);
   const cart = await getOrCreateCart(userId);
 
-  // Variant-aware line identity: the same product in a different variant is a
-  // separate line. Re-adding the SAME variant (same key) still merges quantity.
-  const variantKey = variantKeyOf(selectedOptions);
+  // Only honor gift-card/custom-name selections the product actually offers — a
+  // tampered request claiming an add-on the product doesn't have is silently
+  // dropped. Resolved BEFORE the line key because the custom name is part of the
+  // line's identity (see lineVariantKey below).
+  const effectiveGiftCardSelected =
+    giftCardSelected !== undefined ? !!giftCardSelected && !!product.giftCardEnabled : undefined;
+  const effectiveCustomName =
+    customName !== undefined ? (product.customNameEnabled ? (String(customName || '').trim() || null) : null) : undefined;
+
+  // Variant+name-aware line identity: the same product in a different variant OR
+  // with a different custom name is a separate line. Re-adding the SAME variant
+  // AND SAME name (same key) still merges quantity.
+  const variantKey = lineVariantKey(selectedOptions, effectiveCustomName, effectiveGiftCardSelected);
   // All existing lines for this product (across variants). Stock is product-level
   // (not per-variant), so the availability check must be against the SUM of every
   // variant line + the amount being added — not just the line we're merging into —
@@ -145,13 +155,6 @@ async function addToCart(userId, {
           : 'This product is out of stock',
     };
   }
-
-  // Only honor gift-card/custom-name selections the product actually offers — a
-  // tampered request claiming an add-on the product doesn't have is silently dropped.
-  const effectiveGiftCardSelected =
-    giftCardSelected !== undefined ? !!giftCardSelected && !!product.giftCardEnabled : undefined;
-  const effectiveCustomName =
-    customName !== undefined ? (product.customNameEnabled ? (String(customName || '').trim() || null) : null) : undefined;
 
   if (existing) {
     await prisma.cartItem.update({
@@ -325,7 +328,7 @@ async function getCart(userId, currency = 'AED', regionId = null) {
   // Resolve each line's "ships within N days" lead time (product -> category -> global
   // default). Mutates the product objects in place; one Settings fetch for the whole
   // cart (cached), not one per line.
-  await productService.attachResolvedDeliveryLeadDays(items.map((i) => i.product));
+  await productService.attachResolvedDeliveryLeadDays(items.map((i) => i.product), regionId);
   const totalAmount = items.reduce((sum, i) => sum + i.lineTotal, 0);
   return {
     id: cart.id,

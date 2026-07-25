@@ -459,7 +459,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       // Prep/booking lead-time override chain (see prisma/schema.prisma) — resolved and
       // snapshotted per line below as OrderItem.resolvedLeadDays.
       deliveryLeadDays: true,
-      category: { select: { deliveryLeadDays: true } },
+      category: { select: { id: true, deliveryLeadDays: true } },
     },
   });
   const productById = new Map(productRows.map((p) => [p.id, p]));
@@ -470,11 +470,35 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // Settings is fetched once per order (cached briefly — see utils/deliveryLeadDays.js),
   // not once per line.
   const defaultLeadDaysForOrder = await getDefaultDeliveryLeadDays();
+  // Per-region lead-day overrides for THIS order's region (product + category tiers),
+  // so a product that ships within a different number of days in this region gets the
+  // right prep time snapshotted onto the order. One batch query each.
+  const orderProductIds = productRows.map((p) => p.id);
+  const orderCategoryIds = [...new Set(productRows.map((p) => p.category?.id).filter(Boolean))];
+  const [prLeadRows, crLeadRows] = orderRegionId
+    ? await Promise.all([
+        prisma.productRegion.findMany({
+          where: { regionId: orderRegionId, productId: { in: orderProductIds }, deliveryLeadDays: { not: null } },
+          select: { productId: true, deliveryLeadDays: true },
+        }),
+        orderCategoryIds.length
+          ? prisma.categoryRegion.findMany({
+              where: { regionId: orderRegionId, categoryId: { in: orderCategoryIds }, deliveryLeadDays: { not: null } },
+              select: { categoryId: true, deliveryLeadDays: true },
+            })
+          : [],
+      ])
+    : [[], []];
+  const productRegionLeadById = new Map(prLeadRows.map((r) => [r.productId, r.deliveryLeadDays]));
+  const categoryRegionLeadByCatId = new Map(crLeadRows.map((r) => [r.categoryId, r.deliveryLeadDays]));
+
   const resolvedLeadDaysByProductId = new Map(
     productRows.map((p) => [
       p.id,
       resolveDeliveryLeadDays({
+        productRegionLeadDays: productRegionLeadById.get(p.id) ?? null,
         productLeadDays: p.deliveryLeadDays,
+        categoryRegionLeadDays: p.category?.id ? categoryRegionLeadByCatId.get(p.category.id) ?? null : null,
         categoryLeadDays: p.category?.deliveryLeadDays ?? null,
         defaultLeadDays: defaultLeadDaysForOrder,
       }),
@@ -553,22 +577,23 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     return discountedPrice != null && discountedPrice < price ? discountedPrice : price;
   }
   // Effective per-unit price INCLUDING this line's gift-card/custom-name add-ons —
-  // depends on the line's own selection, not just the product, so it's built from
-  // lineItems (one entry per productId) rather than cached purely per-product.
-  const livePriceById = new Map(
-    sanitizedLineItems.map((item) => {
-      const p = productById.get(item.productId);
-      const extra = p
-        ? productService.optionExtraCharge(p, { giftCardSelected: item.giftCardSelected, customName: item.customName })
-        : 0;
-      return [item.productId, livePrice(p) + extra];
-    })
-  );
+  // depends on the LINE's own selection, not just the product. Keyed by line INDEX
+  // (aligned 1:1 with lineItems/sanitizedLineItems), NOT productId: a product can
+  // now span several lines with different add-ons (e.g. two custom-name lines, or
+  // a plain + a personalized line of the same variant), and a productId-keyed map
+  // would collapse them to one price — the last line would set the price for all.
+  const livePriceByIndex = sanitizedLineItems.map((item) => {
+    const p = productById.get(item.productId);
+    const extra = p
+      ? productService.optionExtraCharge(p, { giftCardSelected: item.giftCardSelected, customName: item.customName })
+      : 0;
+    return livePrice(p) + extra;
+  });
 
-  const promoItems = lineItems.map((item) => ({
+  const promoItems = lineItems.map((item, idx) => ({
     productId: item.productId,
     quantity: item.quantity,
-    price: livePriceById.get(item.productId) ?? 0,
+    price: livePriceByIndex[idx] ?? 0,
     categoryId: productById.get(item.productId)?.categoryId ?? null,
   }));
 
@@ -612,26 +637,26 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     const txProductById = new Map(livePriceRows.map((p) => [p.id, p]));
     // Same effective-price rule as cart/livePrice (M2): discounted only when lower,
     // resolved to the order region's price (base or that region's manual override) —
-    // PLUS this line's gift-card/custom-name add-on, same as livePriceById above.
-    const txPriceById = new Map(
-      sanitizedLineItems.map((item) => {
-        const p = txProductById.get(item.productId);
-        if (!p) return [item.productId, null];
-        const { price, discountedPrice } = productService.regionPriceFromRow(p);
-        const base = discountedPrice != null && discountedPrice < price ? discountedPrice : price;
-        const extra = productService.optionExtraCharge(p, { giftCardSelected: item.giftCardSelected, customName: item.customName });
-        return [item.productId, base + extra];
-      })
-    );
+    // PLUS this line's gift-card/custom-name add-on, same as livePriceByIndex above.
+    // Per-LINE effective price (index-aligned with lineItems), NOT per productId —
+    // see livePriceByIndex above for why: two lines of the same product with
+    // different add-ons must keep their own prices.
+    const txPriceByIndex = sanitizedLineItems.map((item) => {
+      const p = txProductById.get(item.productId);
+      if (!p) return null;
+      const { price, discountedPrice } = productService.regionPriceFromRow(p);
+      const base = discountedPrice != null && discountedPrice < price ? discountedPrice : price;
+      const extra = productService.optionExtraCharge(p, { giftCardSelected: item.giftCardSelected, customName: item.customName });
+      return base + extra;
+    });
 
     // Recompute line totals and order subtotal from live prices.
     let txSubtotal = 0;
-    const itemPriceById = new Map();
-    for (const item of lineItems) {
-      const livePriceVal = txPriceById.get(item.productId) ?? livePriceById.get(item.productId) ?? 0;
-      itemPriceById.set(item.productId, livePriceVal);
+    const itemPriceByIndex = lineItems.map((item, idx) => {
+      const livePriceVal = txPriceByIndex[idx] ?? livePriceByIndex[idx] ?? 0;
       txSubtotal += livePriceVal * item.quantity;
-    }
+      return livePriceVal;
+    });
     txSubtotal = Math.round(txSubtotal * 100) / 100;
 
     // Re-validate the promo and RECOMPUTE the discount against the live tx prices — never
@@ -700,10 +725,10 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       // Recompute the discount on the live tx prices. computeDiscount re-checks
       // min/maxOrderAmount and item eligibility, so a price drift that breaks those throws
       // here rather than silently applying a stale discount.
-      const txItems = lineItems.map((item) => ({
+      const txItems = lineItems.map((item, idx) => ({
         productId: item.productId,
         quantity: item.quantity,
-        price: itemPriceById.get(item.productId) ?? 0,
+        price: itemPriceByIndex[idx] ?? 0,
         categoryId: productById.get(item.productId)?.categoryId ?? null,
       }));
       finalDiscount = promoCodeService.computeDiscount(livePromo, txItems).discountAmount;
@@ -717,11 +742,11 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // VAT the total is unchanged and we only record the tax portion. Uses the same live tx
     // prices as the subtotal/discount above, so nothing drifts.
     const vatConfig = await vatService.resolveConfigForOrder(orderRegionId, tx);
-    const vatLines = lineItems.map((item) => ({
+    const vatLines = lineItems.map((item, idx) => ({
       productId: item.productId,
       categoryId: productById.get(item.productId)?.categoryId ?? null,
       quantity: item.quantity,
-      unitPrice: itemPriceById.get(item.productId) ?? 0,
+      unitPrice: itemPriceByIndex[idx] ?? 0,
     }));
     // vat.lines is aligned 1:1 with lineItems (same order), so index into it directly —
     // keying by productId would collapse two lines of the same product with different options.
@@ -829,7 +854,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
           productTitle_ar: productById.get(item.productId)?.title_ar ?? null,
           quantity: item.quantity,
           perProductMessage: item.message ?? null,
-          price: itemPriceById.get(item.productId) ?? 0,
+          price: itemPriceByIndex[idx] ?? 0,
           vatRatePercent: vat.lines[idx]?.vatRatePercent ?? 0,
           vatAmount: vat.lines[idx]?.vatAmount ?? 0,
           // Json? column: Prisma requires the explicit DbNull sentinel (not JS
