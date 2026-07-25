@@ -61,15 +61,37 @@ function mapAddress(a, profile = {}) {
     deliveryZone: a.deliveryZone
       ? { id: a.deliveryZone.id, name: a.deliveryZone.name, name_ar: a.deliveryZone.name_ar ?? null }
       : null,
+    // The region this address belongs to. The storefront compares `region.code`
+    // to the active X-Region to decide whether the address is offered at
+    // checkout. Null (legacy rows with no zone/home region) = shown everywhere.
+    regionId: a.regionId ?? null,
+    region: a.region
+      ? { id: a.region.id, code: a.region.code, name: a.region.name, name_ar: a.region.name_ar ?? null }
+      : null,
     isDefault: a.isDefault,
     createdAt: a.createdAt,
     updatedAt: a.updatedAt,
   };
 }
 
-const DELIVERY_ZONE_INCLUDE = {
+const ADDRESS_INCLUDE = {
   deliveryZone: { select: { id: true, name: true, name_ar: true } },
+  region: { select: { id: true, code: true, name: true, name_ar: true } },
 };
+
+// The region an address belongs to. The delivery zone (which belongs to exactly
+// one region) is authoritative; a zoneless address falls back to the active
+// region the request came from (X-Region, resolved in the controller).
+async function resolveAddressRegionId(client, { deliveryZoneId, fallbackRegionId }) {
+  if (deliveryZoneId) {
+    const zone = await client.deliveryZone.findUnique({
+      where: { id: deliveryZoneId },
+      select: { regionId: true },
+    });
+    if (zone?.regionId) return zone.regionId;
+  }
+  return fallbackRegionId ?? null;
+}
 
 // Pulls the contact + region defaults from the user profile in one read.
 async function loadProfileDefaults(client, userId) {
@@ -96,7 +118,7 @@ async function listAddresses(userId) {
     prisma.address.findMany({
       where: { userId },
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
-      include: DELIVERY_ZONE_INCLUDE,
+      include: ADDRESS_INCLUDE,
     }),
     loadProfileDefaults(prisma, userId),
   ]);
@@ -105,13 +127,13 @@ async function listAddresses(userId) {
 
 async function getAddressById(userId, addressId) {
   const [row, profile] = await Promise.all([
-    prisma.address.findFirst({ where: { id: addressId, userId }, include: DELIVERY_ZONE_INCLUDE }),
+    prisma.address.findFirst({ where: { id: addressId, userId }, include: ADDRESS_INCLUDE }),
     loadProfileDefaults(prisma, userId),
   ]);
   return row ? mapAddress(row, profile) : null;
 }
 
-async function createAddress(userId, data) {
+async function createAddress(userId, data, currentRegionId = null) {
   const { label, fullName, phone, streetAddress, apartment, city, state, postalCode, country, area, deliveryZoneId } = data;
   let makeDefault = Boolean(data.isDefault);
 
@@ -140,6 +162,14 @@ async function createAddress(userId, data) {
       const cityFinal = cityIn ?? profile.addressCity;
       const countryFinal = countryIn ?? profile.addressCountry;
 
+      const zoneId = trimOrNull(deliveryZoneId);
+      // Tag the address with its region: the chosen zone's region wins; otherwise
+      // the region the request came in on (X-Region, passed by the controller).
+      const regionId = await resolveAddressRegionId(tx, {
+        deliveryZoneId: zoneId,
+        fallbackRegionId: currentRegionId,
+      });
+
       const row = await tx.address.create({
         data: {
           userId,
@@ -153,10 +183,11 @@ async function createAddress(userId, data) {
           postalCode: trimOrNull(postalCode),
           country: countryFinal,
           area: trimOrNull(area),
-          deliveryZoneId: trimOrNull(deliveryZoneId),
+          deliveryZoneId: zoneId,
+          regionId,
           isDefault: makeDefault,
         },
-        include: DELIVERY_ZONE_INCLUDE,
+        include: ADDRESS_INCLUDE,
       });
 
       return mapAddress(row, profile);
@@ -164,7 +195,7 @@ async function createAddress(userId, data) {
   );
 }
 
-async function updateAddress(userId, addressId, data) {
+async function updateAddress(userId, addressId, data, currentRegionId = null) {
   const { label, fullName, phone, streetAddress, apartment, city, state, postalCode, country, area, deliveryZoneId, isDefault } = data;
 
   const patch = {};
@@ -189,6 +220,15 @@ async function updateAddress(userId, addressId, data) {
         if (patch.isDefault === true) {
           await tx.address.updateMany({ where: { userId }, data: { isDefault: false } });
         }
+        // Keep the region in sync when the delivery zone changes — the new zone's
+        // region wins, else the region the request came in on. Only recomputed
+        // when the zone is part of this update so unrelated edits don't touch it.
+        if (deliveryZoneId !== undefined) {
+          patch.regionId = await resolveAddressRegionId(tx, {
+            deliveryZoneId: patch.deliveryZoneId,
+            fallbackRegionId: currentRegionId,
+          });
+        }
         // updateMany filters by both id AND userId — clean ownership, no TOCTOU
         const result = await tx.address.updateMany({
           where: { id: addressId, userId },
@@ -196,7 +236,7 @@ async function updateAddress(userId, addressId, data) {
         });
         if (result.count === 0) return null;
         const [row, profile] = await Promise.all([
-          tx.address.findUnique({ where: { id: addressId }, include: DELIVERY_ZONE_INCLUDE }),
+          tx.address.findUnique({ where: { id: addressId }, include: ADDRESS_INCLUDE }),
           loadProfileDefaults(tx, userId),
         ]);
         return row ? mapAddress(row, profile) : null;
@@ -250,7 +290,7 @@ async function setDefault(userId, addressId) {
 
         await tx.address.updateMany({ where: { userId }, data: { isDefault: false } });
         const [row, profile] = await Promise.all([
-          tx.address.update({ where: { id: addressId }, data: { isDefault: true }, include: DELIVERY_ZONE_INCLUDE }),
+          tx.address.update({ where: { id: addressId }, data: { isDefault: true }, include: ADDRESS_INCLUDE }),
           loadProfileDefaults(tx, userId),
         ]);
         return mapAddress(row, profile);
