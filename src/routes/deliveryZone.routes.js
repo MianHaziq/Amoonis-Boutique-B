@@ -24,6 +24,14 @@ const createValidation = [
   body('sortOrder').optional().isInt(),
 ];
 
+const bulkCreateValidation = [
+  body('regionId').isUUID().withMessage('Valid regionId is required'),
+  body('zones').isArray({ min: 1 }).withMessage('zones must be a non-empty array'),
+  body('zones.*.name').isString().trim().notEmpty().withMessage('Each zone needs a name'),
+  body('zones.*.name_ar').optional({ nullable: true }).isString().trim(),
+  body('zones.*.isActive').optional().isBoolean(),
+];
+
 const updateValidation = [
   param('id').isUUID().withMessage('Valid zone ID required'),
   body('regionId').optional().isUUID(),
@@ -81,6 +89,27 @@ router.post(
   createValidation,
   handleValidationErrors,
   deliveryZoneController.createZone
+);
+
+/**
+ * @swagger
+ * /delivery-zones/bulk:
+ *   post:
+ *     summary: Create multiple delivery zones for one region (admin/manager)
+ *     description: Body { regionId, zones: [{ name, name_ar?, isActive? }] }. sortOrder is auto-assigned (appended). Duplicate names (existing or repeated) are skipped, not failed.
+ *     tags: [DeliveryZones]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       201: { description: Zones created (with any skipped duplicate names) }
+ *       400: { description: Validation error }
+ */
+router.post(
+  '/bulk',
+  verifyAdminOrManager,
+  requireManagerPermission('DELIVERY_ZONES'),
+  bulkCreateValidation,
+  handleValidationErrors,
+  deliveryZoneController.createZonesBulk
 );
 
 /**

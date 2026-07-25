@@ -57,6 +57,19 @@ async function listZones({ regionId, includeInactive = true } = {}) {
   });
 }
 
+/**
+ * Next sortOrder for a region = one past its current max, so new zones always
+ * append to the end of that region's list. Sort is automatic — the admin sets
+ * the visible order by drag-and-drop (reorderZones), never by typing a number.
+ */
+async function nextSortOrder(regionId, client = prisma) {
+  const agg = await client.deliveryZone.aggregate({
+    where: { regionId },
+    _max: { sortOrder: true },
+  });
+  return (agg._max.sortOrder ?? -1) + 1;
+}
+
 async function createZone(data) {
   const regionId = String(data.regionId ?? '').trim();
   if (!regionId) throw Object.assign(new Error('regionId is required'), { code: 'VALIDATION' });
@@ -69,10 +82,64 @@ async function createZone(data) {
       name,
       name_ar: data.name_ar != null ? String(data.name_ar).trim() || null : null,
       isActive: data.isActive === undefined ? true : !!data.isActive,
-      sortOrder: data.sortOrder != null ? Number(data.sortOrder) : 0,
+      // sortOrder is automatic (append) unless an explicit value is passed.
+      sortOrder: data.sortOrder != null ? Number(data.sortOrder) : await nextSortOrder(regionId),
     },
     select: ZONE_SELECT,
   });
+}
+
+/**
+ * Create several zones for ONE region in a single transaction. Names that
+ * already exist in the region (or repeat within the batch) are skipped, not
+ * failed, so re-submitting a partially-created list is safe. sortOrder is
+ * assigned sequentially from the region's current max, so the new zones append
+ * in the order given.
+ * @param {string} regionId
+ * @param {{ name: string, name_ar?: string|null, isActive?: boolean }[]} zones
+ * @returns {Promise<{ created: object[], skipped: string[], count: number }>}
+ */
+async function createZonesBulk(regionId, zones) {
+  regionId = String(regionId ?? '').trim();
+  if (!regionId) throw Object.assign(new Error('regionId is required'), { code: 'VALIDATION' });
+
+  const cleaned = (Array.isArray(zones) ? zones : [])
+    .map((z) => ({
+      name: String(z?.name ?? '').trim(),
+      name_ar: z?.name_ar != null ? String(z.name_ar).trim() || null : null,
+      isActive: z?.isActive === undefined ? true : !!z.isActive,
+    }))
+    .filter((z) => z.name);
+  if (cleaned.length === 0) {
+    throw Object.assign(new Error('At least one zone name is required'), { code: 'VALIDATION' });
+  }
+
+  // Skip names already present in the region (exact match — mirrors the
+  // @@unique([regionId, name]) constraint) or repeated within this batch.
+  const existing = await prisma.deliveryZone.findMany({
+    where: { regionId },
+    select: { name: true, sortOrder: true },
+  });
+  const taken = new Set(existing.map((z) => z.name));
+  let next = existing.reduce((m, z) => Math.max(m, z.sortOrder), -1) + 1;
+
+  const toCreate = [];
+  const skipped = [];
+  for (const z of cleaned) {
+    if (taken.has(z.name)) {
+      skipped.push(z.name);
+      continue;
+    }
+    taken.add(z.name);
+    toCreate.push({ ...z, regionId, sortOrder: next++ });
+  }
+
+  if (toCreate.length === 0) return { created: [], skipped, count: 0 };
+
+  const created = await prisma.$transaction(
+    toCreate.map((d) => prisma.deliveryZone.create({ data: d, select: ZONE_SELECT }))
+  );
+  return { created, skipped, count: created.length };
 }
 
 async function updateZone(id, data) {
@@ -135,6 +202,7 @@ module.exports = {
   assertValidZone,
   listZones,
   createZone,
+  createZonesBulk,
   updateZone,
   deleteZone,
   reorderZones,

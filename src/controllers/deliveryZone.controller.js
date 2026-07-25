@@ -38,6 +38,24 @@ async function createZone(req, res, next) {
 }
 
 /**
+ * POST /delivery-zones/bulk – Create several zones for one region at once
+ * (admin/manager). Body: { regionId, zones: [{ name, name_ar?, isActive? }] }.
+ * Duplicate names (existing or repeated) are skipped, not failed.
+ */
+async function createZonesBulk(req, res, next) {
+  try {
+    const { regionId, zones } = req.body;
+    const result = await deliveryZoneService.createZonesBulk(regionId, zones);
+    return success(res, result, 'Delivery zones created successfully', 201);
+  } catch (err) {
+    if (err.code === 'VALIDATION') return error(res, err.message, 400);
+    if (err.code === 'P2002') return error(res, 'A zone with this name already exists in this region', 409);
+    if (err.code === 'P2003') return error(res, 'Unknown regionId', 400);
+    next(err);
+  }
+}
+
+/**
  * PUT /delivery-zones/:id – Update a zone (admin/manager).
  */
 async function updateZone(req, res, next) {
@@ -84,4 +102,4 @@ async function reorderZones(req, res, next) {
   }
 }
 
-module.exports = { listZones, createZone, updateZone, deleteZone, reorderZones };
+module.exports = { listZones, createZone, createZonesBulk, updateZone, deleteZone, reorderZones };
