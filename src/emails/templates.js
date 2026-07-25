@@ -208,8 +208,11 @@ function renderOrderConfirmation(order) {
       : '',
     showVat
       ? totalsRow(
-          order.vatInclusive ? `Includes VAT (${esc(Number(order.vatRatePercent))}%)` : `VAT (${esc(Number(order.vatRatePercent))}%)`,
-          order.vatInclusive ? esc(money(taxAmount, currency)) : `+ ${esc(money(taxAmount, currency))}`
+          // Inclusive VAT is already inside the line prices — show the plain
+          // "VAT Inclusive" label with no figure (a standalone extracted amount
+          // reads as a calculation error); exclusive VAT is added on top.
+          order.vatInclusive ? 'VAT Inclusive' : `VAT (${esc(Number(order.vatRatePercent))}%)`,
+          order.vatInclusive ? '' : `+ ${esc(money(taxAmount, currency))}`
         )
       : '',
     totalsRow('Shipping', shippingAmount > 0 ? esc(money(shippingAmount, currency)) : 'Free'),
