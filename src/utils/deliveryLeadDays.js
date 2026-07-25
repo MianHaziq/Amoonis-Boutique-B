@@ -9,8 +9,15 @@
  * summed — the longer of "courier transit" and "product prep" governs) at checkout
  * time to produce the customer-facing estimate for STANDARD orders (see order.service.js).
  *
- * Resolution chain (single source of truth — reuse this everywhere, never re-implement):
- *   resolvedLeadDays = product.deliveryLeadDays ?? category.deliveryLeadDays ?? settings.defaultDeliveryLeadDays
+ * Resolution chain (single source of truth — reuse this everywhere, never re-implement).
+ * Region overrides (ProductRegion/CategoryRegion.deliveryLeadDays) win within each
+ * entity tier; product intent still beats category intent overall:
+ *   resolvedLeadDays =
+ *     productRegion.deliveryLeadDays ?? product.deliveryLeadDays
+ *       ?? categoryRegion.deliveryLeadDays ?? category.deliveryLeadDays
+ *       ?? settings.defaultDeliveryLeadDays
+ * With no per-region overrides set (nulls) this reduces to the original
+ * product ?? category ?? default chain, so existing behaviour is unchanged.
  */
 const prisma = require('../config/db');
 
@@ -38,13 +45,24 @@ function parseDeliveryLeadDays(value) {
 }
 
 /**
- * The ONE resolution chain: product override wins, then category override, then the
- * global Settings default. Always returns a number (never null) — callers should have
- * already resolved `defaultLeadDays` via getDefaultDeliveryLeadDays() below so there's
- * always a fallback.
+ * The ONE resolution chain. Per-region overrides win within each tier, and product
+ * intent beats category intent overall:
+ *   productRegion ?? product ?? categoryRegion ?? category ?? default.
+ * Always returns a number (never null) — callers should have already resolved
+ * `defaultLeadDays` via getDefaultDeliveryLeadDays() so there's always a fallback.
+ * The region params default to null, so old callers get the original
+ * product ?? category ?? default behaviour unchanged.
  */
-function resolveDeliveryLeadDays({ productLeadDays = null, categoryLeadDays = null, defaultLeadDays = 1 } = {}) {
+function resolveDeliveryLeadDays({
+  productRegionLeadDays = null,
+  productLeadDays = null,
+  categoryRegionLeadDays = null,
+  categoryLeadDays = null,
+  defaultLeadDays = 1,
+} = {}) {
+  if (productRegionLeadDays != null) return productRegionLeadDays;
   if (productLeadDays != null) return productLeadDays;
+  if (categoryRegionLeadDays != null) return categoryRegionLeadDays;
   if (categoryLeadDays != null) return categoryLeadDays;
   return defaultLeadDays ?? 1;
 }

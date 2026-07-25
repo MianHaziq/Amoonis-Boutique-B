@@ -146,6 +146,10 @@ const createValidation = [
     .optional({ values: 'null' })
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('regionPrices[].discountedPrice must be between 0 and 99999999.99').bail()
     .custom(isTwoDecimals).withMessage('regionPrices[].discountedPrice supports at most 2 decimal places'),
+  // Per-region "ships within N days" override for this product. null clears it.
+  body('regionPrices.*.deliveryLeadDays')
+    .optional({ values: 'null' })
+    .isInt({ min: 0, max: 30 }).withMessage('regionPrices[].deliveryLeadDays must be a whole number between 0 and 30'),
   // Gift card add-on — free personalized message, toggled per product.
   body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
   body('giftCardExtraPrice')
@@ -237,6 +241,10 @@ const updateValidation = [
     .optional({ values: 'null' })
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('regionPrices[].discountedPrice must be between 0 and 99999999.99').bail()
     .custom(isTwoDecimals).withMessage('regionPrices[].discountedPrice supports at most 2 decimal places'),
+  // Per-region "ships within N days" override for this product. null clears it.
+  body('regionPrices.*.deliveryLeadDays')
+    .optional({ values: 'null' })
+    .isInt({ min: 0, max: 30 }).withMessage('regionPrices[].deliveryLeadDays must be a whole number between 0 and 30'),
   // Gift card add-on — free personalized message, toggled per product.
   body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
   body('giftCardExtraPrice')

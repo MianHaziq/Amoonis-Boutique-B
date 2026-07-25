@@ -101,6 +101,7 @@ model Region {
   orders        Order[]
   vatConfig     VatConfig?
   deliveryZones DeliveryZone[]
+  addresses     Address[]
 
   @@index([isActive])
   @@index([sortOrder])
@@ -138,6 +139,11 @@ model ProductRegion {
   regionId        String
   price           Decimal? @db.Decimal(10, 2)
   discountedPrice Decimal? @db.Decimal(10, 2)
+  // Per-region "ships within N days" PREP lead time for this product. Overrides
+  // the product's global Product.deliveryLeadDays in this region only. Null = no
+  // per-region override (falls through the chain). Distinct from
+  // Region.standardDeliveryDays (region-wide courier transit).
+  deliveryLeadDays Int?
   createdAt       DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -150,6 +156,10 @@ model ProductRegion {
 model CategoryRegion {
   categoryId String
   regionId   String
+  // Per-region "ships within N days" PREP lead time for this category. Overrides
+  // the category's global Category.deliveryLeadDays in this region, for products
+  // that don't set their own. Null = no per-region override.
+  deliveryLeadDays Int?
   createdAt  DateTime @default(now())
 
   category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
@@ -623,6 +633,12 @@ model Address {
   // as the primary location detail in the current checkout form.
   area           String?
   deliveryZoneId String?
+  // The region this address belongs to, captured at save time (from the chosen
+  // delivery zone's region, falling back to the active X-Region). Lets the
+  // storefront show/enable a saved address only while shopping in its region —
+  // an address saved in UAE isn't offered at checkout while the user is in KSA.
+  // Nullable + SetNull so a region delete never orphans the address row.
+  regionId       String?
   isDefault      Boolean  @default(false)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -630,10 +646,12 @@ model Address {
   user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   orders       Order[]
   deliveryZone DeliveryZone? @relation(fields: [deliveryZoneId], references: [id], onDelete: SetNull)
+  region       Region?       @relation(fields: [regionId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([userId, isDefault])
   @@index([deliveryZoneId])
+  @@index([regionId])
 }
 
 // ============================================

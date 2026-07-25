@@ -122,6 +122,7 @@ function mapProduct(product) {
         regionId: r.regionId,
         price: decimalToNumber(r.price),
         discountedPrice: decimalToNumber(r.discountedPrice),
+        deliveryLeadDays: r.deliveryLeadDays ?? null,
       }));
     } else {
       out._regionPriceRow = regions[0]
@@ -212,11 +213,45 @@ async function attachRatingAggregates(mappedProducts) {
  * utils/deliveryLeadDays.js), not once per product, so a page of 100 products costs at
  * most one Settings round trip, not 100.
  */
-async function attachResolvedDeliveryLeadDays(mappedProducts) {
+async function attachResolvedDeliveryLeadDays(mappedProducts, regionId = null) {
   const defaultLeadDays = await getDefaultDeliveryLeadDays();
+  if (!Array.isArray(mappedProducts) || mappedProducts.length === 0) return mappedProducts;
+
+  // Per-region overrides (only for a storefront/region-scoped read — admin passes
+  // null and gets the global chain). One batch query each for the whole page's
+  // products/categories, keyed by the requesting region. Products/categories with
+  // no override simply aren't in the maps → the chain falls through as before.
+  let productRegionLead = new Map();
+  let categoryRegionLead = new Map();
+  if (regionId) {
+    const productIds = [...new Set(mappedProducts.map((p) => p.id).filter(Boolean))];
+    const categoryIds = [
+      ...new Set(mappedProducts.map((p) => p.category?.id ?? p.categoryId).filter(Boolean)),
+    ];
+    const [prRows, crRows] = await Promise.all([
+      productIds.length
+        ? prisma.productRegion.findMany({
+            where: { regionId, productId: { in: productIds }, deliveryLeadDays: { not: null } },
+            select: { productId: true, deliveryLeadDays: true },
+          })
+        : [],
+      categoryIds.length
+        ? prisma.categoryRegion.findMany({
+            where: { regionId, categoryId: { in: categoryIds }, deliveryLeadDays: { not: null } },
+            select: { categoryId: true, deliveryLeadDays: true },
+          })
+        : [],
+    ]);
+    productRegionLead = new Map(prRows.map((r) => [r.productId, r.deliveryLeadDays]));
+    categoryRegionLead = new Map(crRows.map((r) => [r.categoryId, r.deliveryLeadDays]));
+  }
+
   for (const p of mappedProducts) {
+    const catId = p.category?.id ?? p.categoryId ?? null;
     p.resolvedDeliveryLeadDays = resolveDeliveryLeadDays({
+      productRegionLeadDays: productRegionLead.get(p.id) ?? null,
       productLeadDays: p.deliveryLeadDays,
+      categoryRegionLeadDays: catId ? categoryRegionLead.get(catId) ?? null : null,
       categoryLeadDays: p.category?.deliveryLeadDays ?? null,
       defaultLeadDays,
     });
@@ -379,7 +414,10 @@ function buildRegionPriceMap(regionPrices) {
       err.code = 'INVALID_PRICE';
       throw err;
     }
-    map.set(entry.regionId, { price, discountedPrice });
+    // Per-region "ships within N days" override (null = no override). Same validator
+    // as the global Product.deliveryLeadDays; throws VALIDATION on a bad value.
+    const deliveryLeadDays = parseDeliveryLeadDays(entry.deliveryLeadDays);
+    map.set(entry.regionId, { price, discountedPrice, deliveryLeadDays });
   }
   return map;
 }
@@ -451,7 +489,12 @@ async function createProduct(data) {
               regions: {
                 create: regionIds.map((regionId) => {
                   const rp = regionPriceMap.get(regionId);
-                  return { regionId, price: rp?.price ?? null, discountedPrice: rp?.discountedPrice ?? null };
+                  return {
+                    regionId,
+                    price: rp?.price ?? null,
+                    discountedPrice: rp?.discountedPrice ?? null,
+                    deliveryLeadDays: rp?.deliveryLeadDays ?? null,
+                  };
                 }),
               },
             }
@@ -556,10 +599,13 @@ async function updateProduct(id, data) {
   if (data.regionIds !== undefined || data.regionPrices !== undefined) {
     const existingRegionRows = await prisma.productRegion.findMany({
       where: { productId: id },
-      select: { regionId: true, price: true, discountedPrice: true },
+      select: { regionId: true, price: true, discountedPrice: true, deliveryLeadDays: true },
     });
     existingRegionPriceByRegionId = new Map(
-      existingRegionRows.map((r) => [r.regionId, { price: decimalToNumber(r.price), discountedPrice: decimalToNumber(r.discountedPrice) }])
+      existingRegionRows.map((r) => [
+        r.regionId,
+        { price: decimalToNumber(r.price), discountedPrice: decimalToNumber(r.discountedPrice), deliveryLeadDays: r.deliveryLeadDays ?? null },
+      ])
     );
     newRegionIds = data.regionIds !== undefined
       ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
@@ -686,7 +732,13 @@ async function updateProduct(id, data) {
             // region's existing price forward so an unrelated visibility/price edit for
             // another region doesn't silently null this one out.
             const rp = regionPriceMap.get(regionId) ?? existingRegionPriceByRegionId.get(regionId);
-            return { productId: id, regionId, price: rp?.price ?? null, discountedPrice: rp?.discountedPrice ?? null };
+            return {
+              productId: id,
+              regionId,
+              price: rp?.price ?? null,
+              discountedPrice: rp?.discountedPrice ?? null,
+              deliveryLeadDays: rp?.deliveryLeadDays ?? null,
+            };
           }),
           skipDuplicates: true,
         });
@@ -794,7 +846,7 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
 
   const mapped = items.map(mapProduct);
   await attachRatingAggregates(mapped);
-  await attachResolvedDeliveryLeadDays(mapped);
+  await attachResolvedDeliveryLeadDays(mapped, visibility.isStaff ? null : visibility.regionId);
   return {
     // Storefront-only: overlay the requesting region's currency (AED/SAR) so `price`/
     // `discountedPrice` are already correct for the region. Staff/admin keep raw fields.
@@ -930,7 +982,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
     products.sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
     items = products.map(mapProduct);
     await attachRatingAggregates(items);
-    await attachResolvedDeliveryLeadDays(items);
+    await attachResolvedDeliveryLeadDays(items, visibility.isStaff ? null : visibility.regionId);
   }
 
   return {
@@ -1004,7 +1056,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
 
   const mappedResults = items.map(mapProduct);
   await attachRatingAggregates(mappedResults);
-  await attachResolvedDeliveryLeadDays(mappedResults);
+  await attachResolvedDeliveryLeadDays(mappedResults, visibility.isStaff ? null : visibility.regionId);
   return {
     items: visibility.isStaff
       ? mappedResults
@@ -1031,7 +1083,7 @@ async function getProductById(id, visibility = {}) {
   if (!product) return null;
   const mapped = mapProduct(product);
   await attachRatingAggregates([mapped]);
-  await attachResolvedDeliveryLeadDays([mapped]);
+  await attachResolvedDeliveryLeadDays([mapped], visibility.isStaff ? null : visibility.regionId);
   return visibility.isStaff ? mapped : applyRegionCurrency(mapped);
 }
 

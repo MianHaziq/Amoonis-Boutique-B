@@ -43,8 +43,26 @@ function mapCategory(category) {
     const regionList = regions.map((r) => r.region).filter(Boolean);
     out.regions = regionList;
     out.regionIds = regionList.map((r) => r.id);
+    // Per-region "ships within N days" overrides, so the admin edit form can show
+    // and edit a different lead time per region. Additive alongside the tags.
+    out.regionLeadDays = regions.map((r) => ({
+      regionId: r.regionId,
+      deliveryLeadDays: r.deliveryLeadDays ?? null,
+    }));
   }
   return out;
+}
+
+/** Index an incoming `regionLeadDays: {regionId, deliveryLeadDays}[]` payload,
+ *  validating each value (throws VALIDATION on a bad number). */
+function buildCategoryRegionLeadMap(regionLeadDays) {
+  const map = new Map();
+  if (!Array.isArray(regionLeadDays)) return map;
+  for (const entry of regionLeadDays) {
+    if (!entry || typeof entry.regionId !== 'string' || !entry.regionId) continue;
+    map.set(entry.regionId, parseDeliveryLeadDays(entry.deliveryLeadDays));
+  }
+  return map;
 }
 
 async function createCategory(data) {
@@ -54,6 +72,8 @@ async function createCategory(data) {
   // category that doesn't set its own Product.deliveryLeadDays. null/undefined -> no
   // override (falls through to the global default).
   const deliveryLeadDays = parseDeliveryLeadDays(data.deliveryLeadDays);
+  // Optional PER-REGION lead-day overrides (same lead time can differ by region).
+  const regionLeadMap = buildCategoryRegionLeadMap(data.regionLeadDays);
 
   const draft = {
     title: data.title ?? null,
@@ -75,7 +95,14 @@ async function createCategory(data) {
       status,
       deliveryLeadDays,
       ...(regionIds.length > 0
-        ? { regions: { create: regionIds.map((regionId) => ({ regionId })) } }
+        ? {
+            regions: {
+              create: regionIds.map((regionId) => ({
+                regionId,
+                deliveryLeadDays: regionLeadMap.get(regionId) ?? null,
+              })),
+            },
+          }
         : {}),
     },
     include: { ...REGION_INCLUDE, _count: { select: { products: true } } },
@@ -95,6 +122,21 @@ async function updateCategory(id, data) {
   const newRegionIds = data.regionIds !== undefined
     ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
     : null;
+  const regionLeadMap = buildCategoryRegionLeadMap(data.regionLeadDays);
+  // Rewrite the CategoryRegion rows when EITHER the region set OR the per-region lead
+  // days changed. Existing rows are read up front so regions left out of the incoming
+  // payload keep their current lead days (an edit to one region mustn't null the rest).
+  const wantRegionRewrite = data.regionIds !== undefined || data.regionLeadDays !== undefined;
+  let existingCatRegionLead = new Map();
+  let existingCatRegionIds = [];
+  if (wantRegionRewrite) {
+    const rows = await prisma.categoryRegion.findMany({
+      where: { categoryId: id },
+      select: { regionId: true, deliveryLeadDays: true },
+    });
+    existingCatRegionLead = new Map(rows.map((r) => [r.regionId, r.deliveryLeadDays ?? null]));
+    existingCatRegionIds = rows.map((r) => r.regionId);
+  }
 
   // Fetch existing status so a malformed status string falls back to the current
   // value instead of silently resetting the category to DRAFT.
@@ -117,11 +159,21 @@ async function updateCategory(id, data) {
         ...(data.deliveryLeadDays !== undefined && { deliveryLeadDays: parseDeliveryLeadDays(data.deliveryLeadDays) }),
       },
     });
-    if (newRegionIds !== null) {
+    if (wantRegionRewrite) {
+      // Explicit regionIds when sent, else keep the current region set (a
+      // lead-days-only edit shouldn't change which regions the category is in).
+      const targetRegionIds = newRegionIds !== null ? newRegionIds : existingCatRegionIds;
       await tx.categoryRegion.deleteMany({ where: { categoryId: id } });
-      if (newRegionIds.length > 0) {
+      if (targetRegionIds.length > 0) {
         await tx.categoryRegion.createMany({
-          data: newRegionIds.map((regionId) => ({ categoryId: id, regionId })),
+          data: targetRegionIds.map((regionId) => ({
+            categoryId: id,
+            regionId,
+            // Incoming per-region lead wins (even null = clear); else carry existing forward.
+            deliveryLeadDays: regionLeadMap.has(regionId)
+              ? regionLeadMap.get(regionId)
+              : existingCatRegionLead.get(regionId) ?? null,
+          })),
           skipDuplicates: true,
         });
       }
@@ -202,7 +254,7 @@ async function getCategoryById(id, includeProducts = false, visibility = {}) {
     // Same resolved lead-time field the storefront product endpoints expose (see
     // product.service.js's attachResolvedDeliveryLeadDays) — this nested list is
     // consumed the same way (e.g. GET /categories/:id), so it must carry it too.
-    await productService.attachResolvedDeliveryLeadDays(mapped.products);
+    await productService.attachResolvedDeliveryLeadDays(mapped.products, isStaff ? null : visibility.regionId);
   }
   return mapped;
 }
