@@ -150,6 +150,12 @@ const createValidation = [
   body('regionPrices.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('regionPrices[].deliveryLeadDays must be a whole number between 0 and 30'),
+  // Per-delivery-zone "ships within N days" override (highest precedence). null clears it.
+  body('zoneLeadDays').optional().isArray().withMessage('zoneLeadDays must be an array'),
+  body('zoneLeadDays.*.zoneId').isString().trim().notEmpty().withMessage('zoneLeadDays[].zoneId is required'),
+  body('zoneLeadDays.*.deliveryLeadDays')
+    .optional({ values: 'null' })
+    .isInt({ min: 0, max: 30 }).withMessage('zoneLeadDays[].deliveryLeadDays must be a whole number between 0 and 30'),
   // Gift card add-on — free personalized message, toggled per product.
   body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
   body('giftCardExtraPrice')
@@ -245,6 +251,12 @@ const updateValidation = [
   body('regionPrices.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('regionPrices[].deliveryLeadDays must be a whole number between 0 and 30'),
+  // Per-delivery-zone "ships within N days" override (highest precedence). null clears it.
+  body('zoneLeadDays').optional().isArray().withMessage('zoneLeadDays must be an array'),
+  body('zoneLeadDays.*.zoneId').isString().trim().notEmpty().withMessage('zoneLeadDays[].zoneId is required'),
+  body('zoneLeadDays.*.deliveryLeadDays')
+    .optional({ values: 'null' })
+    .isInt({ min: 0, max: 30 }).withMessage('zoneLeadDays[].deliveryLeadDays must be a whole number between 0 and 30'),
   // Gift card add-on — free personalized message, toggled per product.
   body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
   body('giftCardExtraPrice')

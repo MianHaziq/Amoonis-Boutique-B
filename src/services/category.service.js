@@ -14,6 +14,7 @@ const CATEGORY_REQUIRED_PAIRS = [{ src: 'title', dst: 'title_ar' }];
 
 const REGION_INCLUDE = {
   regions: { include: { region: { select: { id: true, code: true, name: true, name_ar: true } } } },
+  zoneLeadDays: { select: { zoneId: true, deliveryLeadDays: true } },
 };
 
 function normalizeStatus(value, fallback = 'DRAFT') {
@@ -33,7 +34,7 @@ async function resolveWriteRegionIds(regionIds) {
 /** Shape a category row (with regions/_count includes) for API output. */
 function mapCategory(category) {
   if (!category) return null;
-  const { regions, _count, ...rest } = category;
+  const { regions, zoneLeadDays, _count, ...rest } = category;
   const out = {
     ...rest,
     totalProducts: _count?.products ?? rest.totalProducts,
@@ -48,6 +49,11 @@ function mapCategory(category) {
     out.regionLeadDays = regions.map((r) => ({
       regionId: r.regionId,
       deliveryLeadDays: r.deliveryLeadDays ?? null,
+    }));
+    // Per-zone lead overrides (highest precedence), for the admin edit form.
+    out.zoneLeadDays = (zoneLeadDays ?? []).map((z) => ({
+      zoneId: z.zoneId,
+      deliveryLeadDays: z.deliveryLeadDays ?? null,
     }));
   }
   return out;
@@ -65,6 +71,23 @@ function buildCategoryRegionLeadMap(regionLeadDays) {
   return map;
 }
 
+/** Clean a `zoneLeadDays: [{ zoneId, deliveryLeadDays }]` payload into CategoryZone rows,
+ *  keeping only entries with a real (non-null) override. */
+function buildCategoryZoneLeadRows(zoneLeadDays) {
+  if (!Array.isArray(zoneLeadDays)) return [];
+  const rows = [];
+  const seen = new Set();
+  for (const entry of zoneLeadDays) {
+    if (!entry || typeof entry.zoneId !== 'string' || !entry.zoneId) continue;
+    if (seen.has(entry.zoneId)) continue;
+    const lead = parseDeliveryLeadDays(entry.deliveryLeadDays);
+    if (lead == null) continue;
+    seen.add(entry.zoneId);
+    rows.push({ zoneId: entry.zoneId, deliveryLeadDays: lead });
+  }
+  return rows;
+}
+
 async function createCategory(data) {
   const status = normalizeStatus(data.status);
   const regionIds = await resolveWriteRegionIds(data.regionIds);
@@ -74,6 +97,8 @@ async function createCategory(data) {
   const deliveryLeadDays = parseDeliveryLeadDays(data.deliveryLeadDays);
   // Optional PER-REGION lead-day overrides (same lead time can differ by region).
   const regionLeadMap = buildCategoryRegionLeadMap(data.regionLeadDays);
+  // Optional PER-ZONE lead-day overrides (highest precedence).
+  const zoneLeadRows = buildCategoryZoneLeadRows(data.zoneLeadDays);
 
   const draft = {
     title: data.title ?? null,
@@ -104,6 +129,7 @@ async function createCategory(data) {
             },
           }
         : {}),
+      ...(zoneLeadRows.length > 0 ? { zoneLeadDays: { create: zoneLeadRows } } : {}),
     },
     include: { ...REGION_INCLUDE, _count: { select: { products: true } } },
   });
@@ -123,6 +149,8 @@ async function updateCategory(id, data) {
     ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
     : null;
   const regionLeadMap = buildCategoryRegionLeadMap(data.regionLeadDays);
+  // Per-zone lead overrides: null = key absent (leave untouched); array = full replace.
+  const zoneLeadRows = data.zoneLeadDays !== undefined ? buildCategoryZoneLeadRows(data.zoneLeadDays) : null;
   // Rewrite the CategoryRegion rows when EITHER the region set OR the per-region lead
   // days changed. Existing rows are read up front so regions left out of the incoming
   // payload keep their current lead days (an edit to one region mustn't null the rest).
@@ -174,6 +202,16 @@ async function updateCategory(id, data) {
               ? regionLeadMap.get(regionId)
               : existingCatRegionLead.get(regionId) ?? null,
           })),
+          skipDuplicates: true,
+        });
+      }
+    }
+    // Per-zone lead overrides: full replace when the key was sent.
+    if (zoneLeadRows !== null) {
+      await tx.categoryZone.deleteMany({ where: { categoryId: id } });
+      if (zoneLeadRows.length > 0) {
+        await tx.categoryZone.createMany({
+          data: zoneLeadRows.map((z) => ({ categoryId: id, ...z })),
           skipDuplicates: true,
         });
       }

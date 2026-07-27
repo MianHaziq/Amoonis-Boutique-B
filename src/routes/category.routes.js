@@ -26,6 +26,12 @@ const regionStatusValidation = [
   body('regionLeadDays.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('regionLeadDays[].deliveryLeadDays must be a whole number between 0 and 30'),
+  // Per-delivery-zone lead-day overrides (highest precedence). Each { zoneId, deliveryLeadDays }.
+  body('zoneLeadDays').optional().isArray().withMessage('zoneLeadDays must be an array'),
+  body('zoneLeadDays.*.zoneId').isString().trim().notEmpty().withMessage('zoneLeadDays[].zoneId is required'),
+  body('zoneLeadDays.*.deliveryLeadDays')
+    .optional({ values: 'null' })
+    .isInt({ min: 0, max: 30 }).withMessage('zoneLeadDays[].deliveryLeadDays must be a whole number between 0 and 30'),
 ];
 
 /**

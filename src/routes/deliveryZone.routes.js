@@ -16,12 +16,29 @@ const { publicLimiter } = require('../middleware/rateLimit');
 
 const listValidation = [query('region').optional().isString().trim()];
 
+// Per-zone delivery overrides — shared by create and update (all optional; null/[] =
+// inherit region). Authoritative parsing is in deliveryZone.service.js.
+const zoneConfigValidation = [
+  body('shippingFlatRate').optional({ nullable: true }).isFloat({ min: 0 }),
+  body('freeDeliveryThreshold').optional({ nullable: true }).isFloat({ min: 0 }),
+  body('sameDayEnabled').optional({ nullable: true }).isBoolean(),
+  body('sameDayCutoff').optional({ nullable: true }).matches(/^([01]?\d|2[0-3]):[0-5]\d$/)
+    .withMessage('sameDayCutoff must be a 24h time "HH:mm"'),
+  body('standardLeadDays').optional({ nullable: true }).isInt({ min: 0, max: 90 }),
+  body('deliveryDays').optional({ nullable: true }).isArray(),
+  body('deliveryDays.*').optional().isInt({ min: 0, max: 6 }),
+  body('codEnabled').optional({ nullable: true }).isBoolean(),
+  body('minOrderAmount').optional({ nullable: true }).isFloat({ min: 0 }),
+  body('maxOrderAmount').optional({ nullable: true }).isFloat({ min: 0 }),
+];
+
 const createValidation = [
   body('regionId').isUUID().withMessage('Valid regionId is required'),
   body('name').isString().trim().notEmpty().withMessage('name is required'),
-  body('name_ar').optional().isString().trim(),
+  body('name_ar').optional({ nullable: true }).isString().trim(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),
+  ...zoneConfigValidation,
 ];
 
 const bulkCreateValidation = [
@@ -36,9 +53,10 @@ const updateValidation = [
   param('id').isUUID().withMessage('Valid zone ID required'),
   body('regionId').optional().isUUID(),
   body('name').optional().isString().trim().notEmpty(),
-  body('name_ar').optional().isString().trim(),
+  body('name_ar').optional({ nullable: true }).isString().trim(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),
+  ...zoneConfigValidation,
 ];
 
 const idParam = [param('id').isUUID().withMessage('Valid zone ID required')];

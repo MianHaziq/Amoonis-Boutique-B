@@ -7,6 +7,14 @@
  * invalidates the cache so a new/edited/removed region propagates within the request.
  */
 const prisma = require('../config/db');
+const {
+  parseMoneyOrNull,
+  parseDeliveryDays,
+  parseBool,
+  parseHHmmOrNull,
+  parseTimezone,
+  parseBlackoutDates,
+} = require('../utils/deliveryConfigParse');
 
 const CACHE_TTL_MS = 60 * 1000;
 let cache = { fetchedAt: 0, all: [], byCode: new Map(), byId: new Map(), defaultRegion: null };
@@ -23,6 +31,13 @@ const REGION_SELECT = {
   legalEntity: true,
   shippingFlatRate: true,
   standardDeliveryDays: true,
+  // city-level delivery config
+  timezone: true,
+  freeDeliveryThreshold: true,
+  deliveryDays: true,
+  sameDayEnabled: true,
+  sameDayCutoff: true,
+  codEnabled: true,
   iso2: true,
   contactEmail: true,
   contactPhone: true,
@@ -52,9 +67,35 @@ const REGION_SELECT = {
   isDefault: true,
   isActive: true,
   sortOrder: true,
+  blackoutDates: {
+    select: { id: true, date: true, label: true, label_ar: true },
+    orderBy: { date: 'asc' },
+  },
   createdAt: true,
   updatedAt: true,
 };
+
+/**
+ * Build the Prisma payload for the city-level delivery config fields. `partial` (update)
+ * only sets keys the caller sent. Blackout dates are handled separately (nested write).
+ */
+function buildRegionDeliveryConfigPayload(data, { partial = false } = {}) {
+  const payload = {};
+  const set = (key, present, value) => {
+    if (!partial || present) payload[key] = value;
+  };
+  set('timezone', data.timezone !== undefined, parseTimezone(data.timezone));
+  set('freeDeliveryThreshold', data.freeDeliveryThreshold !== undefined, parseMoneyOrNull(data.freeDeliveryThreshold, 'freeDeliveryThreshold'));
+  set('deliveryDays', data.deliveryDays !== undefined, parseDeliveryDays(data.deliveryDays));
+  // sameDayEnabled/codEnabled are NON-nullable region columns. On a partial update a stray
+  // `null` (e.g. a shared form echoing an unset value) must mean "leave unchanged", NOT
+  // "reset to default" — so gate on `!= null`, not `!== undefined`. (On create, !partial
+  // still applies the default.)
+  set('sameDayEnabled', data.sameDayEnabled != null, parseBool(data.sameDayEnabled, false));
+  set('sameDayCutoff', data.sameDayCutoff !== undefined, parseHHmmOrNull(data.sameDayCutoff, 'sameDayCutoff'));
+  set('codEnabled', data.codEnabled != null, parseBool(data.codEnabled, true));
+  return payload;
+}
 
 function normalizeCode(code) {
   return String(code ?? '').trim().toUpperCase();
@@ -247,6 +288,7 @@ async function createRegion(data) {
   const name = String(data.name ?? '').trim();
   if (!name) throw Object.assign(new Error('Region name is required'), { code: 'VALIDATION' });
   assertLegalFieldsComplete(data);
+  const blackoutRows = parseBlackoutDates(data.blackoutDates);
 
   const region = await prisma.$transaction(async (tx) => {
     const makeDefault = data.isDefault === true;
@@ -271,6 +313,8 @@ async function createRegion(data) {
         hours: trimOrNull(data.hours),
         hours_ar: trimOrNull(data.hours_ar),
         ...buildLegalFieldsPayload(data),
+        ...buildRegionDeliveryConfigPayload(data, { partial: false }),
+        ...(blackoutRows.length ? { blackoutDates: { create: blackoutRows } } : {}),
         isDefault: makeDefault,
         isActive: data.isActive === undefined ? true : !!data.isActive,
         sortOrder: data.sortOrder != null ? Number(data.sortOrder) : 0,
@@ -353,8 +397,14 @@ async function updateRegion(id, data) {
   if (data.hours !== undefined) payload.hours = trimOrNull(data.hours);
   if (data.hours_ar !== undefined) payload.hours_ar = trimOrNull(data.hours_ar);
   Object.assign(payload, buildLegalFieldsPayload(data, { onlyDefined: true }));
+  Object.assign(payload, buildRegionDeliveryConfigPayload(data, { partial: true }));
   if (data.isActive !== undefined) payload.isActive = !!data.isActive;
   if (data.sortOrder !== undefined) payload.sortOrder = Number(data.sortOrder);
+
+  // Blackout dates are a full-replace when the `blackoutDates` key is present; parsed up
+  // front so a validation error rejects before the transaction opens.
+  const replaceBlackouts = data.blackoutDates !== undefined;
+  const blackoutRows = replaceBlackouts ? parseBlackoutDates(data.blackoutDates) : null;
 
   const nextActive = data.isActive !== undefined ? !!data.isActive : existing.isActive;
   const isDeactivating = existing.isActive && !nextActive;
@@ -426,6 +476,14 @@ async function updateRegion(id, data) {
       }
     }
 
+    if (replaceBlackouts) {
+      await tx.deliveryBlackoutDate.deleteMany({ where: { regionId: id } });
+      if (blackoutRows.length) {
+        await tx.deliveryBlackoutDate.createMany({
+          data: blackoutRows.map((b) => ({ ...b, regionId: id })),
+        });
+      }
+    }
     return tx.region.update({ where: { id }, data: payload, select: REGION_SELECT });
   });
   invalidateCache();

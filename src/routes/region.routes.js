@@ -37,10 +37,33 @@ const legalFieldsOptionalValidation = LEGAL_FIELD_BASE_NAMES.flatMap((f) => [
   body(`${f}_ar`).optional({ nullable: true }).isString().trim(),
 ]);
 
+// City-level delivery config — shared by create and update (all optional). The service
+// (region.service.js) does the authoritative parsing/normalisation; these give clean 400s.
+const deliveryConfigValidation = [
+  body('timezone').optional({ nullable: true }).isString().trim().notEmpty()
+    .withMessage('timezone must be a non-empty IANA timezone string'),
+  body('freeDeliveryThreshold').optional({ nullable: true }).isFloat({ min: 0 })
+    .withMessage('freeDeliveryThreshold must be a non-negative number'),
+  body('deliveryDays').optional({ nullable: true }).isArray()
+    .withMessage('deliveryDays must be an array of weekday numbers (0-6)'),
+  body('deliveryDays.*').optional().isInt({ min: 0, max: 6 })
+    .withMessage('deliveryDays entries must be integers 0 (Sun) to 6 (Sat)'),
+  body('sameDayEnabled').optional({ nullable: true }).isBoolean(),
+  body('sameDayCutoff').optional({ nullable: true }).matches(/^([01]?\d|2[0-3]):[0-5]\d$/)
+    .withMessage('sameDayCutoff must be a 24h time "HH:mm"'),
+  body('codEnabled').optional({ nullable: true }).isBoolean(),
+  body('blackoutDates').optional({ nullable: true }).isArray()
+    .withMessage('blackoutDates must be an array'),
+  body('blackoutDates.*.date').optional().matches(/^\d{4}-\d{2}-\d{2}$/)
+    .withMessage('each blackout date must be "YYYY-MM-DD"'),
+  body('blackoutDates.*.label').optional({ nullable: true }).isString().trim(),
+  body('blackoutDates.*.label_ar').optional({ nullable: true }).isString().trim(),
+];
+
 const createValidation = [
   body('code').isString().trim().notEmpty().withMessage('code is required (e.g. UAE, SA)'),
   body('name').isString().trim().notEmpty().withMessage('name is required'),
-  body('name_ar').optional().isString().trim(),
+  body('name_ar').optional({ nullable: true }).isString().trim(),
   body('currency').optional().isString().trim().isLength({ min: 3, max: 3 })
     .withMessage('currency must be a 3-letter ISO code (e.g. AED, SAR)'),
   body('legalEntity').optional({ nullable: true }).isString().trim().isLength({ max: 200 })
@@ -52,6 +75,7 @@ const createValidation = [
   body('iso2').optional({ nullable: true }).isString().trim().isLength({ min: 2, max: 2 })
     .withMessage('iso2 must be a 2-letter country code (e.g. AE, SA)'),
   ...legalFieldsRequiredValidation,
+  ...deliveryConfigValidation,
   body('isDefault').optional().isBoolean(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),
@@ -61,7 +85,7 @@ const updateValidation = [
   param('id').isUUID().withMessage('Valid region ID required'),
   body('code').optional().isString().trim().notEmpty(),
   body('name').optional().isString().trim().notEmpty(),
-  body('name_ar').optional().isString().trim(),
+  body('name_ar').optional({ nullable: true }).isString().trim(),
   body('currency').optional().isString().trim().isLength({ min: 3, max: 3 })
     .withMessage('currency must be a 3-letter ISO code (e.g. AED, SAR)'),
   body('legalEntity').optional({ nullable: true }).isString().trim().isLength({ max: 200 })
@@ -73,6 +97,7 @@ const updateValidation = [
   body('iso2').optional({ nullable: true }).isString().trim().isLength({ min: 2, max: 2 })
     .withMessage('iso2 must be a 2-letter country code (e.g. AE, SA)'),
   ...legalFieldsOptionalValidation,
+  ...deliveryConfigValidation,
   body('isDefault').optional().isBoolean(),
   body('isActive').optional().isBoolean(),
   body('sortOrder').optional().isInt(),

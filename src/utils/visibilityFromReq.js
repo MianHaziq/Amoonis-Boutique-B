@@ -49,6 +49,12 @@ async function visibilityFromReq(req) {
     // once here so every list/detail endpoint gets it for free via `visibility`.
     const region = await regionService.getRegionById(regionId);
     opts.currency = region?.currency || 'AED';
+    // Optional selected delivery zone (?zoneId=) — lets the storefront resolve a
+    // zone-accurate delivery-days estimate (zone override / zone standard) on browse.
+    // Validated in product.service against the region; a stale/foreign id just falls back
+    // to region-level resolution. Never used to filter visibility, only for the estimate.
+    const zoneId = req.query?.zoneId ? String(req.query.zoneId).trim() : null;
+    if (zoneId) opts.zoneId = zoneId;
   }
 
   return opts;

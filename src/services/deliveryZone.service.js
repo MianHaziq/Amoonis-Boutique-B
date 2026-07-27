@@ -6,6 +6,14 @@
  * concepts a zone doesn't have.
  */
 const prisma = require('../config/db');
+const {
+  parseMoneyOrNull,
+  parseWholeDaysOrNull,
+  parseDeliveryDays,
+  parseNullableBool,
+  parseHHmmOrNull,
+  assertMinMaxOrder,
+} = require('../utils/deliveryConfigParse');
 
 const ZONE_SELECT = {
   id: true,
@@ -14,9 +22,44 @@ const ZONE_SELECT = {
   name_ar: true,
   isActive: true,
   sortOrder: true,
+  // per-zone delivery overrides (null / [] = inherit region)
+  shippingFlatRate: true,
+  freeDeliveryThreshold: true,
+  sameDayEnabled: true,
+  sameDayCutoff: true,
+  standardLeadDays: true,
+  deliveryDays: true,
+  codEnabled: true,
+  minOrderAmount: true,
+  maxOrderAmount: true,
   createdAt: true,
   updatedAt: true,
 };
+
+/**
+ * Build the Prisma payload for the per-zone delivery override fields from a request body.
+ * `partial` (update) only sets keys the caller actually sent; create sets all with the
+ * inherit-defaults. Time slots are handled separately (nested write) by the caller.
+ */
+function buildZoneConfigPayload(data, { partial = false } = {}) {
+  const payload = {};
+  const set = (key, present, value) => {
+    if (!partial || present) payload[key] = value;
+  };
+  set('shippingFlatRate', data.shippingFlatRate !== undefined, parseMoneyOrNull(data.shippingFlatRate, 'shippingFlatRate'));
+  set('freeDeliveryThreshold', data.freeDeliveryThreshold !== undefined, parseMoneyOrNull(data.freeDeliveryThreshold, 'freeDeliveryThreshold'));
+  set('sameDayEnabled', data.sameDayEnabled !== undefined, parseNullableBool(data.sameDayEnabled));
+  set('sameDayCutoff', data.sameDayCutoff !== undefined, parseHHmmOrNull(data.sameDayCutoff, 'sameDayCutoff'));
+  set('standardLeadDays', data.standardLeadDays !== undefined, parseWholeDaysOrNull(data.standardLeadDays, 'standardLeadDays'));
+  set('deliveryDays', data.deliveryDays !== undefined, parseDeliveryDays(data.deliveryDays));
+  set('codEnabled', data.codEnabled !== undefined, parseNullableBool(data.codEnabled));
+  const min = parseMoneyOrNull(data.minOrderAmount, 'minOrderAmount');
+  const max = parseMoneyOrNull(data.maxOrderAmount, 'maxOrderAmount');
+  assertMinMaxOrder(min, max);
+  set('minOrderAmount', data.minOrderAmount !== undefined, min);
+  set('maxOrderAmount', data.maxOrderAmount !== undefined, max);
+  return payload;
+}
 
 async function getZoneById(id) {
   if (!id) return null;
@@ -84,6 +127,7 @@ async function createZone(data) {
       isActive: data.isActive === undefined ? true : !!data.isActive,
       // sortOrder is automatic (append) unless an explicit value is passed.
       sortOrder: data.sortOrder != null ? Number(data.sortOrder) : await nextSortOrder(regionId),
+      ...buildZoneConfigPayload(data, { partial: false }),
     },
     select: ZONE_SELECT,
   });
@@ -160,6 +204,18 @@ async function updateZone(id, data) {
   if (data.name_ar !== undefined) payload.name_ar = data.name_ar ? String(data.name_ar).trim() || null : null;
   if (data.isActive !== undefined) payload.isActive = !!data.isActive;
   if (data.sortOrder !== undefined) payload.sortOrder = Number(data.sortOrder);
+  Object.assign(payload, buildZoneConfigPayload(data, { partial: true }));
+
+  // Re-assert min <= max against the MERGED state (incoming value if sent, else the stored
+  // one) — a partial update that only sends one side must not create an impossible bound
+  // (e.g. lowering max below an existing min, which would reject every order to the zone).
+  const effMin = payload.minOrderAmount !== undefined
+    ? payload.minOrderAmount
+    : (existing.minOrderAmount != null ? Number(existing.minOrderAmount) : null);
+  const effMax = payload.maxOrderAmount !== undefined
+    ? payload.maxOrderAmount
+    : (existing.maxOrderAmount != null ? Number(existing.maxOrderAmount) : null);
+  assertMinMaxOrder(effMin, effMax);
 
   return prisma.deliveryZone.update({ where: { id }, data: payload, select: ZONE_SELECT });
 }

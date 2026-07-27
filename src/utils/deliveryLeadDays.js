@@ -1,23 +1,22 @@
 /**
- * Shared "ships within N day(s)" PREP/BOOKING lead-time helpers, used by Settings,
- * Category, Product (admin CRUD + public serialization) and Order creation.
+ * Shared "delivery days" resolution — the SINGLE source of truth for how many days a
+ * product takes to arrive. Used by Settings, Category, Product (admin CRUD + public
+ * serialization) and Order creation. Reuse `resolveDeliveryLeadDays` everywhere; never
+ * re-implement the precedence.
  *
- * This is a DIFFERENT concept from Region.standardDeliveryDays (courier/regional
- * transit time — see region.service.js's parseStandardDeliveryDays). This one is how
- * long the PRODUCT ITSELF takes to prepare/book before it can even ship (e.g. flowers
- * need 2 days prep, gift boxes need 1 day). The two are combined via Math.max (not
- * summed — the longer of "courier transit" and "product prep" governs) at checkout
- * time to produce the customer-facing estimate for STANDARD orders (see order.service.js).
+ * MODEL (deliberate, see resolveDeliveryLeadDays below): ONE unified fallback chain, most
+ * specific wins, and a product/category delivery time FULLY OVERRIDES the area's standard
+ * lead — even when smaller. It is NOT max'd with a separate courier-transit number. The
+ * area "standard" (DeliveryZone.standardLeadDays, then Region.standardDeliveryDays) is just
+ * the default delivery time used when no product/category value applies. Precedence:
+ *   productZone ?? productRegion ?? product
+ *     ?? categoryZone ?? categoryRegion ?? category
+ *     ?? zoneStandard ?? regionStandard
+ *     ?? settings.defaultDeliveryLeadDays
  *
- * Resolution chain (single source of truth — reuse this everywhere, never re-implement).
- * Region overrides (ProductRegion/CategoryRegion.deliveryLeadDays) win within each
- * entity tier; product intent still beats category intent overall:
- *   resolvedLeadDays =
- *     productRegion.deliveryLeadDays ?? product.deliveryLeadDays
- *       ?? categoryRegion.deliveryLeadDays ?? category.deliveryLeadDays
- *       ?? settings.defaultDeliveryLeadDays
- * With no per-region overrides set (nulls) this reduces to the original
- * product ?? category ?? default chain, so existing behaviour is unchanged.
+ * (Historical note: an earlier version treated this purely as PREP time and did
+ * `max(prep, region.standardDeliveryDays)` at checkout. That max is GONE — do not restore
+ * it; the override-wins behavior above is intentional.)
  */
 const prisma = require('../config/db');
 
@@ -45,25 +44,39 @@ function parseDeliveryLeadDays(value) {
 }
 
 /**
- * The ONE resolution chain. Per-region overrides win within each tier, and product
- * intent beats category intent overall:
- *   productRegion ?? product ?? categoryRegion ?? category ?? default.
- * Always returns a number (never null) — callers should have already resolved
- * `defaultLeadDays` via getDefaultDeliveryLeadDays() so there's always a fallback.
- * The region params default to null, so old callers get the original
- * product ?? category ?? default behaviour unchanged.
+ * The ONE unified delivery-days resolution chain. The MOST SPECIFIC setting wins, and a
+ * specific product/category "delivery time" fully OVERRIDES the area's standard lead (even
+ * if smaller) — this is a deliberate business rule (a product/category delivery time IS its
+ * promised time, not merely prep to be max'd with transit). Precedence, highest → lowest:
+ *   productZone ?? productRegion ?? product
+ *     ?? categoryZone ?? categoryRegion ?? category
+ *     ?? zoneStandard ?? regionStandard
+ *     ?? default
+ * Always returns a number (never null): callers resolve `defaultLeadDays` via
+ * getDefaultDeliveryLeadDays() as the final floor. Every param defaults to null, so a caller
+ * that doesn't know a zone (or region) simply skips those tiers. `zoneStandardLeadDays` is
+ * DeliveryZone.standardLeadDays and `regionStandardLeadDays` is Region.standardDeliveryDays —
+ * the area's default delivery time, used only when no product/category override applies.
  */
 function resolveDeliveryLeadDays({
+  productZoneLeadDays = null,
   productRegionLeadDays = null,
   productLeadDays = null,
+  categoryZoneLeadDays = null,
   categoryRegionLeadDays = null,
   categoryLeadDays = null,
+  zoneStandardLeadDays = null,
+  regionStandardLeadDays = null,
   defaultLeadDays = 1,
 } = {}) {
+  if (productZoneLeadDays != null) return productZoneLeadDays;
   if (productRegionLeadDays != null) return productRegionLeadDays;
   if (productLeadDays != null) return productLeadDays;
+  if (categoryZoneLeadDays != null) return categoryZoneLeadDays;
   if (categoryRegionLeadDays != null) return categoryRegionLeadDays;
   if (categoryLeadDays != null) return categoryLeadDays;
+  if (zoneStandardLeadDays != null) return zoneStandardLeadDays;
+  if (regionStandardLeadDays != null) return regionStandardLeadDays;
   return defaultLeadDays ?? 1;
 }
 

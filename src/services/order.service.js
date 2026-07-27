@@ -9,6 +9,15 @@ const deliveryZoneService = require('../services/deliveryZone.service');
 const productService = require('../services/product.service');
 const vatService = require('../services/vat.service');
 const { resolveDeliveryLeadDays, getDefaultDeliveryLeadDays } = require('../utils/deliveryLeadDays');
+const { resolveDeliveryConfig, isDeliverableDay, nextDeliverableKey } = require('../services/deliveryConfig.service');
+const {
+  dateKeyInTz,
+  addDaysToKey,
+  daysBetweenKeys,
+  isValidDateKey,
+  parseHHmm,
+  nowMinutesInTz,
+} = require('../utils/businessTime');
 
 function decimalToNumber(v) {
   return v == null ? null : Number(v);
@@ -116,9 +125,14 @@ function toOrderResponsePayload(order) {
     deliveryType: order.deliveryType ?? 'STANDARD',
     // Only set for SCHEDULED orders.
     scheduledDeliveryAt: order.scheduledDeliveryAt ?? null,
-    // Snapshot of the region's standard delivery days at checkout time, only set for
-    // STANDARD orders. Null for legacy orders placed before this feature existed.
+    // True when this SCHEDULED order was placed for same-day delivery.
+    isSameDayDelivery: Boolean(order.isSameDayDelivery),
+    // Snapshot of the resolved (zone-or-region) standard delivery days at checkout time,
+    // only set for STANDARD orders. Null for legacy orders placed before this feature.
     estimatedDeliveryDays: order.estimatedDeliveryDays ?? null,
+    // Concrete resolved STANDARD arrival date ("YYYY-MM-DD", region tz) — display directly
+    // (no tz drift). Null for SCHEDULED / legacy orders.
+    estimatedDeliveryDate: order.estimatedDeliveryDate ?? null,
     // Pre-VAT, pre-discount line sum (null for legacy orders placed before VAT).
     subtotalAmount: decimalToNumber(order.subtotalAmount),
     // Total VAT. For EXCLUSIVE VAT this is included in totalAmount; for INCLUSIVE VAT it's
@@ -165,66 +179,56 @@ function toOrderResponsePayload(order) {
 const VALID_PAYMENT_METHODS = ['COD', 'MYFATOORAH'];
 
 const VALID_DELIVERY_TYPES = ['STANDARD', 'SCHEDULED'];
-// A Scheduled Delivery date/time must be at least this many days out (blocks same-day
-// scheduling, giving ops prep time) and no further than this many days out (keeps the
-// admin list from filling with dates a year away). Both are simple constants, not a
-// hard business requirement — adjust freely.
-const SCHEDULED_DELIVERY_MIN_LEAD_DAYS = 1;
+// How far ahead a customer may book a scheduled delivery (keeps the picker/admin list
+// from filling with dates a year away). The EARLIEST bookable day is no longer a fixed
+// constant — it comes from the resolved delivery config (same-day when eligible, else the
+// zone/region lead time), see validateScheduledDelivery below.
 const SCHEDULED_DELIVERY_MAX_WINDOW_DAYS = 60;
-// "Day" boundaries for the min/max checks below are computed in the business's
-// operating timezone (same JOBS_TIMEZONE/Asia/Dubai convention used throughout
-// src/jobs for cron scheduling) — NOT the server process's own local time. A
-// container's default TZ is UTC, which is 3-4h behind the Gulf; computing "start of
-// day" from raw server time would let a customer near midnight schedule something
-// still "today" in Dubai/Riyadh terms as if it were "tomorrow".
-const BUSINESS_TIMEZONE = process.env.JOBS_TIMEZONE || 'Asia/Dubai';
-
-/** The UTC offset (in minutes) of `timeZone` at the instant `date`, via Intl — correct
- * for any IANA zone (DST-aware), not just fixed-offset ones like Asia/Dubai. */
-function tzOffsetMinutes(date, timeZone) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  }).formatToParts(date).reduce((acc, p) => {
-    if (p.type !== 'literal') acc[p.type] = Number(p.value);
-    return acc;
-  }, {});
-  const asUTC = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
-  return (asUTC - date.getTime()) / 60000;
-}
-
-/** UTC instant for midnight, `daysFromNow` days out, as measured on the calendar in
- * `timeZone` — i.e. "start of business-local day N". */
-function startOfBusinessDay(daysFromNow, timeZone = BUSINESS_TIMEZONE) {
-  const now = new Date();
-  const offsetMin = tzOffsetMinutes(now, timeZone);
-  const zonedNow = new Date(now.getTime() + offsetMin * 60000);
-  const y = zonedNow.getUTCFullYear();
-  const m = zonedNow.getUTCMonth();
-  const d = zonedNow.getUTCDate();
-  return new Date(Date.UTC(y, m, d + daysFromNow) - offsetMin * 60000);
-}
 
 /**
- * Validates a customer-chosen scheduled delivery date/time. Returns an error string, or
- * null if `value` is a valid Date strictly after "tomorrow, start of day" (in
- * BUSINESS_TIMEZONE, not the server's own clock) and no more than
- * SCHEDULED_DELIVERY_MAX_WINDOW_DAYS out.
+ * Validate a customer-chosen scheduled delivery DATE against the resolved delivery config
+ * — all day-boundary math in the region's timezone (config.timezone), never the server
+ * clock. Enforces: valid date, an allowed delivery weekday, not a blackout date, within
+ * [earliest schedulable day .. max window], and same-day only when it is genuinely
+ * available right now. Delivery is date-only (no time-of-day / slots).
+ *
+ * `earliestKey` is the prep-aware soonest deliverable day for THIS cart (later of the
+ * courier lead and the slowest line's prep lead, cutoff-shifted and rolled) — a chosen
+ * date earlier than it is rejected, so a scheduled order can never undercut prep time.
+ *
+ * @returns {{ error: string } | { error: null, scheduledAt: Date, isSameDay: boolean }}
  */
-function validateScheduledDeliveryAt(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'scheduledDeliveryAt must be a valid date';
-  const minDate = startOfBusinessDay(SCHEDULED_DELIVERY_MIN_LEAD_DAYS);
-  if (date < minDate) {
-    return `scheduledDeliveryAt must be at least ${SCHEDULED_DELIVERY_MIN_LEAD_DAYS} day(s) from now`;
+function validateScheduledDelivery(scheduledDeliveryAt, config, earliestKey) {
+  const date = new Date(scheduledDeliveryAt);
+  if (Number.isNaN(date.getTime())) return { error: 'scheduledDeliveryAt must be a valid date' };
+
+  const tz = config.timezone;
+  const key = dateKeyInTz(date, tz);
+  if (!isValidDateKey(key)) return { error: 'scheduledDeliveryAt must be a valid date' };
+
+  // No deliverable day at all for this area/cart (impossible config) — can't schedule.
+  if (!earliestKey) {
+    return { error: 'Delivery is not currently available for the selected area.' };
   }
-  const maxDate = startOfBusinessDay(SCHEDULED_DELIVERY_MAX_WINDOW_DAYS + 1);
-  if (date >= maxDate) {
-    return `scheduledDeliveryAt cannot be more than ${SCHEDULED_DELIVERY_MAX_WINDOW_DAYS} days from now`;
+
+  const blackoutSet = new Set(config.blackoutDates);
+  if (!isDeliverableDay(key, config.deliveryDays, blackoutSet)) {
+    return { error: 'Delivery is not available on the selected date. Please pick another day.' };
   }
-  return null;
+  if (key < earliestKey) {
+    return { error: 'The selected delivery date is too soon. Please pick a later day.' };
+  }
+  const maxKey = addDaysToKey(config.todayKey, SCHEDULED_DELIVERY_MAX_WINDOW_DAYS);
+  if (key > maxKey) {
+    return { error: `Delivery cannot be scheduled more than ${SCHEDULED_DELIVERY_MAX_WINDOW_DAYS} days ahead.` };
+  }
+
+  const isSameDay = key === config.todayKey;
+  if (isSameDay && !config.sameDayAvailableNow) {
+    return { error: 'Same-day delivery is no longer available for today. Please pick another day.' };
+  }
+
+  return { error: null, scheduledAt: date, isSameDay };
 }
 
 // Builds the status filter for list queries: honor an explicit status filter,
@@ -283,6 +287,9 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     guestContact = null,
   } = params;
 
+  // Single clock for all timezone-sensitive delivery decisions in this order.
+  const now = new Date();
+
   // A guest order (userId === null) is identified by the absence of a user row.
   const isGuest = !userId;
 
@@ -297,16 +304,14 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   if (!VALID_DELIVERY_TYPES.includes(deliveryType)) {
     return { order: null, error: `Invalid deliveryType. Supported: ${VALID_DELIVERY_TYPES.join(', ')}` };
   }
-  let resolvedScheduledDeliveryAt = null;
-  if (deliveryType === 'SCHEDULED') {
-    if (!scheduledDeliveryAt) {
-      return { order: null, error: 'scheduledDeliveryAt is required for a Scheduled Delivery' };
-    }
-    const scheduleError = validateScheduledDeliveryAt(scheduledDeliveryAt);
-    if (scheduleError) return { order: null, error: scheduleError };
-    resolvedScheduledDeliveryAt = new Date(scheduledDeliveryAt);
+  if (deliveryType === 'SCHEDULED' && !scheduledDeliveryAt) {
+    return { order: null, error: 'scheduledDeliveryAt is required for a Scheduled Delivery' };
   }
+  // Full scheduled-date + time-slot + COD validation happens once the region/zone (and
+  // thus the resolved delivery config) is known — see the deliveryConfig block below.
   // STANDARD never persists a scheduled date, even if the client sent one.
+  let resolvedScheduledDeliveryAt = null;
+  let isSameDayDelivery = false;
 
   // Every order — online or COD — is placed immediately as a real, visible
   // PENDING_PAYMENT order (WooCommerce parity: "Pending payment" is a normal order
@@ -354,15 +359,11 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // { regionId: orderRegionId } }` selects below + productService.regionPriceFromRow).
   const orderCurrency = orderRegion?.currency || 'AED';
 
-  // Snapshot the region's standard delivery lead time onto the order at checkout time
-  // (mirrors the shippingAmount snapshot below) — only meaningful for STANDARD orders;
-  // SCHEDULED orders have a customer-chosen date instead, not a day-count estimate.
-  //
-  // This is computed further down (after productRows/resolvedLeadDaysByProductId are
-  // available) as: max(region's courier transit days, the slowest line's prep/booking
-  // lead time) — see maxResolvedLeadDaysAcrossOrderItems below. Region.standardDeliveryDays
-  // alone used to be the whole estimate; now a product needing more prep time than the
-  // courier's transit window can push the estimate out further.
+  // Snapshot the delivery-days estimate onto the order at checkout (mirrors the
+  // shippingAmount snapshot) — only for STANDARD orders; SCHEDULED carries a customer-chosen
+  // date instead. Computed further down (after resolvedLeadDaysByProductId): each line runs
+  // the unified resolveDeliveryLeadDays chain (product/category override → zone/region
+  // standard → default), and the order takes the slowest line — see below.
 
   // Online payment currently only works for the gateway's configured currency (AED).
   // A region charging a different currency (e.g. Saudi/SAR) must use Cash on Delivery
@@ -427,9 +428,11 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // against a stale id from a region switch mid-checkout or a tampered request.
   // Not required: a region may genuinely have zero zones configured.
   let shippingZoneName = null;
+  let orderZone = null;
   if (resolvedAddress.deliveryZoneId) {
     try {
       const zone = await deliveryZoneService.assertValidZone(resolvedAddress.deliveryZoneId, orderRegionId);
+      orderZone = zone;
       shippingZoneName = zone.name;
     } catch (err) {
       if (!['ZONE_NOT_FOUND', 'ZONE_INACTIVE', 'ZONE_WRONG_REGION'].includes(err.code)) throw err;
@@ -439,6 +442,20 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       // background. The order simply carries no zone snapshot for this line.
     }
   }
+
+  // ---- Resolve the effective delivery config (zone -> region -> default) and enforce
+  // the config-only rules here (COD availability, scheduled date + time slot). The
+  // subtotal-dependent rules (min/max order, free-delivery fee) run inside the
+  // transaction below where the live subtotal is known.
+  const deliveryConfig = resolveDeliveryConfig(orderRegion, orderZone, { subtotal: null, now });
+
+  // COD availability gate — per zone, else per region (default on).
+  if (paymentMethod === 'COD' && !deliveryConfig.codEnabled) {
+    return { order: null, error: 'Cash on Delivery is not available for the selected delivery area.' };
+  }
+  // NOTE: SCHEDULED date validation happens AFTER the cart's prep lead is resolved (below),
+  // so the earliest schedulable day accounts for product/category prep time, not just the
+  // zone/region courier lead.
 
   const productIds = lineItems.map((it) => it.productId);
   const productRows = await prisma.product.findMany({
@@ -492,34 +509,94 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   const productRegionLeadById = new Map(prLeadRows.map((r) => [r.productId, r.deliveryLeadDays]));
   const categoryRegionLeadByCatId = new Map(crLeadRows.map((r) => [r.categoryId, r.deliveryLeadDays]));
 
+  // Per-ZONE lead-day overrides for the order's delivery zone (product + category tiers) —
+  // highest precedence. Only queried when the order actually has a resolved zone.
+  const orderZoneId = orderZone?.id ?? null;
+  const [pzLeadRows, czLeadRows] = orderZoneId
+    ? await Promise.all([
+        prisma.productZone.findMany({
+          where: { zoneId: orderZoneId, productId: { in: orderProductIds }, deliveryLeadDays: { not: null } },
+          select: { productId: true, deliveryLeadDays: true },
+        }),
+        orderCategoryIds.length
+          ? prisma.categoryZone.findMany({
+              where: { zoneId: orderZoneId, categoryId: { in: orderCategoryIds }, deliveryLeadDays: { not: null } },
+              select: { categoryId: true, deliveryLeadDays: true },
+            })
+          : [],
+      ])
+    : [[], []];
+  const productZoneLeadById = new Map(pzLeadRows.map((r) => [r.productId, r.deliveryLeadDays]));
+  const categoryZoneLeadByCatId = new Map(czLeadRows.map((r) => [r.categoryId, r.deliveryLeadDays]));
+
   const resolvedLeadDaysByProductId = new Map(
     productRows.map((p) => [
       p.id,
       resolveDeliveryLeadDays({
+        productZoneLeadDays: productZoneLeadById.get(p.id) ?? null,
         productRegionLeadDays: productRegionLeadById.get(p.id) ?? null,
         productLeadDays: p.deliveryLeadDays,
+        categoryZoneLeadDays: p.category?.id ? categoryZoneLeadByCatId.get(p.category.id) ?? null : null,
         categoryRegionLeadDays: p.category?.id ? categoryRegionLeadByCatId.get(p.category.id) ?? null : null,
         categoryLeadDays: p.category?.deliveryLeadDays ?? null,
+        // Area standard (zone → region, already resolved in deliveryConfig) is the tier
+        // below category: a line with no product/category override inherits the standard.
+        regionStandardLeadDays: deliveryConfig.standardLeadDays ?? null,
         defaultLeadDays: defaultLeadDaysForOrder,
       }),
     ])
   );
-  // The slowest-prepping line on the order drives the STANDARD delivery estimate below —
-  // e.g. one flower line (2-day prep) in an order otherwise full of 1-day gift boxes means
-  // the whole order can't ship before day 2.
+  // Each line's resolved delivery days already folds in the area standard (as the tier
+  // below category). The order takes the SLOWEST line — e.g. a 6-day flower line in an
+  // order otherwise full of 2-day gift boxes means the whole order lands on day 6.
   const maxResolvedLeadDaysAcrossOrderItems = Math.max(
     0,
     ...[...resolvedLeadDaysByProductId.values()]
   );
-  // STANDARD estimate = the LATER of the region's courier transit time and the slowest
-  // line's own prep/booking lead time (they're sequential: a product isn't handed to the
-  // courier until it's prepped) — see the comment above where estimatedDeliveryDays was
-  // first declared for why this replaced the old "region days only" formula. SCHEDULED
-  // orders keep a customer-chosen date instead of a day-count estimate.
-  const estimatedDeliveryDays =
-    deliveryType === 'STANDARD'
-      ? Math.max(orderRegion?.standardDeliveryDays ?? 0, maxResolvedLeadDaysAcrossOrderItems)
+  // STANDARD estimate: the slowest line's resolved delivery days (product/category value if
+  // set, else the zone/region standard). Counting starts TODAY when the order beats the daily cutoff,
+  // else TOMORROW (today's dispatch is missed). Then the arrival is rolled forward past any
+  // non-delivery weekday / blackout date so it lands on a day this area actually delivers.
+  // The concrete arrival DATE is snapshotted (estimatedDeliveryDate) so it never drifts with
+  // the viewer's timezone; estimatedDeliveryDays is the matching whole-day count from today.
+  // SCHEDULED keeps the customer-chosen date instead.
+  // SOONEST deliverable arrival for THIS cart in THIS area — the LATER of the resolved
+  // (zone-or-region) courier lead and the slowest line's prep lead, counted from today (if
+  // the order beats the daily cutoff) else tomorrow, then rolled forward to the next
+  // allowed delivery weekday that isn't a blackout. This single value is BOTH the STANDARD
+  // arrival estimate AND the floor a SCHEDULED order may be booked from (so a customer can
+  // never schedule earlier than the cart can physically be prepped + shipped).
+  // Each line's resolved lead already folds in the area standard (regionStandardLeadDays
+  // tier above), so the order's lead is simply the slowest line — no separate max with the
+  // standard (a product/category override intentionally wins over the standard, even if
+  // smaller).
+  const rawLead = maxResolvedLeadDaysAcrossOrderItems;
+  const blackoutSet = new Set(deliveryConfig.blackoutDates);
+  const cutoffMin = parseHHmm(deliveryConfig.sameDayCutoff);
+  const pastCutoff = cutoffMin != null && nowMinutesInTz(deliveryConfig.timezone, now) >= cutoffMin;
+  const baseKey = pastCutoff ? addDaysToKey(deliveryConfig.todayKey, 1) : deliveryConfig.todayKey;
+  const soonestArrivalKey = nextDeliverableKey(
+    addDaysToKey(baseKey, rawLead),
+    deliveryConfig.deliveryDays,
+    blackoutSet
+  );
+
+  let estimatedDeliveryDays = null;
+  let estimatedDeliveryDate = null;
+  if (deliveryType === 'STANDARD') {
+    estimatedDeliveryDate = soonestArrivalKey;
+    // Consistent snapshot: no deliverable day within a year (impossible config) => leave
+    // both null rather than a positive day-count with no date.
+    estimatedDeliveryDays = soonestArrivalKey
+      ? daysBetweenKeys(deliveryConfig.todayKey, soonestArrivalKey)
       : null;
+  } else if (deliveryType === 'SCHEDULED') {
+    // Validate the customer's chosen date against the prep-aware floor above.
+    const v = validateScheduledDelivery(scheduledDeliveryAt, deliveryConfig, soonestArrivalKey);
+    if (v.error) return { order: null, error: v.error };
+    resolvedScheduledDeliveryAt = v.scheduledAt;
+    isSameDayDelivery = v.isSameDay;
+  }
 
   // Only honor gift-card/custom-name selections the product actually offers — mirrors
   // the same guard in cart.service.addToCart. Needed again here because an order can
@@ -752,9 +829,35 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // keying by productId would collapse two lines of the same product with different options.
     const vat = vatService.computeOrderVat(vatLines, finalDiscount ?? 0, vatConfig);
 
-    // Flat shipping fee for this order's region — snapshot the amount actually
-    // charged (Region.shippingFlatRate may change later; historical orders must not).
-    const shippingAmount = Math.round(Number(orderRegion?.shippingFlatRate ?? 0) * 100) / 100;
+    // Net merchandise value (pre-VAT, post-discount) drives the delivery-area order
+    // bounds and the free-delivery threshold — computed from the same live tx figures.
+    const netForDelivery = Math.max(
+      0,
+      Math.round((Number(vat.subtotal ?? 0) - Number(finalDiscount ?? 0)) * 100) / 100
+    );
+    if (deliveryConfig.minOrderAmount != null && netForDelivery < deliveryConfig.minOrderAmount) {
+      const err = new Error(
+        `The selected delivery area requires a minimum order of ${deliveryConfig.minOrderAmount} ${orderCurrency}.`
+      );
+      err.code = 'DELIVERY_MIN_ORDER';
+      throw err;
+    }
+    if (deliveryConfig.maxOrderAmount != null && netForDelivery > deliveryConfig.maxOrderAmount) {
+      const err = new Error(
+        `The selected delivery area allows a maximum order of ${deliveryConfig.maxOrderAmount} ${orderCurrency}.`
+      );
+      err.code = 'DELIVERY_MAX_ORDER';
+      throw err;
+    }
+
+    // Effective shipping fee: FREE when the net meets the free-delivery threshold, else
+    // the resolved (zone-or-region) flat fee. Snapshot the amount actually charged
+    // (config may change later; historical orders must not).
+    const freeDeliveryApplies =
+      deliveryConfig.freeDeliveryThreshold != null && netForDelivery >= deliveryConfig.freeDeliveryThreshold;
+    const shippingAmount = freeDeliveryApplies
+      ? 0
+      : Math.round(Number(deliveryConfig.deliveryFee ?? 0) * 100) / 100;
 
     const finalTotal = vat.total + shippingAmount;
 
@@ -784,6 +887,8 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         deliveryType,
         scheduledDeliveryAt: resolvedScheduledDeliveryAt,
         estimatedDeliveryDays,
+        estimatedDeliveryDate,
+        isSameDayDelivery,
         appliedPromoCode: promoResult?.promoCode.code ?? null,
         appliedPromoCodeId: promoResult?.promoCode.id ?? null,
         paymentMethod,
@@ -916,6 +1021,10 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     }
     if (err.code === 'PRODUCT_MISSING') {
       return { order: null, error: 'A product in your order is no longer available' };
+    }
+    // Delivery-area order bounds (min/max) failed inside the tx — surface as a 400.
+    if (err.code === 'DELIVERY_MIN_ORDER' || err.code === 'DELIVERY_MAX_ORDER') {
+      return { order: null, error: err.message };
     }
     throw err;
   }

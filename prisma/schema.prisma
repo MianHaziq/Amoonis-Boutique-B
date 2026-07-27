@@ -40,6 +40,26 @@ model Region {
   // shows no ETA. Snapshotted onto Order.estimatedDeliveryDays at checkout time
   // so a later change here doesn't retroactively alter historical orders.
   standardDeliveryDays           Int?
+  // IANA timezone the region operates in (e.g. "Asia/Dubai", "Asia/Riyadh"). Drives ALL
+  // delivery day-boundary math: same-day cutoff, "today", allowed weekdays, blackout
+  // dates. Must not be null — every region has a local clock; defaults to Asia/Dubai so
+  // existing regions keep the previously-hardcoded behavior with no backfill.
+  timezone                       String   @default("Asia/Dubai")
+  // Order (net, after discount) at/above which delivery is free in this region. Null =
+  // no free-delivery threshold (fee always applies). Zones may override (DeliveryZone).
+  freeDeliveryThreshold          Decimal? @db.Decimal(10, 2)
+  // Allowed delivery weekdays, 0=Sunday .. 6=Saturday. Empty [] = every day allowed
+  // (the pre-existing behavior). Zones may override with their own non-empty list.
+  deliveryDays                   Int[]    @default([])
+  // Whether same-day delivery is offered in this region at all. Zones may override.
+  sameDayEnabled                 Boolean  @default(false)
+  // Daily cutoff for same-day orders, "HH:mm" in the region timezone (e.g. "18:00").
+  // After this local time same-day is no longer offered for the current day. Null =
+  // no cutoff configured (same-day, when enabled, is offered all day). Zones may override.
+  sameDayCutoff                  String?
+  // Whether Cash on Delivery is offered in this region. Default true (COD is the only
+  // payment method today). Zones may override to disable COD for a specific area.
+  codEnabled                     Boolean  @default(true)
   // ISO 3166-1 alpha-2 code (e.g. "AE", "SA") — renders the region's flag in the
   // storefront's country/region pickers. Null shows a neutral placeholder until
   // an admin sets it (deliberately not required — regions worked without a flag
@@ -102,6 +122,7 @@ model Region {
   vatConfig     VatConfig?
   deliveryZones DeliveryZone[]
   addresses     Address[]
+  blackoutDates DeliveryBlackoutDate[]
 
   @@index([isActive])
   @@index([sortOrder])
@@ -118,15 +139,56 @@ model DeliveryZone {
   name_ar   String?
   isActive  Boolean  @default(true)
   sortOrder Int      @default(0)
+  // ---- Per-zone delivery config OVERRIDES ----
+  // Every override below is nullable / empty-by-default. null (or [] for arrays) means
+  // "inherit the parent Region's value" — so an untouched zone behaves exactly as it did
+  // before these columns existed. See deliveryConfig.service.js for the resolution chain.
+  // Flat shipping fee for this zone. null = inherit Region.shippingFlatRate.
+  shippingFlatRate      Decimal? @db.Decimal(10, 2)
+  // Free-delivery threshold for this zone. null = inherit Region.freeDeliveryThreshold.
+  freeDeliveryThreshold Decimal? @db.Decimal(10, 2)
+  // Same-day offered in this zone? null = inherit Region.sameDayEnabled.
+  sameDayEnabled        Boolean?
+  // Same-day cutoff "HH:mm" (region timezone). null = inherit Region.sameDayCutoff.
+  sameDayCutoff         String?
+  // Standard courier lead time (whole days) for this zone. null = inherit
+  // Region.standardDeliveryDays. Distinct from product/category PREP lead days.
+  standardLeadDays      Int?
+  // Allowed delivery weekdays (0=Sun..6=Sat). [] = inherit the region's deliveryDays.
+  deliveryDays          Int[]    @default([])
+  // COD offered in this zone? null = inherit Region.codEnabled (effective default yes).
+  codEnabled            Boolean?
+  // Order (net) minimum/maximum to deliver to this zone. null = no bound.
+  minOrderAmount        Decimal? @db.Decimal(10, 2)
+  maxOrderAmount        Decimal? @db.Decimal(10, 2)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  region    Region    @relation(fields: [regionId], references: [id], onDelete: Cascade)
-  addresses Address[]
+  region        Region         @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  addresses     Address[]
+  productLeads  ProductZone[]
+  categoryLeads CategoryZone[]
 
   @@unique([regionId, name])
   @@index([regionId])
   @@index([isActive])
+}
+
+/// Region-wide delivery blackout dates (public holidays, closures) — no delivery is
+/// scheduled on these days. Date stored as a tz-neutral "YYYY-MM-DD" string so it never
+/// drifts across timezones (matches the storefront DeliveryDatePicker's key format).
+model DeliveryBlackoutDate {
+  id        String   @id @default(uuid())
+  regionId  String
+  date      String   // "YYYY-MM-DD"
+  label     String?
+  label_ar  String?
+  createdAt DateTime @default(now())
+
+  region Region @relation(fields: [regionId], references: [id], onDelete: Cascade)
+
+  @@unique([regionId, date])
+  @@index([regionId])
 }
 
 /// Join: which regions a product is visible in. A row per (product, region) pair —
@@ -167,6 +229,38 @@ model CategoryRegion {
 
   @@id([categoryId, regionId])
   @@index([regionId])
+}
+
+/// Join: per-DELIVERY-ZONE "ships within N days" PREP lead override for a product. Highest
+/// precedence in the lead-time chain — wins over the product's per-region and global
+/// values (see utils/deliveryLeadDays.js). Only consulted at checkout/order time, where a
+/// concrete zone is known (the storefront browse has no committed zone). Null = no override.
+model ProductZone {
+  productId        String
+  zoneId           String
+  deliveryLeadDays Int?
+  createdAt        DateTime @default(now())
+
+  product Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  zone    DeliveryZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  @@id([productId, zoneId])
+  @@index([zoneId])
+}
+
+/// Join: per-DELIVERY-ZONE prep lead override for a category (applies to its products that
+/// don't set their own product-zone override). Same precedence rules as ProductZone.
+model CategoryZone {
+  categoryId       String
+  zoneId           String
+  deliveryLeadDays Int?
+  createdAt        DateTime @default(now())
+
+  category Category     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  zone     DeliveryZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  @@id([categoryId, zoneId])
+  @@index([zoneId])
 }
 
 model BannerRegion {
@@ -470,6 +564,7 @@ model Category {
   promoCodeCategories PromoCodeCategory[]
   vatConfigCategories VatConfigCategory[]
   regions             CategoryRegion[]
+  zoneLeadDays        CategoryZone[]
 
   @@index([title])
   @@index([status])
@@ -514,6 +609,7 @@ model Product {
   promoCodeProducts PromoCodeProduct[]
   vatConfigProducts VatConfigProduct[]
   regions           ProductRegion[]
+  zoneLeadDays      ProductZone[]
   reviews           Review[]
 
   @@index([categoryId])
@@ -776,6 +872,15 @@ model Order {
   /// deliveryType = STANDARD — so a later change to the region's setting doesn't
   /// retroactively alter this order's displayed ETA (same reasoning as shippingAmount).
   estimatedDeliveryDays Int?
+  /// Resolved STANDARD arrival date as a tz-neutral "YYYY-MM-DD" key, computed in the
+  /// order region's timezone at checkout (order day + lead, rolled forward past any
+  /// non-delivery weekday / blackout). Displayed directly so the date never drifts with
+  /// the viewer's timezone. Null for SCHEDULED orders (they use scheduledDeliveryAt) and
+  /// for legacy orders placed before this field existed.
+  estimatedDeliveryDate String?
+  /// True when this SCHEDULED order was placed for same-day delivery (date = order day,
+  /// before the zone/region cutoff). Drives fulfilment prioritisation & reporting.
+  isSameDayDelivery     Boolean       @default(false)
   /// When true, Product.quantity has been reduced for this order’s line items (set on PENDING→CONFIRMED; cleared on cancel/revert).
   inventoryDeducted     Boolean       @default(false)
   /// Whether placing this order should clear the user's cart. True for normal cart checkout;

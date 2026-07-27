@@ -12,7 +12,30 @@ const {
 // Standard include for region join rows on a product read (staff/admin only).
 const REGION_INCLUDE = {
   regions: { include: { region: { select: { id: true, code: true, name: true, name_ar: true } } } },
+  // Per-zone prep-lead overrides — surfaced to the admin edit form so it can show/edit
+  // every zone's lead at once (mirrors regionPrices). Storefront reads don't include this.
+  zoneLeadDays: { select: { zoneId: true, deliveryLeadDays: true } },
 };
+
+/**
+ * Clean a `zoneLeadDays: [{ zoneId, deliveryLeadDays }]` payload into ProductZone/
+ * CategoryZone create rows, keeping only entries with a real (non-null) lead override.
+ * Uses the same 0-30 validator as the global/region lead. Returns [] for empty input.
+ */
+function buildZoneLeadRows(zoneLeadDays) {
+  if (!Array.isArray(zoneLeadDays)) return [];
+  const rows = [];
+  const seen = new Set();
+  for (const entry of zoneLeadDays) {
+    if (!entry || typeof entry.zoneId !== 'string' || !entry.zoneId) continue;
+    if (seen.has(entry.zoneId)) continue;
+    const lead = parseDeliveryLeadDays(entry.deliveryLeadDays);
+    if (lead == null) continue; // null = no override; don't store a row
+    seen.add(entry.zoneId);
+    rows.push({ zoneId: entry.zoneId, deliveryLeadDays: lead });
+  }
+  return rows;
+}
 
 const PRODUCT_BILINGUAL = [
   { src: 'title', dst: 'title_ar' },
@@ -213,22 +236,28 @@ async function attachRatingAggregates(mappedProducts) {
  * utils/deliveryLeadDays.js), not once per product, so a page of 100 products costs at
  * most one Settings round trip, not 100.
  */
-async function attachResolvedDeliveryLeadDays(mappedProducts, regionId = null) {
+async function attachResolvedDeliveryLeadDays(mappedProducts, regionId = null, zoneId = null) {
   const defaultLeadDays = await getDefaultDeliveryLeadDays();
   if (!Array.isArray(mappedProducts) || mappedProducts.length === 0) return mappedProducts;
 
-  // Per-region overrides (only for a storefront/region-scoped read — admin passes
-  // null and gets the global chain). One batch query each for the whole page's
-  // products/categories, keyed by the requesting region. Products/categories with
-  // no override simply aren't in the maps → the chain falls through as before.
+  // Per-region + per-zone overrides (only for a storefront/region-scoped read — admin
+  // passes null and gets the raw product/category chain). One batch query per tier for
+  // the whole page. Products/categories with no override aren't in the maps → the chain
+  // falls through to the area's standard, then the global default.
   let productRegionLead = new Map();
   let categoryRegionLead = new Map();
+  let productZoneLead = new Map();
+  let categoryZoneLead = new Map();
+  let zoneStandard = null;
+  let regionStandard = null;
+
   if (regionId) {
     const productIds = [...new Set(mappedProducts.map((p) => p.id).filter(Boolean))];
     const categoryIds = [
       ...new Set(mappedProducts.map((p) => p.category?.id ?? p.categoryId).filter(Boolean)),
     ];
-    const [prRows, crRows] = await Promise.all([
+    // Region tier + the region's standard delivery days (the area default before global).
+    const [prRows, crRows, region] = await Promise.all([
       productIds.length
         ? prisma.productRegion.findMany({
             where: { regionId, productId: { in: productIds }, deliveryLeadDays: { not: null } },
@@ -241,18 +270,55 @@ async function attachResolvedDeliveryLeadDays(mappedProducts, regionId = null) {
             select: { categoryId: true, deliveryLeadDays: true },
           })
         : [],
+      regionService.getRegionById(regionId), // cached — avoids a DB hit per product page
     ]);
     productRegionLead = new Map(prRows.map((r) => [r.productId, r.deliveryLeadDays]));
     categoryRegionLead = new Map(crRows.map((r) => [r.categoryId, r.deliveryLeadDays]));
+    regionStandard = region?.standardDeliveryDays ?? null;
+
+    // Zone tier + the zone's standard lead — highest-priority location tiers. The zone must
+    // belong to the requesting region (guards a stale/tampered id).
+    if (zoneId) {
+      const [pzRows, czRows, zone] = await Promise.all([
+        productIds.length
+          ? prisma.productZone.findMany({
+              where: { zoneId, productId: { in: productIds }, deliveryLeadDays: { not: null } },
+              select: { productId: true, deliveryLeadDays: true },
+            })
+          : [],
+        categoryIds.length
+          ? prisma.categoryZone.findMany({
+              where: { zoneId, categoryId: { in: categoryIds }, deliveryLeadDays: { not: null } },
+              select: { categoryId: true, deliveryLeadDays: true },
+            })
+          : [],
+        prisma.deliveryZone.findFirst({
+          where: { id: zoneId, regionId, isActive: true },
+          select: { standardLeadDays: true },
+        }),
+      ]);
+      // Only apply ANY zone tier (product/category override OR standard) when the zone is a
+      // real, active zone of THIS region — a stale/tampered zoneId from another region must
+      // not leak its overrides. Otherwise fall through to region-level resolution.
+      if (zone) {
+        productZoneLead = new Map(pzRows.map((r) => [r.productId, r.deliveryLeadDays]));
+        categoryZoneLead = new Map(czRows.map((r) => [r.categoryId, r.deliveryLeadDays]));
+        zoneStandard = zone.standardLeadDays ?? null;
+      }
+    }
   }
 
   for (const p of mappedProducts) {
     const catId = p.category?.id ?? p.categoryId ?? null;
     p.resolvedDeliveryLeadDays = resolveDeliveryLeadDays({
+      productZoneLeadDays: productZoneLead.get(p.id) ?? null,
       productRegionLeadDays: productRegionLead.get(p.id) ?? null,
       productLeadDays: p.deliveryLeadDays,
+      categoryZoneLeadDays: catId ? categoryZoneLead.get(catId) ?? null : null,
       categoryRegionLeadDays: catId ? categoryRegionLead.get(catId) ?? null : null,
       categoryLeadDays: p.category?.deliveryLeadDays ?? null,
+      zoneStandardLeadDays: zoneStandard,
+      regionStandardLeadDays: regionStandard,
       defaultLeadDays,
     });
   }
@@ -436,6 +502,7 @@ async function createProduct(data) {
     throw err;
   }
   const regionPriceMap = buildRegionPriceMap(data.regionPrices);
+  const zoneLeadRows = buildZoneLeadRows(data.zoneLeadDays);
   const regionIds = await resolveWriteRegionIds(data.regionIds);
   const imageUrls = Array.isArray(data.images)
     ? data.images.filter((u) => typeof u === 'string' && u.trim()).slice(0, MAX_IMAGES)
@@ -499,6 +566,7 @@ async function createProduct(data) {
               },
             }
           : {}),
+        ...(zoneLeadRows.length > 0 ? { zoneLeadDays: { create: zoneLeadRows } } : {}),
         ...(categoryId ? { categoryId } : {}),
         ...(imageUrls.length > 0
           ? {
@@ -574,6 +642,9 @@ async function updateProduct(id, data) {
     }
   }
   const regionPriceMap = buildRegionPriceMap(data.regionPrices);
+  // Per-zone prep-lead overrides: null = key absent (leave existing rows untouched); an
+  // array = full replace with only the non-null entries.
+  const zoneLeadRows = data.zoneLeadDays !== undefined ? buildZoneLeadRows(data.zoneLeadDays) : null;
 
   const bilingualDraft = {};
   if (data.title !== undefined) bilingualDraft.title = data.title;
@@ -723,6 +794,16 @@ async function updateProduct(id, data) {
       }
     }
 
+    // Per-zone prep-lead overrides: full replace when the key was sent.
+    if (zoneLeadRows !== null) {
+      await tx.productZone.deleteMany({ where: { productId: id } });
+      if (zoneLeadRows.length > 0) {
+        await tx.productZone.createMany({
+          data: zoneLeadRows.map((z) => ({ productId: id, ...z })),
+        });
+      }
+    }
+
     if (newRegionIds !== null) {
       await tx.productRegion.deleteMany({ where: { productId: id } });
       if (newRegionIds.length > 0) {
@@ -846,7 +927,7 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
 
   const mapped = items.map(mapProduct);
   await attachRatingAggregates(mapped);
-  await attachResolvedDeliveryLeadDays(mapped, visibility.isStaff ? null : visibility.regionId);
+  await attachResolvedDeliveryLeadDays(mapped, visibility.isStaff ? null : visibility.regionId, visibility.isStaff ? null : visibility.zoneId);
   return {
     // Storefront-only: overlay the requesting region's currency (AED/SAR) so `price`/
     // `discountedPrice` are already correct for the region. Staff/admin keep raw fields.
@@ -982,7 +1063,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
     products.sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
     items = products.map(mapProduct);
     await attachRatingAggregates(items);
-    await attachResolvedDeliveryLeadDays(items, visibility.isStaff ? null : visibility.regionId);
+    await attachResolvedDeliveryLeadDays(items, visibility.isStaff ? null : visibility.regionId, visibility.isStaff ? null : visibility.zoneId);
   }
 
   return {
@@ -1056,7 +1137,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
 
   const mappedResults = items.map(mapProduct);
   await attachRatingAggregates(mappedResults);
-  await attachResolvedDeliveryLeadDays(mappedResults, visibility.isStaff ? null : visibility.regionId);
+  await attachResolvedDeliveryLeadDays(mappedResults, visibility.isStaff ? null : visibility.regionId, visibility.isStaff ? null : visibility.zoneId);
   return {
     items: visibility.isStaff
       ? mappedResults
@@ -1083,7 +1164,7 @@ async function getProductById(id, visibility = {}) {
   if (!product) return null;
   const mapped = mapProduct(product);
   await attachRatingAggregates([mapped]);
-  await attachResolvedDeliveryLeadDays([mapped], visibility.isStaff ? null : visibility.regionId);
+  await attachResolvedDeliveryLeadDays([mapped], visibility.isStaff ? null : visibility.regionId, visibility.isStaff ? null : visibility.zoneId);
   return visibility.isStaff ? mapped : applyRegionCurrency(mapped);
 }
 
