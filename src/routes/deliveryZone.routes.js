@@ -114,7 +114,7 @@ router.post(
  * /delivery-zones/bulk:
  *   post:
  *     summary: Create multiple delivery zones for one region (admin/manager)
- *     description: Body { regionId, zones: [{ name, name_ar?, isActive? }] }. sortOrder is auto-assigned (appended). Duplicate names (existing or repeated) are skipped, not failed.
+ *     description: "Body { regionId, zones: [{ name, name_ar?, isActive? }] }. sortOrder is auto-assigned (appended). Duplicate names (existing or repeated) are skipped, not failed."
  *     tags: [DeliveryZones]
  *     security: [{ bearerAuth: [] }]
  *     responses:
@@ -135,7 +135,7 @@ router.post(
  * /delivery-zones/order:
  *   patch:
  *     summary: Reorder delivery zones (admin/manager)
- *     description: Set zone display order by sending [{ id, sortOrder }]. sortOrder is scoped per-region, so reorder within a single region at a time.
+ *     description: "Set zone display order by sending [{ id, sortOrder }]. sortOrder is scoped per-region, so reorder within a single region at a time."
  *     tags: [DeliveryZones]
  *     security: [{ bearerAuth: [] }]
  *     responses:

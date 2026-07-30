@@ -15,8 +15,6 @@ const {
   addDaysToKey,
   daysBetweenKeys,
   isValidDateKey,
-  parseHHmm,
-  nowMinutesInTz,
 } = require('../utils/businessTime');
 
 function decimalToNumber(v) {
@@ -554,27 +552,33 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     ...[...resolvedLeadDaysByProductId.values()]
   );
   // STANDARD estimate: the slowest line's resolved delivery days (product/category value if
-  // set, else the zone/region standard). Counting starts TODAY when the order beats the daily cutoff,
-  // else TOMORROW (today's dispatch is missed). Then the arrival is rolled forward past any
+  // set, else the zone/region standard), counted from TODAY, then rolled forward past any
   // non-delivery weekday / blackout date so it lands on a day this area actually delivers.
   // The concrete arrival DATE is snapshotted (estimatedDeliveryDate) so it never drifts with
   // the viewer's timezone; estimatedDeliveryDays is the matching whole-day count from today.
   // SCHEDULED keeps the customer-chosen date instead.
-  // SOONEST deliverable arrival for THIS cart in THIS area — the LATER of the resolved
-  // (zone-or-region) courier lead and the slowest line's prep lead, counted from today (if
-  // the order beats the daily cutoff) else tomorrow, then rolled forward to the next
-  // allowed delivery weekday that isn't a blackout. This single value is BOTH the STANDARD
-  // arrival estimate AND the floor a SCHEDULED order may be booked from (so a customer can
-  // never schedule earlier than the cart can physically be prepped + shipped).
+  // SOONEST deliverable arrival for THIS cart in THIS area — the slowest line's resolved
+  // lead, counted from today, rolled forward to the next allowed delivery weekday that isn't
+  // a blackout. This single value is BOTH the STANDARD arrival estimate AND the floor a
+  // SCHEDULED order may be booked from (so a customer can never schedule earlier than the
+  // cart can physically be prepped + shipped).
   // Each line's resolved lead already folds in the area standard (regionStandardLeadDays
   // tier above), so the order's lead is simply the slowest line — no separate max with the
   // standard (a product/category override intentionally wins over the standard, even if
   // smaller).
+  //
+  // NOTE: the same-day cutoff is DELIBERATELY not applied here. It governs only same-day
+  // ELIGIBILITY (see deliveryConfig.service.earliestDeliveryKey + the admin "same-day
+  // cutoff" copy) — it must NOT push the standard lead to "tomorrow", or the estimate would
+  // read one day longer than the configured lead and disagree with the product page /
+  // checkout ETA.
+  //
+  // Lead days count from the DAY AFTER the order day: an N-day lead lands on today+N (a
+  // 1-day lead ordered today delivers tomorrow). Then roll forward past non-delivery
+  // weekdays / blackouts so it lands on a day this area actually delivers.
   const rawLead = maxResolvedLeadDaysAcrossOrderItems;
   const blackoutSet = new Set(deliveryConfig.blackoutDates);
-  const cutoffMin = parseHHmm(deliveryConfig.sameDayCutoff);
-  const pastCutoff = cutoffMin != null && nowMinutesInTz(deliveryConfig.timezone, now) >= cutoffMin;
-  const baseKey = pastCutoff ? addDaysToKey(deliveryConfig.todayKey, 1) : deliveryConfig.todayKey;
+  const baseKey = deliveryConfig.todayKey;
   const soonestArrivalKey = nextDeliverableKey(
     addDaysToKey(baseKey, rawLead),
     deliveryConfig.deliveryDays,

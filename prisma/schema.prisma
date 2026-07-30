@@ -65,6 +65,16 @@ model Region {
   // an admin sets it (deliberately not required — regions worked without a flag
   // before this field existed).
   iso2                           String?  @db.VarChar(2)
+  // Lowercase URL segment for the storefront's permanent per-region public
+  // routes (e.g. "ae" -> /ae/en/…, "sa" -> /sa/ar/…). Web-only concern: it
+  // gives each region+language a stable, shareable, indexable URL instead of
+  // relying on a browser cookie. NOT used for API request scoping — the mobile
+  // app and web both still scope by `code` via the X-Region header, so this is
+  // purely additive and the mobile app can ignore it. Null falls back to no
+  // dedicated route (the web app resolves such a region by code only), so
+  // regions created before this field keep working. Unique so a slug resolves
+  // to exactly one region.
+  urlSlug                        String?  @unique
   // Per-region contact/legal info shown across the storefront (footer, support
   // section, WhatsApp button, contact page, legal pages, checkout receipt, order
   // emails). Same fallback convention as legalEntity above: null falls back to

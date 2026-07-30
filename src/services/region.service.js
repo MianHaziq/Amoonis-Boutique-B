@@ -39,6 +39,7 @@ const REGION_SELECT = {
   sameDayCutoff: true,
   codEnabled: true,
   iso2: true,
+  urlSlug: true,
   contactEmail: true,
   contactPhone: true,
   whatsappNumber: true,
@@ -181,6 +182,21 @@ function parseIso2(value) {
   return normalized;
 }
 
+/** Blank/null/undefined -> null (no dedicated public route); otherwise a lowercase
+ *  URL segment (letters, digits, hyphens) used by the storefront's /:slug/:locale
+ *  routes (e.g. "ae", "sa"). Web-only — never used for API request scoping. */
+function parseUrlSlug(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const normalized = String(value).trim().toLowerCase();
+  if (!/^[a-z0-9-]+$/.test(normalized)) {
+    throw Object.assign(
+      new Error('urlSlug must be lowercase letters, numbers and hyphens only (e.g. "ae", "sa")'),
+      { code: 'VALIDATION' }
+    );
+  }
+  return normalized;
+}
+
 async function loadCache(force = false) {
   if (!force && cache.fetchedAt && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
     return cache;
@@ -305,6 +321,7 @@ async function createRegion(data) {
         shippingFlatRate: parseShippingFlatRate(data.shippingFlatRate),
         standardDeliveryDays: parseStandardDeliveryDays(data.standardDeliveryDays),
         iso2: parseIso2(data.iso2),
+        urlSlug: parseUrlSlug(data.urlSlug),
         contactEmail: trimOrNull(data.contactEmail),
         contactPhone: trimOrNull(data.contactPhone),
         whatsappNumber: trimOrNull(data.whatsappNumber),
@@ -389,6 +406,7 @@ async function updateRegion(id, data) {
     payload.standardDeliveryDays = parseStandardDeliveryDays(data.standardDeliveryDays);
   }
   if (data.iso2 !== undefined) payload.iso2 = parseIso2(data.iso2);
+  if (data.urlSlug !== undefined) payload.urlSlug = parseUrlSlug(data.urlSlug);
   if (data.contactEmail !== undefined) payload.contactEmail = trimOrNull(data.contactEmail);
   if (data.contactPhone !== undefined) payload.contactPhone = trimOrNull(data.contactPhone);
   if (data.whatsappNumber !== undefined) payload.whatsappNumber = trimOrNull(data.whatsappNumber);

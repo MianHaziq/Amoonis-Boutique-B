@@ -1,6 +1,14 @@
 const regionService = require('../services/region.service');
 const { success, error } = require('../utils/response');
 
+/** Prisma P2002 (unique violation) → a field-specific 409 message. `err.meta.target`
+ *  is the conflicting column(s) (e.g. ['urlSlug']) or the index name. */
+function uniqueConflictMessage(err) {
+  const target = JSON.stringify(err?.meta?.target ?? '');
+  if (target.includes('urlSlug')) return 'A region with this URL slug already exists';
+  return 'A region with this code already exists';
+}
+
 /**
  * GET /regions – Public list of ACTIVE regions (for the app's region picker).
  * Staff (admin/manager) get all regions including inactive ones.
@@ -23,7 +31,7 @@ async function createRegion(req, res, next) {
     return success(res, region, 'Region created successfully', 201);
   } catch (err) {
     if (err.code === 'VALIDATION') return error(res, err.message, 400);
-    if (err.code === 'P2002') return error(res, 'A region with this code already exists', 409);
+    if (err.code === 'P2002') return error(res, uniqueConflictMessage(err), 409);
     next(err);
   }
 }
@@ -39,7 +47,7 @@ async function updateRegion(req, res, next) {
   } catch (err) {
     if (err.code === 'VALIDATION') return error(res, err.message, 400);
     if (err.code === 'LAST_ACTIVE_REGION') return error(res, err.message, 409);
-    if (err.code === 'P2002') return error(res, 'A region with this code already exists', 409);
+    if (err.code === 'P2002') return error(res, uniqueConflictMessage(err), 409);
     if (err.code === 'P2025') return error(res, 'Region not found', 404);
     next(err);
   }

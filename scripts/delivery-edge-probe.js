@@ -40,7 +40,7 @@ for (const f of ['registrationCity','currencyDisplayName','vatLawName','dataProt
   ok('estimatedDeliveryDate is a valid key', bt.isValidDateKey(key || ''), `got ${key}`);
   ok('arrival weekday is an allowed delivery day (Mon/Tue/Wed)', [1, 2, 3].includes(bt.weekdayOfKey(key)), `wd ${bt.weekdayOfKey(key)} for ${key}`);
   ok('estimatedDeliveryDays == daysBetween(today, date)', days === bt.daysBetweenKeys(today, key), `days=${days} between=${bt.daysBetweenKeys(today, key)}`);
-  ok('arrival >= today + zone lead 6 (>= 6, +1 if past cutoff)', days >= 6, `days=${days}`);
+  ok('arrival >= today + zone lead 6', days >= 6, `days=${days}`);
 
   console.log('B. zone standard 0 -> resolved 0 (rolled to the next allowed delivery day)');
   const zoneLead0 = await zoneService.createZone({ regionId: region.id, name: 'Lead0', standardLeadDays: 0 });
