@@ -45,7 +45,7 @@ const options = {
           '',
           '### Permission keys (JSON strings, uppercase)',
           '',
-          'PRODUCTS · ORDERS · CATEGORIES · SECTIONS · BANNERS · CONTACT · SETTINGS · PROMO_CODES · ANALYTICS · REGIONS · REVIEWS · DELIVERY_ZONES · VAT · NOTIFICATIONS · USERS · MANAGERS',
+          'PRODUCTS · ORDERS · CATEGORIES · SECTIONS · BANNERS · CONTACT · SETTINGS · PROMO_CODES · ANALYTICS · REGIONS · REVIEWS · DELIVERY_ZONES · VAT · CASH_ARRANGEMENT · NOTIFICATIONS · USERS · MANAGERS',
           '',
           'You can assign several at once (for example orders **and** products).',
           '',
@@ -279,7 +279,7 @@ const options = {
         },
         ManagerPermissionKey: {
           type: 'string',
-          enum: ['PRODUCTS', 'ORDERS', 'CATEGORIES', 'SECTIONS', 'BANNERS', 'CONTACT', 'SETTINGS', 'PROMO_CODES', 'ANALYTICS', 'REGIONS', 'REVIEWS', 'DELIVERY_ZONES', 'VAT', 'NOTIFICATIONS', 'USERS', 'MANAGERS'],
+          enum: ['PRODUCTS', 'ORDERS', 'CATEGORIES', 'SECTIONS', 'BANNERS', 'CONTACT', 'SETTINGS', 'PROMO_CODES', 'ANALYTICS', 'REGIONS', 'REVIEWS', 'DELIVERY_ZONES', 'VAT', 'CASH_ARRANGEMENT', 'NOTIFICATIONS', 'USERS', 'MANAGERS'],
           description:
             'Area of the admin API this manager may access. Send these exact uppercase values in `managerPermissions` arrays. Admins bypass checks. `USERS` and `MANAGERS` gate the Users admin section (customer accounts vs manager accounts respectively) — neither ever grants access to ADMIN accounts or the ability to set anyone\'s role to ADMIN, even for a manager holding both.',
         },
