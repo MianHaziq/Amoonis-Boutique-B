@@ -27,8 +27,11 @@
     "test:promo-verify": "node scripts/promo-verify.js",
     "test:vat": "node scripts/vat-verify.js",
     "test:vat-integration": "node scripts/vat-integration-test.js",
+    "test:cash-arrangement-math": "node scripts/cash-arrangement-math-verify.js",
+    "test:cash-arrangement": "node scripts/cash-arrangement-verify.js",
     "test:region-hide": "node scripts/region-hide-verify.js",
     "test:delivery-zones": "node scripts/delivery-zone-verify.js",
+    "test:product-variants": "node scripts/product-variant-verify.js",
     "kill-port-5000": "powershell -ExecutionPolicy Bypass -File scripts/kill-port-5000.ps1",
     "migrate:fix-p3009": "node scripts/fix-p3009-ecommerce-migration.js"
   },

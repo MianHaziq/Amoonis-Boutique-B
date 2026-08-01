@@ -28,7 +28,7 @@ function eq(name, a, b) { ok(`${name} (=${b}, got ${a})`, approx(a, b)); }
 
 const SHIPPING = {
   fullName: 'VAT Tester', phone: '+971500000000',
-  streetAddress: '1 Test St', city: 'Dubai', country: 'AE',
+  streetAddress: '1 Test St', city: 'Dubai', country: 'AE', area: 'Dubai Marina',
 };
 
 const createdOrderIds = [];
