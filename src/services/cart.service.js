@@ -20,12 +20,34 @@ function decimalToNumber(v) {
   return v == null ? null : Number(v);
 }
 
+/**
+ * Normalize a per-line cash-arrangement request for storage on a CartItem. Eligibility
+ * (region enabled + scope + resolvable fee) is NOT checked here — a cart isn't tied to a
+ * region, so it's validated authoritatively at order time. This only sanitizes for storage.
+ * Returns `{cashAmount, denomination, note}` when a positive amount is present, else null.
+ */
+function normalizeCartCash(cashArrangement) {
+  if (cashArrangement == null) return null;
+  const amt = Number(cashArrangement.cashAmount);
+  if (!Number.isFinite(amt) || amt <= 0) return null;
+  const cashAmount = Math.round(amt * 100) / 100;
+  let denomination = null;
+  if (cashArrangement.denomination != null) {
+    const d = parseInt(cashArrangement.denomination, 10);
+    if (Number.isInteger(d) && d > 0) denomination = d;
+  }
+  const note = String(cashArrangement.note == null ? '' : cashArrangement.note).trim().slice(0, 500) || null;
+  return { cashAmount, denomination, note };
+}
+
 // Resolves to the requesting region's price (base AED price, or that region's manual
-// override when set) — same rule as order.service's livePrice. `product.regions` must
-// already be scoped to the requesting region (0-1 row) by the caller.
-function effectivePrice(product) {
-  const { price, discountedPrice } = productService.regionPriceFromRow(product);
-  return discountedPrice != null && discountedPrice < price ? discountedPrice : price;
+// override when set) — same rule as order.service's livePrice. When the product has
+// variants, `selectedOptions` resolves to the matching variant's price instead (region
+// overrides don't apply to a non-default variant in this iteration — see
+// resolveEffectivePrice). `product.regions`/`product.variants`/`product.productOptions`
+// must already be populated the way cartProductInclude below does.
+function effectivePrice(product, selectedOptions) {
+  return productService.resolveEffectivePrice(product, selectedOptions);
 }
 
 // Product include for cart (images + descriptions + productOptions for display)
@@ -38,6 +60,7 @@ const cartProductInclude = {
   images: { orderBy: { sortOrder: 'asc' } },
   descriptions: { orderBy: { sortOrder: 'asc' } },
   productOptions: { orderBy: { sortOrder: 'asc' } },
+  variants: { orderBy: { sortOrder: 'asc' } },
 };
 
 const suggestionProductInclude = {
@@ -111,6 +134,7 @@ async function addToCart(userId, {
   selectedOptions = undefined,
   giftCardSelected = undefined,
   customName = undefined,
+  cashArrangement = undefined,
 }) {
   const product = await prisma.product.findUnique({ where: { id: productId } });
   if (!product) return { cart: null, error: 'Product not found' };
@@ -126,11 +150,28 @@ async function addToCart(userId, {
     giftCardSelected !== undefined ? !!giftCardSelected && !!product.giftCardEnabled : undefined;
   const effectiveCustomName =
     customName !== undefined ? (product.customNameEnabled ? (String(customName || '').trim() || null) : null) : undefined;
+  // The gift card's personalized message is part of the line identity too, so two
+  // units with the SAME card but a DIFFERENT message stay separate lines (per-unit
+  // personalization). Folded ONLY for gift-card products — on other products the
+  // `message` field is a generic per-line note (e.g. mobile gift-wrap text) whose
+  // existing merge behavior must not change, so it stays out of the key there.
+  const keyMessage =
+    product.giftCardEnabled ? (String(message == null ? '' : message).trim() || null) : null;
+  // Per-unit cash arrangement is part of the line identity too, so two units with a
+  // different cash amount/denomination/note stay separate lines. undefined = not sent
+  // (plain add) → no cash segment; a normalized object → its own line.
+  const effectiveCash = cashArrangement !== undefined ? normalizeCartCash(cashArrangement) : undefined;
 
-  // Variant+name-aware line identity: the same product in a different variant OR
-  // with a different custom name is a separate line. Re-adding the SAME variant
-  // AND SAME name (same key) still merges quantity.
-  const variantKey = lineVariantKey(selectedOptions, effectiveCustomName, effectiveGiftCardSelected);
+  // Variant+name+message+cash-aware line identity: the same product in a different
+  // variant, custom name, gift-card message, or cash config is a separate line.
+  // Re-adding the SAME config (same key) still merges quantity.
+  const variantKey = lineVariantKey(
+    selectedOptions,
+    effectiveCustomName,
+    effectiveGiftCardSelected,
+    keyMessage,
+    effectiveCash ?? null
+  );
   // All existing lines for this product (across variants). Stock is product-level
   // (not per-variant), so the availability check must be against the SUM of every
   // variant line + the amount being added — not just the line we're merging into —
@@ -170,6 +211,12 @@ async function addToCart(userId, {
         }),
         ...(effectiveGiftCardSelected !== undefined && { giftCardSelected: effectiveGiftCardSelected }),
         ...(effectiveCustomName !== undefined && { customName: effectiveCustomName }),
+        // Same line key ⇒ same cash config; refresh for consistency when it was sent.
+        ...(effectiveCash !== undefined && {
+          cashArrangementAmount: effectiveCash?.cashAmount ?? null,
+          cashArrangementDenomination: effectiveCash?.denomination ?? null,
+          cashArrangementNote: effectiveCash?.note ?? null,
+        }),
       },
     });
   } else {
@@ -183,6 +230,9 @@ async function addToCart(userId, {
         selectedOptions: selectedOptions && Object.keys(selectedOptions).length > 0 ? selectedOptions : Prisma.DbNull,
         giftCardSelected: effectiveGiftCardSelected ?? false,
         customName: effectiveCustomName ?? null,
+        cashArrangementAmount: effectiveCash?.cashAmount ?? null,
+        cashArrangementDenomination: effectiveCash?.denomination ?? null,
+        cashArrangementNote: effectiveCash?.note ?? null,
       },
     });
   }
@@ -312,15 +362,25 @@ async function getCart(userId, currency = 'AED', regionId = null) {
       // quantity/message/remove so the RIGHT line is targeted when a product has
       // several variant lines. "" for no-variant/legacy lines.
       variantKey: i.variantKey ?? '',
-      // Photo of the chosen variant (e.g. the "Black" bouquet), so the cart
-      // drawer/page shows it instead of the product's default primary image.
-      // Derived from the RAW option rows (i.product), which carry the per-value
+      // Photo of the chosen variant (e.g. the "Black" bouquet, or the "Large" box), so
+      // the cart drawer/page shows it instead of the product's default primary image.
+      // Derived from the RAW option/variant rows (i.product), which carry the per-value
       // image arrays that mapProduct's display shape strips.
-      selectedImage: productService.resolveVariantImage(i.product.productOptions, i.selectedOptions),
+      selectedImage: productService.resolveVariantImage(i.product.productOptions, i.selectedOptions, i.product.variants),
       giftCardSelected: i.giftCardSelected,
       customName: i.customName,
+      // Per-unit cash arrangement for this line (null when none). The fee is NOT part of
+      // the cart — it's resolved at checkout/order time; the cart only carries the request.
+      cashArrangement:
+        i.cashArrangementAmount != null
+          ? {
+              cashAmount: Number(i.cashArrangementAmount),
+              denomination: i.cashArrangementDenomination ?? null,
+              note: i.cashArrangementNote ?? null,
+            }
+          : null,
       lineTotal:
-        (effectivePrice(productRow) +
+        (effectivePrice(productRow, i.selectedOptions) +
           productService.optionExtraCharge(productRow, { giftCardSelected: i.giftCardSelected, customName: i.customName })) *
         i.quantity,
     };

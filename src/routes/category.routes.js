@@ -19,6 +19,14 @@ const regionStatusValidation = [
   body('deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('deliveryLeadDays must be a whole number between 0 and 30'),
+  // Default cash-arrangement fee schedule for this category (both-or-neither; see
+  // utils/cashArrangementMath.js for the full precedence chain).
+  body('cashArrangementFeeStepAmount')
+    .optional({ values: 'null' })
+    .isFloat({ gt: 0, max: 99999999.99 }).withMessage('cashArrangementFeeStepAmount must be between 0 and 99999999.99'),
+  body('cashArrangementFeeMarginPercent')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 1000 }).withMessage('cashArrangementFeeMarginPercent must be between 0 and 1000'),
   // Per-region overrides of the category lead time (same category, different day per
   // region). Each entry { regionId, deliveryLeadDays }; null lead clears that region.
   body('regionLeadDays').optional().isArray().withMessage('regionLeadDays must be an array'),
@@ -26,12 +34,24 @@ const regionStatusValidation = [
   body('regionLeadDays.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('regionLeadDays[].deliveryLeadDays must be a whole number between 0 and 30'),
+  body('regionLeadDays.*.cashArrangementFeeStepAmount')
+    .optional({ values: 'null' })
+    .isFloat({ gt: 0, max: 99999999.99 }).withMessage('regionLeadDays[].cashArrangementFeeStepAmount must be between 0 and 99999999.99'),
+  body('regionLeadDays.*.cashArrangementFeeMarginPercent')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 1000 }).withMessage('regionLeadDays[].cashArrangementFeeMarginPercent must be between 0 and 1000'),
   // Per-delivery-zone lead-day overrides (highest precedence). Each { zoneId, deliveryLeadDays }.
   body('zoneLeadDays').optional().isArray().withMessage('zoneLeadDays must be an array'),
   body('zoneLeadDays.*.zoneId').isString().trim().notEmpty().withMessage('zoneLeadDays[].zoneId is required'),
   body('zoneLeadDays.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('zoneLeadDays[].deliveryLeadDays must be a whole number between 0 and 30'),
+  body('zoneLeadDays.*.cashArrangementFeeStepAmount')
+    .optional({ values: 'null' })
+    .isFloat({ gt: 0, max: 99999999.99 }).withMessage('zoneLeadDays[].cashArrangementFeeStepAmount must be between 0 and 99999999.99'),
+  body('zoneLeadDays.*.cashArrangementFeeMarginPercent')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 1000 }).withMessage('zoneLeadDays[].cashArrangementFeeMarginPercent must be between 0 and 1000'),
 ];
 
 /**

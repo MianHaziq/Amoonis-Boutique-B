@@ -23,6 +23,11 @@ const addValidation = [
   body('selectedOptions').optional({ nullable: true }).isObject().withMessage('selectedOptions must be an object'),
   body('giftCardSelected').optional().isBoolean().withMessage('giftCardSelected must be a boolean'),
   body('customName').optional({ nullable: true }).trim().isLength({ max: 120 }).withMessage('customName must be 120 characters or fewer'),
+  // Per-unit cash arrangement for this line (eligibility re-validated at checkout).
+  body('cashArrangement').optional({ nullable: true }).isObject(),
+  body('cashArrangement.cashAmount').optional({ nullable: true }).isFloat({ gt: 0 }),
+  body('cashArrangement.denomination').optional({ nullable: true }).isInt({ gt: 0 }),
+  body('cashArrangement.note').optional({ nullable: true }).trim().isLength({ max: 500 }),
 ];
 
 const updateQtyValidation = [

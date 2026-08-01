@@ -150,12 +150,27 @@ const createValidation = [
   body('regionPrices.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('regionPrices[].deliveryLeadDays must be a whole number between 0 and 30'),
+  // Per-region cash-arrangement fee schedule override (both-or-neither; see
+  // utils/cashArrangementMath.js). null clears the pair back to "no override".
+  body('regionPrices.*.cashArrangementFeeStepAmount')
+    .optional({ values: 'null' })
+    .isFloat({ gt: 0, max: 99999999.99 }).withMessage('regionPrices[].cashArrangementFeeStepAmount must be between 0 and 99999999.99'),
+  body('regionPrices.*.cashArrangementFeeMarginPercent')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 1000 }).withMessage('regionPrices[].cashArrangementFeeMarginPercent must be between 0 and 1000'),
   // Per-delivery-zone "ships within N days" override (highest precedence). null clears it.
   body('zoneLeadDays').optional().isArray().withMessage('zoneLeadDays must be an array'),
   body('zoneLeadDays.*.zoneId').isString().trim().notEmpty().withMessage('zoneLeadDays[].zoneId is required'),
   body('zoneLeadDays.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('zoneLeadDays[].deliveryLeadDays must be a whole number between 0 and 30'),
+  // Per-delivery-zone cash-arrangement fee schedule override (highest precedence).
+  body('zoneLeadDays.*.cashArrangementFeeStepAmount')
+    .optional({ values: 'null' })
+    .isFloat({ gt: 0, max: 99999999.99 }).withMessage('zoneLeadDays[].cashArrangementFeeStepAmount must be between 0 and 99999999.99'),
+  body('zoneLeadDays.*.cashArrangementFeeMarginPercent')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 1000 }).withMessage('zoneLeadDays[].cashArrangementFeeMarginPercent must be between 0 and 1000'),
   // Gift card add-on — free personalized message, toggled per product.
   body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
   body('giftCardExtraPrice')
@@ -176,6 +191,14 @@ const createValidation = [
   body('deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('deliveryLeadDays must be a whole number between 0 and 30'),
+  // Default cash-arrangement fee schedule for this product (both-or-neither; see
+  // utils/cashArrangementMath.js for the full precedence chain).
+  body('cashArrangementFeeStepAmount')
+    .optional({ values: 'null' })
+    .isFloat({ gt: 0, max: 99999999.99 }).withMessage('cashArrangementFeeStepAmount must be between 0 and 99999999.99'),
+  body('cashArrangementFeeMarginPercent')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 1000 }).withMessage('cashArrangementFeeMarginPercent must be between 0 and 1000'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),
   body('descriptions.*.title_ar').optional().trim(),
@@ -207,6 +230,30 @@ const createValidation = [
   body('productOptions.*.options.*').optional().isString().trim(),
   body('productOptions.*.options_ar').optional().isArray().withMessage('productOptions.*.options_ar must be an array of strings'),
   body('productOptions.*.options_ar.*').optional().isString().trim(),
+  // Marks this group as the one whose values drive `variants` below (e.g. "Size").
+  body('productOptions.*.isVariantAxis').optional().isBoolean().withMessage('productOptions.*.isVariantAxis must be a boolean'),
+  // Optional Small/Medium/Large-style variants — each row is its own price/photos/
+  // contents. Empty/omitted = a plain product (the vast majority), unchanged behavior.
+  body('variants').optional().isArray().withMessage('variants must be an array'),
+  body('variants.*.optionValue').optional().trim(),
+  body('variants.*.optionValue_ar').optional().trim(),
+  body('variants.*.price')
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('variants[].price must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('variants[].price supports at most 2 decimal places'),
+  body('variants.*.discountedPrice')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('variants[].discountedPrice must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('variants[].discountedPrice supports at most 2 decimal places'),
+  body('variants.*.images').optional().isArray().withMessage('variants[].images must be an array of image URLs'),
+  body('variants.*.images.*').optional().isString().trim().notEmpty().withMessage('Each variant image must be a non-empty URL string'),
+  body('variants.*.contents').optional().trim(),
+  body('variants.*.contents_ar').optional().trim(),
+  body('variants.*.isDefault').optional().isBoolean().withMessage('variants.*.isDefault must be a boolean'),
+  // Each variant row must have at least one side filled for its label (English OR Arabic).
+  body('variants')
+    .optional()
+    .custom((arr) => eachRowHasOneSide(arr, [['optionValue', 'optionValue_ar']]))
+    .withMessage('Each variant must have either "optionValue" or "optionValue_ar"'),
   // Each productOption row must have at least one side filled for its title.
   body('productOptions')
     .optional()
@@ -251,12 +298,27 @@ const updateValidation = [
   body('regionPrices.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('regionPrices[].deliveryLeadDays must be a whole number between 0 and 30'),
+  // Per-region cash-arrangement fee schedule override (both-or-neither; see
+  // utils/cashArrangementMath.js). null clears the pair back to "no override".
+  body('regionPrices.*.cashArrangementFeeStepAmount')
+    .optional({ values: 'null' })
+    .isFloat({ gt: 0, max: 99999999.99 }).withMessage('regionPrices[].cashArrangementFeeStepAmount must be between 0 and 99999999.99'),
+  body('regionPrices.*.cashArrangementFeeMarginPercent')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 1000 }).withMessage('regionPrices[].cashArrangementFeeMarginPercent must be between 0 and 1000'),
   // Per-delivery-zone "ships within N days" override (highest precedence). null clears it.
   body('zoneLeadDays').optional().isArray().withMessage('zoneLeadDays must be an array'),
   body('zoneLeadDays.*.zoneId').isString().trim().notEmpty().withMessage('zoneLeadDays[].zoneId is required'),
   body('zoneLeadDays.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('zoneLeadDays[].deliveryLeadDays must be a whole number between 0 and 30'),
+  // Per-delivery-zone cash-arrangement fee schedule override (highest precedence).
+  body('zoneLeadDays.*.cashArrangementFeeStepAmount')
+    .optional({ values: 'null' })
+    .isFloat({ gt: 0, max: 99999999.99 }).withMessage('zoneLeadDays[].cashArrangementFeeStepAmount must be between 0 and 99999999.99'),
+  body('zoneLeadDays.*.cashArrangementFeeMarginPercent')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 1000 }).withMessage('zoneLeadDays[].cashArrangementFeeMarginPercent must be between 0 and 1000'),
   // Gift card add-on — free personalized message, toggled per product.
   body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
   body('giftCardExtraPrice')
@@ -280,6 +342,14 @@ const updateValidation = [
   body('deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('deliveryLeadDays must be a whole number between 0 and 30'),
+  // Default cash-arrangement fee schedule for this product (both-or-neither; see
+  // utils/cashArrangementMath.js for the full precedence chain).
+  body('cashArrangementFeeStepAmount')
+    .optional({ values: 'null' })
+    .isFloat({ gt: 0, max: 99999999.99 }).withMessage('cashArrangementFeeStepAmount must be between 0 and 99999999.99'),
+  body('cashArrangementFeeMarginPercent')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 1000 }).withMessage('cashArrangementFeeMarginPercent must be between 0 and 1000'),
   body('descriptions').optional().isArray().withMessage('descriptions must be an array'),
   body('descriptions.*.title').optional().trim(),
   body('descriptions.*.title_ar').optional().trim(),
@@ -311,6 +381,30 @@ const updateValidation = [
   body('productOptions.*.options.*').optional().isString().trim(),
   body('productOptions.*.options_ar').optional().isArray().withMessage('productOptions.*.options_ar must be an array of strings'),
   body('productOptions.*.options_ar.*').optional().isString().trim(),
+  // Marks this group as the one whose values drive `variants` below (e.g. "Size").
+  body('productOptions.*.isVariantAxis').optional().isBoolean().withMessage('productOptions.*.isVariantAxis must be a boolean'),
+  // Optional Small/Medium/Large-style variants — each row is its own price/photos/
+  // contents. Empty/omitted = a plain product (the vast majority), unchanged behavior.
+  body('variants').optional().isArray().withMessage('variants must be an array'),
+  body('variants.*.optionValue').optional().trim(),
+  body('variants.*.optionValue_ar').optional().trim(),
+  body('variants.*.price')
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('variants[].price must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('variants[].price supports at most 2 decimal places'),
+  body('variants.*.discountedPrice')
+    .optional({ values: 'null' })
+    .isFloat({ min: 0, max: 99999999.99 }).withMessage('variants[].discountedPrice must be between 0 and 99999999.99').bail()
+    .custom(isTwoDecimals).withMessage('variants[].discountedPrice supports at most 2 decimal places'),
+  body('variants.*.images').optional().isArray().withMessage('variants[].images must be an array of image URLs'),
+  body('variants.*.images.*').optional().isString().trim().notEmpty().withMessage('Each variant image must be a non-empty URL string'),
+  body('variants.*.contents').optional().trim(),
+  body('variants.*.contents_ar').optional().trim(),
+  body('variants.*.isDefault').optional().isBoolean().withMessage('variants.*.isDefault must be a boolean'),
+  // Each variant row must have at least one side filled for its label (English OR Arabic).
+  body('variants')
+    .optional()
+    .custom((arr) => eachRowHasOneSide(arr, [['optionValue', 'optionValue_ar']]))
+    .withMessage('Each variant must have either "optionValue" or "optionValue_ar"'),
   body('productOptions')
     .optional()
     .custom((arr) => eachRowHasOneSide(arr, [['title', 'title_ar']]))

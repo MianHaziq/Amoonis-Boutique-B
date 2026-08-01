@@ -14,7 +14,7 @@ async function regionFromReq(req) {
 async function addToCart(req, res, next) {
   try {
     const userId = req.userId;
-    const { productId, quantity, message, selectedOptions, giftCardSelected, customName } = req.body;
+    const { productId, quantity, message, selectedOptions, giftCardSelected, customName, cashArrangement } = req.body;
     const { cart, error: errMsg } = await cartService.addToCart(userId, {
       productId,
       quantity,
@@ -22,6 +22,7 @@ async function addToCart(req, res, next) {
       selectedOptions,
       giftCardSelected,
       customName,
+      cashArrangement,
     });
     if (errMsg) return error(res, errMsg, 404);
     const region = await regionFromReq(req);

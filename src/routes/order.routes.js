@@ -161,6 +161,8 @@ const checkoutBody = [
   body('shippingAddress.country').optional().trim(),
   body('shippingAddress.area').optional().trim(),
   body('shippingAddress.deliveryZoneId').optional({ checkFalsy: true }).isUUID().withMessage('deliveryZoneId must be a valid id'),
+  // Cash arrangement for a CART checkout is per-line and stored ON the cart (set at
+  // add-to-cart time) — it is NOT accepted in the checkout body. See cart.routes.js.
 ];
 
 router.post(
@@ -235,6 +237,11 @@ const guestCheckoutBody = [
   body('items.*.selectedOptions').optional({ nullable: true }).isObject().withMessage('selectedOptions must be an object'),
   body('items.*.giftCardSelected').optional().isBoolean().withMessage('giftCardSelected must be a boolean'),
   body('items.*.customName').optional({ nullable: true }).trim().isLength({ max: 120 }).withMessage('customName must be 120 characters or fewer'),
+  // Per-line cash arrangement (guests send items in the body).
+  body('items.*.cashArrangement').optional({ nullable: true }).isObject().withMessage('cashArrangement must be an object'),
+  body('items.*.cashArrangement.cashAmount').optional({ nullable: true }).isFloat({ gt: 0 }).withMessage('cashArrangement.cashAmount must be a positive number'),
+  body('items.*.cashArrangement.denomination').optional({ nullable: true }).isInt({ gt: 0 }).withMessage('cashArrangement.denomination must be a positive whole number'),
+  body('items.*.cashArrangement.note').optional({ nullable: true }).trim().isLength({ max: 500 }).withMessage('cashArrangement.note must be 500 characters or fewer'),
   body('email').optional({ nullable: true }).trim().isEmail().withMessage('A valid email is required'),
   body('orderMessage').optional({ nullable: true }).trim(),
   body('promoCode').optional().trim().isLength({ max: 50 }).withMessage('promoCode too long'),
@@ -310,6 +317,10 @@ const buyNowBody = [
   body('selectedOptions').optional({ nullable: true }).isObject().withMessage('selectedOptions must be an object'),
   body('giftCardSelected').optional().isBoolean().withMessage('giftCardSelected must be a boolean'),
   body('customName').optional({ nullable: true }).trim().isLength({ max: 120 }).withMessage('customName must be 120 characters or fewer'),
+  body('cashArrangement').optional({ nullable: true }).isObject().withMessage('cashArrangement must be an object'),
+  body('cashArrangement.cashAmount').optional({ nullable: true }).isFloat({ gt: 0 }).withMessage('cashArrangement.cashAmount must be a positive number'),
+  body('cashArrangement.denomination').optional({ nullable: true }).isInt({ gt: 0 }).withMessage('cashArrangement.denomination must be a positive whole number'),
+  body('cashArrangement.note').optional({ nullable: true }).trim().isLength({ max: 500 }).withMessage('cashArrangement.note must be 500 characters or fewer'),
 ];
 router.post(
   '/buy-now',

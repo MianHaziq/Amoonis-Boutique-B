@@ -168,6 +168,8 @@ function renderOrderConfirmation(order) {
               .join(', ')
           : '';
       const giftLine = [it.giftCardSelected ? 'Gift card' : null, it.customName].filter(Boolean).join(' · ');
+      // The gift card's personalized note (per line/unit), shown as a quote below the badge.
+      const giftMessage = String(it.perProductMessage == null ? '' : it.perProductMessage).trim();
       const thumb = image
         ? `<img src="${esc(image)}" width="48" height="48" style="display:block;border-radius:8px;object-fit:cover;border:0;" alt="">`
         : `<div style="width:48px;height:48px;border-radius:8px;background:${BLOOM_TINT};"></div>`;
@@ -179,6 +181,7 @@ function renderOrderConfirmation(order) {
               <p style="margin:0;font-weight:500;">${esc(title)}</p>
               ${variant ? `<p style="margin:2px 0 0;font-size:12px;color:${MUTED};">${esc(variant)}</p>` : ''}
               ${giftLine ? `<p style="margin:2px 0 0;font-size:12px;color:${BLOOM_DARK};">${esc(giftLine)}</p>` : ''}
+              ${giftMessage ? `<p style="margin:2px 0 0;font-size:12px;color:${MUTED};font-style:italic;">&ldquo;${esc(giftMessage)}&rdquo;</p>` : ''}
             </td>
           </tr></table>
         </td>

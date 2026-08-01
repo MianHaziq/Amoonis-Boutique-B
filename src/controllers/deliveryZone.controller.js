@@ -30,7 +30,7 @@ async function createZone(req, res, next) {
     const zone = await deliveryZoneService.createZone(req.body);
     return success(res, zone, 'Delivery zone created successfully', 201);
   } catch (err) {
-    if (err.code === 'VALIDATION') return error(res, err.message, 400);
+    if (err.code === 'VALIDATION' || err.code === 'CASH_ARRANGEMENT_INVALID_LIST') return error(res, err.message, 400);
     if (err.code === 'P2002') return error(res, 'A zone with this name already exists in this region', 409);
     if (err.code === 'P2003') return error(res, 'Unknown regionId', 400);
     next(err);
@@ -48,7 +48,7 @@ async function createZonesBulk(req, res, next) {
     const result = await deliveryZoneService.createZonesBulk(regionId, zones);
     return success(res, result, 'Delivery zones created successfully', 201);
   } catch (err) {
-    if (err.code === 'VALIDATION') return error(res, err.message, 400);
+    if (err.code === 'VALIDATION' || err.code === 'CASH_ARRANGEMENT_INVALID_LIST') return error(res, err.message, 400);
     if (err.code === 'P2002') return error(res, 'A zone with this name already exists in this region', 409);
     if (err.code === 'P2003') return error(res, 'Unknown regionId', 400);
     next(err);
@@ -64,7 +64,7 @@ async function updateZone(req, res, next) {
     if (!zone) return error(res, 'Delivery zone not found', 404);
     return success(res, zone, 'Delivery zone updated successfully', 200);
   } catch (err) {
-    if (err.code === 'VALIDATION') return error(res, err.message, 400);
+    if (err.code === 'VALIDATION' || err.code === 'CASH_ARRANGEMENT_INVALID_LIST') return error(res, err.message, 400);
     if (err.code === 'P2002') return error(res, 'A zone with this name already exists in this region', 409);
     if (err.code === 'P2003') return error(res, 'Unknown regionId', 400);
     if (err.code === 'P2025') return error(res, 'Delivery zone not found', 404);

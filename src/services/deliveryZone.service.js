@@ -14,6 +14,7 @@ const {
   parseHHmmOrNull,
   assertMinMaxOrder,
 } = require('../utils/deliveryConfigParse');
+const { parseCashArrangementAmountList, parseCashArrangementFeeSchedule } = require('../utils/cashArrangementMath');
 
 const ZONE_SELECT = {
   id: true,
@@ -32,6 +33,13 @@ const ZONE_SELECT = {
   codEnabled: true,
   minOrderAmount: true,
   maxOrderAmount: true,
+  // Cash-arrangement quick-pick amounts / denominations for this zone (null / [] = inherit
+  // the region's CashArrangementConfig lists). See cashArrangement.service.js#resolveForOrder.
+  cashArrangementQuickPickAmounts: true,
+  cashArrangementDenominations: true,
+  // Zone-wide FLAT cash-arrangement fee (both-or-neither; null = inherit the region's flat fee).
+  cashArrangementFeeStepAmount: true,
+  cashArrangementFeeMarginPercent: true,
   createdAt: true,
   updatedAt: true,
 };
@@ -58,6 +66,29 @@ function buildZoneConfigPayload(data, { partial = false } = {}) {
   assertMinMaxOrder(min, max);
   set('minOrderAmount', data.minOrderAmount !== undefined, min);
   set('maxOrderAmount', data.maxOrderAmount !== undefined, max);
+  // [] (default) = inherit the region's CashArrangementConfig lists — same "empty = inherit"
+  // convention as deliveryDays above, not a null-based one (Prisma scalar lists can't be null).
+  set(
+    'cashArrangementQuickPickAmounts',
+    data.cashArrangementQuickPickAmounts !== undefined,
+    parseCashArrangementAmountList(data.cashArrangementQuickPickAmounts, { fieldName: 'cashArrangementQuickPickAmounts' }) ?? []
+  );
+  set(
+    'cashArrangementDenominations',
+    data.cashArrangementDenominations !== undefined,
+    parseCashArrangementAmountList(data.cashArrangementDenominations, { fieldName: 'cashArrangementDenominations' }) ?? []
+  );
+  // Zone-wide FLAT cash-arrangement fee (both-or-neither pair). On update, only touched when
+  // EITHER field is sent — parse both together so a lone value is rejected and the columns
+  // stay consistent. null/'' on both clears the zone flat fee (falls back to region flat).
+  if (!partial || data.cashArrangementFeeStepAmount !== undefined || data.cashArrangementFeeMarginPercent !== undefined) {
+    const fee = parseCashArrangementFeeSchedule({
+      feeStepAmount: data.cashArrangementFeeStepAmount,
+      feeMarginPercent: data.cashArrangementFeeMarginPercent,
+    });
+    payload.cashArrangementFeeStepAmount = fee.feeStepAmount;
+    payload.cashArrangementFeeMarginPercent = fee.feeMarginPercent;
+  }
   return payload;
 }
 

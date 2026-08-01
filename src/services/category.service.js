@@ -4,6 +4,9 @@ const regionService = require('./region.service');
 const productService = require('./product.service');
 const { buildVisibilityWhere } = require('../utils/regionVisibility');
 const { parseDeliveryLeadDays } = require('../utils/deliveryLeadDays');
+const { parseCashArrangementFeeSchedule } = require('../utils/cashArrangementMath');
+
+const decimalToNumber = (v) => (v == null ? null : Number(v));
 
 const CATEGORY_BILINGUAL = [
   { src: 'title', dst: 'title_ar' },
@@ -14,7 +17,14 @@ const CATEGORY_REQUIRED_PAIRS = [{ src: 'title', dst: 'title_ar' }];
 
 const REGION_INCLUDE = {
   regions: { include: { region: { select: { id: true, code: true, name: true, name_ar: true } } } },
-  zoneLeadDays: { select: { zoneId: true, deliveryLeadDays: true } },
+  zoneLeadDays: {
+    select: {
+      zoneId: true,
+      deliveryLeadDays: true,
+      cashArrangementFeeStepAmount: true,
+      cashArrangementFeeMarginPercent: true,
+    },
+  },
 };
 
 function normalizeStatus(value, fallback = 'DRAFT') {
@@ -34,45 +44,69 @@ async function resolveWriteRegionIds(regionIds) {
 /** Shape a category row (with regions/_count includes) for API output. */
 function mapCategory(category) {
   if (!category) return null;
-  const { regions, zoneLeadDays, _count, ...rest } = category;
+  const {
+    regions,
+    zoneLeadDays,
+    _count,
+    cashArrangementFeeStepAmount,
+    cashArrangementFeeMarginPercent,
+    ...rest
+  } = category;
   const out = {
     ...rest,
     totalProducts: _count?.products ?? rest.totalProducts,
+    cashArrangementFeeStepAmount: decimalToNumber(cashArrangementFeeStepAmount),
+    cashArrangementFeeMarginPercent: decimalToNumber(cashArrangementFeeMarginPercent),
   };
   // Region tags only attached for staff reads (storefront doesn't need them).
   if (Array.isArray(regions)) {
     const regionList = regions.map((r) => r.region).filter(Boolean);
     out.regions = regionList;
     out.regionIds = regionList.map((r) => r.id);
-    // Per-region "ships within N days" overrides, so the admin edit form can show
-    // and edit a different lead time per region. Additive alongside the tags.
+    // Per-region "ships within N days" + cash-arrangement fee overrides, so the admin
+    // edit form can show and edit a different value per region. Additive alongside the tags.
     out.regionLeadDays = regions.map((r) => ({
       regionId: r.regionId,
       deliveryLeadDays: r.deliveryLeadDays ?? null,
+      cashArrangementFeeStepAmount: decimalToNumber(r.cashArrangementFeeStepAmount),
+      cashArrangementFeeMarginPercent: decimalToNumber(r.cashArrangementFeeMarginPercent),
     }));
-    // Per-zone lead overrides (highest precedence), for the admin edit form.
+    // Per-zone overrides (highest precedence), for the admin edit form.
     out.zoneLeadDays = (zoneLeadDays ?? []).map((z) => ({
       zoneId: z.zoneId,
       deliveryLeadDays: z.deliveryLeadDays ?? null,
+      cashArrangementFeeStepAmount: decimalToNumber(z.cashArrangementFeeStepAmount),
+      cashArrangementFeeMarginPercent: decimalToNumber(z.cashArrangementFeeMarginPercent),
     }));
   }
   return out;
 }
 
-/** Index an incoming `regionLeadDays: {regionId, deliveryLeadDays}[]` payload,
- *  validating each value (throws VALIDATION on a bad number). */
+/** Index an incoming `regionLeadDays: {regionId, deliveryLeadDays, cashArrangementFeeStepAmount,
+ *  cashArrangementFeeMarginPercent}[]` payload into a Map of {deliveryLeadDays, cashArrangementFeeStepAmount,
+ *  cashArrangementFeeMarginPercent}, validating each value (throws VALIDATION on a bad number). */
 function buildCategoryRegionLeadMap(regionLeadDays) {
   const map = new Map();
   if (!Array.isArray(regionLeadDays)) return map;
   for (const entry of regionLeadDays) {
     if (!entry || typeof entry.regionId !== 'string' || !entry.regionId) continue;
-    map.set(entry.regionId, parseDeliveryLeadDays(entry.deliveryLeadDays));
+    const deliveryLeadDays = parseDeliveryLeadDays(entry.deliveryLeadDays);
+    const feeSchedule = parseCashArrangementFeeSchedule({
+      feeStepAmount: entry.cashArrangementFeeStepAmount,
+      feeMarginPercent: entry.cashArrangementFeeMarginPercent,
+    });
+    map.set(entry.regionId, {
+      deliveryLeadDays,
+      cashArrangementFeeStepAmount: feeSchedule.feeStepAmount,
+      cashArrangementFeeMarginPercent: feeSchedule.feeMarginPercent,
+    });
   }
   return map;
 }
 
-/** Clean a `zoneLeadDays: [{ zoneId, deliveryLeadDays }]` payload into CategoryZone rows,
- *  keeping only entries with a real (non-null) override. */
+/** Clean a `zoneLeadDays: [{ zoneId, deliveryLeadDays, cashArrangementFeeStepAmount,
+ *  cashArrangementFeeMarginPercent }]` payload into CategoryZone rows, keeping only entries
+ *  with a real override (a non-null lead OR a cash-arrangement fee schedule). */
 function buildCategoryZoneLeadRows(zoneLeadDays) {
   if (!Array.isArray(zoneLeadDays)) return [];
   const rows = [];
@@ -81,9 +115,18 @@ function buildCategoryZoneLeadRows(zoneLeadDays) {
     if (!entry || typeof entry.zoneId !== 'string' || !entry.zoneId) continue;
     if (seen.has(entry.zoneId)) continue;
     const lead = parseDeliveryLeadDays(entry.deliveryLeadDays);
-    if (lead == null) continue;
+    const feeSchedule = parseCashArrangementFeeSchedule({
+      feeStepAmount: entry.cashArrangementFeeStepAmount,
+      feeMarginPercent: entry.cashArrangementFeeMarginPercent,
+    });
+    if (lead == null && feeSchedule.feeStepAmount == null) continue;
     seen.add(entry.zoneId);
-    rows.push({ zoneId: entry.zoneId, deliveryLeadDays: lead });
+    rows.push({
+      zoneId: entry.zoneId,
+      deliveryLeadDays: lead,
+      cashArrangementFeeStepAmount: feeSchedule.feeStepAmount,
+      cashArrangementFeeMarginPercent: feeSchedule.feeMarginPercent,
+    });
   }
   return rows;
 }
@@ -95,9 +138,15 @@ async function createCategory(data) {
   // category that doesn't set its own Product.deliveryLeadDays. null/undefined -> no
   // override (falls through to the global default).
   const deliveryLeadDays = parseDeliveryLeadDays(data.deliveryLeadDays);
-  // Optional PER-REGION lead-day overrides (same lead time can differ by region).
+  // Default cash-arrangement fee schedule for this category (both-or-neither; see
+  // utils/cashArrangementMath.js for the full precedence chain).
+  const cashArrangementFee = parseCashArrangementFeeSchedule({
+    feeStepAmount: data.cashArrangementFeeStepAmount,
+    feeMarginPercent: data.cashArrangementFeeMarginPercent,
+  });
+  // Optional PER-REGION lead-day + cash-arrangement fee overrides (same values can differ by region).
   const regionLeadMap = buildCategoryRegionLeadMap(data.regionLeadDays);
-  // Optional PER-ZONE lead-day overrides (highest precedence).
+  // Optional PER-ZONE overrides (highest precedence).
   const zoneLeadRows = buildCategoryZoneLeadRows(data.zoneLeadDays);
 
   const draft = {
@@ -119,13 +168,20 @@ async function createCategory(data) {
       totalProducts: 0,
       status,
       deliveryLeadDays,
+      cashArrangementFeeStepAmount: cashArrangementFee.feeStepAmount,
+      cashArrangementFeeMarginPercent: cashArrangementFee.feeMarginPercent,
       ...(regionIds.length > 0
         ? {
             regions: {
-              create: regionIds.map((regionId) => ({
-                regionId,
-                deliveryLeadDays: regionLeadMap.get(regionId) ?? null,
-              })),
+              create: regionIds.map((regionId) => {
+                const rl = regionLeadMap.get(regionId);
+                return {
+                  regionId,
+                  deliveryLeadDays: rl?.deliveryLeadDays ?? null,
+                  cashArrangementFeeStepAmount: rl?.cashArrangementFeeStepAmount ?? null,
+                  cashArrangementFeeMarginPercent: rl?.cashArrangementFeeMarginPercent ?? null,
+                };
+              }),
             },
           }
         : {}),
@@ -160,9 +216,18 @@ async function updateCategory(id, data) {
   if (wantRegionRewrite) {
     const rows = await prisma.categoryRegion.findMany({
       where: { categoryId: id },
-      select: { regionId: true, deliveryLeadDays: true },
+      select: {
+        regionId: true,
+        deliveryLeadDays: true,
+        cashArrangementFeeStepAmount: true,
+        cashArrangementFeeMarginPercent: true,
+      },
     });
-    existingCatRegionLead = new Map(rows.map((r) => [r.regionId, r.deliveryLeadDays ?? null]));
+    existingCatRegionLead = new Map(rows.map((r) => [r.regionId, {
+      deliveryLeadDays: r.deliveryLeadDays ?? null,
+      cashArrangementFeeStepAmount: decimalToNumber(r.cashArrangementFeeStepAmount),
+      cashArrangementFeeMarginPercent: decimalToNumber(r.cashArrangementFeeMarginPercent),
+    }]));
     existingCatRegionIds = rows.map((r) => r.regionId);
   }
 
@@ -185,6 +250,18 @@ async function updateCategory(id, data) {
         // Optional override; omit to leave untouched, or send null to clear it back to
         // "no override" (falls through to Settings.defaultDeliveryLeadDays).
         ...(data.deliveryLeadDays !== undefined && { deliveryLeadDays: parseDeliveryLeadDays(data.deliveryLeadDays) }),
+        // Fee schedule is a matched pair — only touched when EITHER field is sent (both-or-
+        // neither enforced by parseCashArrangementFeeSchedule).
+        ...((data.cashArrangementFeeStepAmount !== undefined || data.cashArrangementFeeMarginPercent !== undefined) && (() => {
+          const fee = parseCashArrangementFeeSchedule({
+            feeStepAmount: data.cashArrangementFeeStepAmount,
+            feeMarginPercent: data.cashArrangementFeeMarginPercent,
+          });
+          return {
+            cashArrangementFeeStepAmount: fee.feeStepAmount,
+            cashArrangementFeeMarginPercent: fee.feeMarginPercent,
+          };
+        })()),
       },
     });
     if (wantRegionRewrite) {
@@ -194,14 +271,20 @@ async function updateCategory(id, data) {
       await tx.categoryRegion.deleteMany({ where: { categoryId: id } });
       if (targetRegionIds.length > 0) {
         await tx.categoryRegion.createMany({
-          data: targetRegionIds.map((regionId) => ({
-            categoryId: id,
-            regionId,
-            // Incoming per-region lead wins (even null = clear); else carry existing forward.
-            deliveryLeadDays: regionLeadMap.has(regionId)
+          data: targetRegionIds.map((regionId) => {
+            // Incoming per-region entry wins (even null = clear); else carry existing forward
+            // so an edit to one region's lead/fee doesn't null out another region's values.
+            const rl = regionLeadMap.has(regionId)
               ? regionLeadMap.get(regionId)
-              : existingCatRegionLead.get(regionId) ?? null,
-          })),
+              : existingCatRegionLead.get(regionId);
+            return {
+              categoryId: id,
+              regionId,
+              deliveryLeadDays: rl?.deliveryLeadDays ?? null,
+              cashArrangementFeeStepAmount: rl?.cashArrangementFeeStepAmount ?? null,
+              cashArrangementFeeMarginPercent: rl?.cashArrangementFeeMarginPercent ?? null,
+            };
+          }),
           skipDuplicates: true,
         });
       }

@@ -8,19 +8,32 @@ const {
   resolveDeliveryLeadDays,
   getDefaultDeliveryLeadDays,
 } = require('../utils/deliveryLeadDays');
+const { parseCashArrangementFeeSchedule } = require('../utils/cashArrangementMath');
 
 // Standard include for region join rows on a product read (staff/admin only).
 const REGION_INCLUDE = {
   regions: { include: { region: { select: { id: true, code: true, name: true, name_ar: true } } } },
-  // Per-zone prep-lead overrides — surfaced to the admin edit form so it can show/edit
-  // every zone's lead at once (mirrors regionPrices). Storefront reads don't include this.
-  zoneLeadDays: { select: { zoneId: true, deliveryLeadDays: true } },
+  // Per-zone prep-lead + cash-arrangement fee overrides — surfaced to the admin edit form
+  // so it can show/edit every zone's overrides at once (mirrors regionPrices). Storefront
+  // reads don't include this.
+  zoneLeadDays: {
+    select: {
+      zoneId: true,
+      deliveryLeadDays: true,
+      cashArrangementFeeStepAmount: true,
+      cashArrangementFeeMarginPercent: true,
+    },
+  },
 };
 
 /**
- * Clean a `zoneLeadDays: [{ zoneId, deliveryLeadDays }]` payload into ProductZone/
- * CategoryZone create rows, keeping only entries with a real (non-null) lead override.
- * Uses the same 0-30 validator as the global/region lead. Returns [] for empty input.
+ * Clean a `zoneLeadDays: [{ zoneId, deliveryLeadDays, cashArrangementFeeStepAmount,
+ * cashArrangementFeeMarginPercent }]` payload into ProductZone/CategoryZone create rows,
+ * keeping only entries with a real override (a non-null lead OR a cash-arrangement fee
+ * schedule) — a zone entry that sets only the fee schedule (no lead override) still needs
+ * a row, so this is NOT gated on `deliveryLeadDays` alone. Uses the same 0-30 validator as
+ * the global/region lead, and parseCashArrangementFeeSchedule for the fee pair (both-or-
+ * neither). Returns [] for empty input.
  */
 function buildZoneLeadRows(zoneLeadDays) {
   if (!Array.isArray(zoneLeadDays)) return [];
@@ -30,9 +43,18 @@ function buildZoneLeadRows(zoneLeadDays) {
     if (!entry || typeof entry.zoneId !== 'string' || !entry.zoneId) continue;
     if (seen.has(entry.zoneId)) continue;
     const lead = parseDeliveryLeadDays(entry.deliveryLeadDays);
-    if (lead == null) continue; // null = no override; don't store a row
+    const feeSchedule = parseCashArrangementFeeSchedule({
+      feeStepAmount: entry.cashArrangementFeeStepAmount,
+      feeMarginPercent: entry.cashArrangementFeeMarginPercent,
+    });
+    if (lead == null && feeSchedule.feeStepAmount == null) continue; // no override at all; don't store a row
     seen.add(entry.zoneId);
-    rows.push({ zoneId: entry.zoneId, deliveryLeadDays: lead });
+    rows.push({
+      zoneId: entry.zoneId,
+      deliveryLeadDays: lead,
+      cashArrangementFeeStepAmount: feeSchedule.feeStepAmount,
+      cashArrangementFeeMarginPercent: feeSchedule.feeMarginPercent,
+    });
   }
   return rows;
 }
@@ -49,11 +71,16 @@ const PRODUCT_OPTION_BILINGUAL = [
   { src: 'title', dst: 'title_ar' },
   { src: 'options', dst: 'options_ar', kind: 'arrayOfString' },
 ];
+const PRODUCT_VARIANT_BILINGUAL = [
+  { src: 'optionValue', dst: 'optionValue_ar' },
+  { src: 'contents', dst: 'contents_ar' },
+];
 
 // NOT NULL constraints in the schema — must be filled at write time.
 const PRODUCT_REQUIRED_PAIRS = [{ src: 'title', dst: 'title_ar' }];
 const PRODUCT_DESCRIPTION_REQUIRED_PAIRS = [{ src: 'description', dst: 'description_ar' }];
 const PRODUCT_OPTION_REQUIRED_PAIRS = [{ src: 'title', dst: 'title_ar' }];
+const PRODUCT_VARIANT_REQUIRED_PAIRS = [{ src: 'optionValue', dst: 'optionValue_ar' }];
 
 const MAX_IMAGES = 10;
 const ACTIVE_ORDER_STATUSES = ['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD'];
@@ -97,7 +124,46 @@ function orderedProductOptions(product) {
     // Additive: per-value image SETS (array-of-arrays), aligned with `options`.
     // Null/absent when unused; consumers fall back to single `optionImages`.
     optionImageSets: Array.isArray(o.optionImageSets) ? o.optionImageSets : [],
+    // Marks this the group whose values drive Product.variants (price/photos/contents).
+    isVariantAxis: !!o.isVariantAxis,
   }));
+}
+
+function orderedVariants(product) {
+  const list = product.variants && Array.isArray(product.variants)
+    ? [...product.variants].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+    : [];
+  return list.map((v) => ({
+    id: v.id,
+    optionValue: v.optionValue,
+    optionValue_ar: v.optionValue_ar ?? null,
+    price: decimalToNumber(v.price),
+    discountedPrice: decimalToNumber(v.discountedPrice),
+    images: Array.isArray(v.images) ? v.images : [],
+    contents: v.contents ?? null,
+    contents_ar: v.contents_ar ?? null,
+    isDefault: !!v.isDefault,
+    sortOrder: v.sortOrder,
+  }));
+}
+
+/**
+ * "From X to Y" price span across a product's variants (using each variant's own
+ * discounted price when it's actually lower, same rule as effective-price elsewhere).
+ * Null when the product has no variants — callers fall back to the plain price.
+ */
+function variantPriceRange(variants) {
+  if (!Array.isArray(variants) || variants.length === 0) return null;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of variants) {
+    const price = decimalToNumber(v.price);
+    const discountedPrice = decimalToNumber(v.discountedPrice);
+    const effective = discountedPrice != null && discountedPrice < price ? discountedPrice : price;
+    if (effective < min) min = effective;
+    if (effective > max) max = effective;
+  }
+  return { min, max };
 }
 
 function mapProduct(product) {
@@ -107,25 +173,40 @@ function mapProduct(product) {
     discountedPrice,
     giftCardExtraPrice,
     customNamePrice,
+    cashArrangementFeeStepAmount,
+    cashArrangementFeeMarginPercent,
     images,
     descriptions,
     productOptions,
+    variants,
     regions,
+    zoneLeadDays,
     ...rest
   } = product;
   const imagesList = orderedImages(product);
   const descriptionsList = orderedDescriptions(product);
   const productOptionsList = orderedProductOptions(product);
+  const variantsList = orderedVariants(product);
   const out = {
     ...rest,
     price: decimalToNumber(price),
     discountedPrice: decimalToNumber(discountedPrice),
     giftCardExtraPrice: decimalToNumber(giftCardExtraPrice),
     customNamePrice: decimalToNumber(customNamePrice),
+    cashArrangementFeeStepAmount: decimalToNumber(cashArrangementFeeStepAmount),
+    cashArrangementFeeMarginPercent: decimalToNumber(cashArrangementFeeMarginPercent),
     images: imagesList.map((i) => i.url),
     image: imagesList[0]?.url ?? null,
     descriptions: descriptionsList,
     productOptions: productOptionsList,
+    // Additive: Small/Medium/Large-style variants, each with its own price/photos/
+    // contents. Empty array for every product that doesn't use this (the vast
+    // majority) — older clients (mobile) never read this and keep using the plain
+    // price/discountedPrice above, which mirror the default variant when one exists.
+    variants: variantsList,
+    // "From X to Y" span across variants, for the storefront/admin "From AED 25"
+    // display. Null when the product has no variants.
+    priceRange: Array.isArray(variants) ? variantPriceRange(variants) : null,
   };
   // `regions` has two possible shapes depending on the caller:
   //  - Staff/admin reads (REGION_INCLUDE): each row carries a nested `region` object —
@@ -146,12 +227,25 @@ function mapProduct(product) {
         price: decimalToNumber(r.price),
         discountedPrice: decimalToNumber(r.discountedPrice),
         deliveryLeadDays: r.deliveryLeadDays ?? null,
+        cashArrangementFeeStepAmount: decimalToNumber(r.cashArrangementFeeStepAmount),
+        cashArrangementFeeMarginPercent: decimalToNumber(r.cashArrangementFeeMarginPercent),
       }));
     } else {
       out._regionPriceRow = regions[0]
         ? { price: decimalToNumber(regions[0].price), discountedPrice: decimalToNumber(regions[0].discountedPrice) }
         : null;
     }
+  }
+  // Per-zone prep-lead + cash-arrangement fee overrides (staff/admin reads only, via
+  // REGION_INCLUDE) — decimal fields need explicit conversion since they're no longer
+  // passed through the raw `...rest` spread above.
+  if (Array.isArray(zoneLeadDays)) {
+    out.zoneLeadDays = zoneLeadDays.map((z) => ({
+      zoneId: z.zoneId,
+      deliveryLeadDays: z.deliveryLeadDays ?? null,
+      cashArrangementFeeStepAmount: decimalToNumber(z.cashArrangementFeeStepAmount),
+      cashArrangementFeeMarginPercent: decimalToNumber(z.cashArrangementFeeMarginPercent),
+    }));
   }
   return out;
 }
@@ -434,10 +528,76 @@ function normalizeProductOptions(productOptions) {
         optionImages,
         optionColors,
         optionImageSets,
+        isVariantAxis: !!item.isVariantAxis,
         sortOrder: i,
       };
     })
     .filter(Boolean);
+}
+
+/**
+ * Validate & normalize a `variants: [{optionValue, price, discountedPrice, images,
+ * contents, isDefault}]` payload into ProductVariant create rows. Throws INVALID_PRICE
+ * (code set) on a missing/invalid price or a discount exceeding its own row's price —
+ * same convention as buildRegionPriceMap. Drops rows with no label on either side.
+ * De-dupes by (case-insensitive) label — the DB's @@unique([productId, optionValue])
+ * would otherwise reject the whole write. Exactly one row ends up `isDefault: true`:
+ * the admin's first explicit choice, else the first remaining row.
+ */
+function normalizeVariants(variants) {
+  if (!Array.isArray(variants)) return [];
+  const rows = variants
+    .map((item, i) => {
+      if (item == null || typeof item !== 'object') return null;
+      const optionValue = item.optionValue != null ? String(item.optionValue).trim() : '';
+      const optionValue_ar = item.optionValue_ar != null ? String(item.optionValue_ar).trim() : '';
+      if (!optionValue && !optionValue_ar) return null;
+
+      const price = item.price != null ? Number(item.price) : NaN;
+      if (!Number.isFinite(price) || price < 0) {
+        const err = new Error(`Variant "${optionValue || optionValue_ar}" requires a valid price`);
+        err.code = 'INVALID_PRICE';
+        throw err;
+      }
+      const discountedPrice = item.discountedPrice != null ? Number(item.discountedPrice) : null;
+      if (discountedPrice != null && discountedPrice > price) {
+        const err = new Error(`discountedPrice cannot exceed price for variant "${optionValue || optionValue_ar}"`);
+        err.code = 'INVALID_PRICE';
+        throw err;
+      }
+      const images = Array.isArray(item.images)
+        ? item.images.filter((u) => typeof u === 'string' && u.trim()).map((u) => u.trim())
+        : [];
+
+      return {
+        optionValue: optionValue || null,
+        optionValue_ar: optionValue_ar || null,
+        price,
+        discountedPrice,
+        images,
+        contents: item.contents != null ? String(item.contents).trim() || null : null,
+        contents_ar: item.contents_ar != null ? String(item.contents_ar).trim() || null : null,
+        isDefault: !!item.isDefault,
+        sortOrder: i,
+      };
+    })
+    .filter(Boolean);
+
+  const seenLabels = new Set();
+  const deduped = rows.filter((row) => {
+    const key = (row.optionValue || row.optionValue_ar || '').toLowerCase();
+    if (seenLabels.has(key)) return false;
+    seenLabels.add(key);
+    return true;
+  });
+
+  const defaultIdx = deduped.findIndex((r) => r.isDefault);
+  deduped.forEach((r, i) => {
+    r.isDefault = defaultIdx >= 0 ? i === defaultIdx : i === 0;
+    r.sortOrder = i;
+  });
+
+  return deduped;
 }
 
 // Normalize a publish status from admin input; defaults to DRAFT.
@@ -483,7 +643,19 @@ function buildRegionPriceMap(regionPrices) {
     // Per-region "ships within N days" override (null = no override). Same validator
     // as the global Product.deliveryLeadDays; throws VALIDATION on a bad value.
     const deliveryLeadDays = parseDeliveryLeadDays(entry.deliveryLeadDays);
-    map.set(entry.regionId, { price, discountedPrice, deliveryLeadDays });
+    // Per-region cash-arrangement fee schedule override (both-or-neither; null/null = no
+    // override at this tier — falls through to the product/category default).
+    const feeSchedule = parseCashArrangementFeeSchedule({
+      feeStepAmount: entry.cashArrangementFeeStepAmount,
+      feeMarginPercent: entry.cashArrangementFeeMarginPercent,
+    });
+    map.set(entry.regionId, {
+      price,
+      discountedPrice,
+      deliveryLeadDays,
+      cashArrangementFeeStepAmount: feeSchedule.feeStepAmount,
+      cashArrangementFeeMarginPercent: feeSchedule.feeMarginPercent,
+    });
   }
   return map;
 }
@@ -494,6 +666,12 @@ async function createProduct(data) {
   // Optional override of Category.deliveryLeadDays / Settings.defaultDeliveryLeadDays for
   // this product specifically. null/undefined -> no override (falls through the chain).
   const deliveryLeadDays = parseDeliveryLeadDays(data.deliveryLeadDays);
+  // Default cash-arrangement fee schedule for this product (both-or-neither; see
+  // utils/cashArrangementMath.js for the full product/category/region/zone precedence chain).
+  const cashArrangementFee = parseCashArrangementFeeSchedule({
+    feeStepAmount: data.cashArrangementFeeStepAmount,
+    feeMarginPercent: data.cashArrangementFeeMarginPercent,
+  });
   // CAT-2: a discount must never exceed the base price (guard here too, not only in the
   // route validator, so non-HTTP callers can't create an inverted price).
   if (data.discountedPrice != null && data.price != null && Number(data.discountedPrice) > Number(data.price)) {
@@ -511,10 +689,22 @@ async function createProduct(data) {
 
   const quantity = data.quantity != null ? Math.max(0, parseInt(data.quantity, 10) || 0) : 0;
   const productOptionRows = normalizeProductOptions(data.productOptions);
+  const variantRows = normalizeVariants(data.variants);
+  // At most one option group drives variants (v1: single-axis) — a second one is
+  // defensively cleared here even if the client somehow sent two.
+  let variantAxisSeen = false;
+  for (const row of productOptionRows) {
+    if (row.isVariantAxis && variantAxisSeen) row.isVariantAxis = false;
+    else if (row.isVariantAxis) variantAxisSeen = true;
+  }
+  // When variants exist, they're the source of truth for price — the top-level
+  // price/discountedPrice mirror the default variant so older (variant-unaware)
+  // clients, e.g. the mobile app, still show a sensible single price.
+  const defaultVariantRow = variantRows.find((v) => v.isDefault) ?? null;
 
   // Auto-translate the en/_ar twins before the DB write. We translate the parent product
-  // fields and every child description/option in a single batched call so an entire
-  // product create costs one round-trip, not N.
+  // fields and every child description/option/variant in a single batched call so an
+  // entire product create costs one round-trip, not N.
   const productDraft = {
     title: data.title ?? null,
     title_ar: data.title_ar ?? null,
@@ -525,6 +715,7 @@ async function createProduct(data) {
     autoTranslate(productDraft, PRODUCT_BILINGUAL),
     autoTranslateMany(descriptionRows, PRODUCT_DESCRIPTION_BILINGUAL),
     autoTranslateMany(productOptionRows, PRODUCT_OPTION_BILINGUAL),
+    autoTranslateMany(variantRows, PRODUCT_VARIANT_BILINGUAL),
   ]);
 
   // If translation failed for any required column, copy the populated side across so
@@ -532,6 +723,7 @@ async function createProduct(data) {
   fillBilingualGapsFromTwin(productDraft, PRODUCT_REQUIRED_PAIRS);
   for (const row of descriptionRows) fillBilingualGapsFromTwin(row, PRODUCT_DESCRIPTION_REQUIRED_PAIRS);
   for (const row of productOptionRows) fillBilingualGapsFromTwin(row, PRODUCT_OPTION_REQUIRED_PAIRS);
+  for (const row of variantRows) fillBilingualGapsFromTwin(row, PRODUCT_VARIANT_REQUIRED_PAIRS);
 
   // Wrap product create + category counter bump in a single transaction so a counter-update
   // failure rolls the product create back instead of leaving the cached count drifted.
@@ -542,13 +734,15 @@ async function createProduct(data) {
         title_ar: productDraft.title_ar ?? null,
         subtitle: productDraft.subtitle ?? null,
         subtitle_ar: productDraft.subtitle_ar ?? null,
-        price: data.price,
-        discountedPrice: data.discountedPrice ?? null,
+        price: defaultVariantRow ? defaultVariantRow.price : data.price,
+        discountedPrice: defaultVariantRow ? defaultVariantRow.discountedPrice : data.discountedPrice ?? null,
         giftCardEnabled: !!data.giftCardEnabled,
         giftCardExtraPrice: data.giftCardExtraPrice != null ? Number(data.giftCardExtraPrice) : null,
         customNameEnabled: !!data.customNameEnabled,
         customNamePrice: data.customNamePrice != null ? Number(data.customNamePrice) : null,
         deliveryLeadDays,
+        cashArrangementFeeStepAmount: cashArrangementFee.feeStepAmount,
+        cashArrangementFeeMarginPercent: cashArrangementFee.feeMarginPercent,
         quantity,
         status,
         ...(regionIds.length > 0
@@ -561,6 +755,8 @@ async function createProduct(data) {
                     price: rp?.price ?? null,
                     discountedPrice: rp?.discountedPrice ?? null,
                     deliveryLeadDays: rp?.deliveryLeadDays ?? null,
+                    cashArrangementFeeStepAmount: rp?.cashArrangementFeeStepAmount ?? null,
+                    cashArrangementFeeMarginPercent: rp?.cashArrangementFeeMarginPercent ?? null,
                   };
                 }),
               },
@@ -589,12 +785,20 @@ async function createProduct(data) {
               },
             }
           : {}),
+        ...(variantRows.length > 0
+          ? {
+              variants: {
+                create: variantRows,
+              },
+            }
+          : {}),
       },
       include: {
         category: { select: { id: true, title: true, deliveryLeadDays: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
+        variants: { orderBy: { sortOrder: 'asc' } },
         ...REGION_INCLUDE,
       },
     });
@@ -657,6 +861,18 @@ async function updateProduct(id, data) {
   // the Azure call and risks transaction timeouts under load.
   const descriptionRows = data.descriptions !== undefined ? normalizeDescriptions(data.descriptions) : null;
   const productOptionRows = data.productOptions !== undefined ? normalizeProductOptions(data.productOptions) : null;
+  const variantRows = data.variants !== undefined ? normalizeVariants(data.variants) : null;
+  if (productOptionRows) {
+    // At most one option group drives variants (v1: single-axis).
+    let variantAxisSeen = false;
+    for (const row of productOptionRows) {
+      if (row.isVariantAxis && variantAxisSeen) row.isVariantAxis = false;
+      else if (row.isVariantAxis) variantAxisSeen = true;
+    }
+  }
+  // When this update sends a non-empty variants array, it becomes the source of truth
+  // for price — see the matching comment in createProduct.
+  const defaultVariantRow = variantRows && variantRows.length > 0 ? variantRows.find((v) => v.isDefault) ?? null : null;
 
   // Region links are replaced wholesale when `regionIds` OR `regionPrices` is sent — a
   // price-only update (visibility untouched) still needs the full existing region set so
@@ -670,12 +886,25 @@ async function updateProduct(id, data) {
   if (data.regionIds !== undefined || data.regionPrices !== undefined) {
     const existingRegionRows = await prisma.productRegion.findMany({
       where: { productId: id },
-      select: { regionId: true, price: true, discountedPrice: true, deliveryLeadDays: true },
+      select: {
+        regionId: true,
+        price: true,
+        discountedPrice: true,
+        deliveryLeadDays: true,
+        cashArrangementFeeStepAmount: true,
+        cashArrangementFeeMarginPercent: true,
+      },
     });
     existingRegionPriceByRegionId = new Map(
       existingRegionRows.map((r) => [
         r.regionId,
-        { price: decimalToNumber(r.price), discountedPrice: decimalToNumber(r.discountedPrice), deliveryLeadDays: r.deliveryLeadDays ?? null },
+        {
+          price: decimalToNumber(r.price),
+          discountedPrice: decimalToNumber(r.discountedPrice),
+          deliveryLeadDays: r.deliveryLeadDays ?? null,
+          cashArrangementFeeStepAmount: decimalToNumber(r.cashArrangementFeeStepAmount),
+          cashArrangementFeeMarginPercent: decimalToNumber(r.cashArrangementFeeMarginPercent),
+        },
       ])
     );
     newRegionIds = data.regionIds !== undefined
@@ -687,6 +916,7 @@ async function updateProduct(id, data) {
     autoTranslate(bilingualDraft, PRODUCT_BILINGUAL),
     descriptionRows ? autoTranslateMany(descriptionRows, PRODUCT_DESCRIPTION_BILINGUAL) : Promise.resolve(),
     productOptionRows ? autoTranslateMany(productOptionRows, PRODUCT_OPTION_BILINGUAL) : Promise.resolve(),
+    variantRows ? autoTranslateMany(variantRows, PRODUCT_VARIANT_BILINGUAL) : Promise.resolve(),
   ]);
 
   // Child rows are fully replaced (delete + createMany) on update, so the NOT NULL columns
@@ -699,14 +929,23 @@ async function updateProduct(id, data) {
   if (productOptionRows) {
     for (const row of productOptionRows) fillBilingualGapsFromTwin(row, PRODUCT_OPTION_REQUIRED_PAIRS);
   }
+  if (variantRows) {
+    for (const row of variantRows) fillBilingualGapsFromTwin(row, PRODUCT_VARIANT_REQUIRED_PAIRS);
+  }
 
   const updatePayload = {
     ...(bilingualDraft.title != null && { title: bilingualDraft.title }),
     ...(bilingualDraft.title_ar !== undefined && { title_ar: bilingualDraft.title_ar ?? null }),
     ...(bilingualDraft.subtitle !== undefined && { subtitle: bilingualDraft.subtitle }),
     ...(bilingualDraft.subtitle_ar !== undefined && { subtitle_ar: bilingualDraft.subtitle_ar ?? null }),
-    ...(data.price != null && { price: data.price }),
-    ...(data.discountedPrice !== undefined && { discountedPrice: data.discountedPrice }),
+    // Variants (when this update carries any) are the source of truth for price —
+    // overrides whatever data.price/discountedPrice was sent, same as createProduct.
+    ...(defaultVariantRow
+      ? { price: defaultVariantRow.price, discountedPrice: defaultVariantRow.discountedPrice }
+      : {
+          ...(data.price != null && { price: data.price }),
+          ...(data.discountedPrice !== undefined && { discountedPrice: data.discountedPrice }),
+        }),
     ...(data.giftCardEnabled !== undefined && { giftCardEnabled: !!data.giftCardEnabled }),
     ...(data.giftCardExtraPrice !== undefined && {
       giftCardExtraPrice: data.giftCardExtraPrice != null ? Number(data.giftCardExtraPrice) : null,
@@ -718,6 +957,19 @@ async function updateProduct(id, data) {
     // Optional override; omit the field to leave it untouched, or send null to clear it
     // back to "no override" (falls through to Category.deliveryLeadDays / the global default).
     ...(data.deliveryLeadDays !== undefined && { deliveryLeadDays: parseDeliveryLeadDays(data.deliveryLeadDays) }),
+    // Fee schedule is a matched pair — only touched when EITHER field is sent (both-or-
+    // neither enforced by parseCashArrangementFeeSchedule); omitting both leaves the
+    // existing schedule untouched, sending both as null/'' clears it back to "no override".
+    ...((data.cashArrangementFeeStepAmount !== undefined || data.cashArrangementFeeMarginPercent !== undefined) && (() => {
+      const fee = parseCashArrangementFeeSchedule({
+        feeStepAmount: data.cashArrangementFeeStepAmount,
+        feeMarginPercent: data.cashArrangementFeeMarginPercent,
+      });
+      return {
+        cashArrangementFeeStepAmount: fee.feeStepAmount,
+        cashArrangementFeeMarginPercent: fee.feeMarginPercent,
+      };
+    })()),
     ...(data.quantity !== undefined && { quantity: Math.max(0, parseInt(data.quantity, 10) || 0) }),
     ...(data.categoryId !== undefined && { categoryId: data.categoryId || null }),
     ...(data.status !== undefined && { status: normalizeStatus(data.status, existing.status) }),
@@ -794,6 +1046,15 @@ async function updateProduct(id, data) {
       }
     }
 
+    if (variantRows !== null) {
+      await tx.productVariant.deleteMany({ where: { productId: id } });
+      if (variantRows.length > 0) {
+        await tx.productVariant.createMany({
+          data: variantRows.map((row) => ({ productId: id, ...row })),
+        });
+      }
+    }
+
     // Per-zone prep-lead overrides: full replace when the key was sent.
     if (zoneLeadRows !== null) {
       await tx.productZone.deleteMany({ where: { productId: id } });
@@ -819,6 +1080,8 @@ async function updateProduct(id, data) {
               price: rp?.price ?? null,
               discountedPrice: rp?.discountedPrice ?? null,
               deliveryLeadDays: rp?.deliveryLeadDays ?? null,
+              cashArrangementFeeStepAmount: rp?.cashArrangementFeeStepAmount ?? null,
+              cashArrangementFeeMarginPercent: rp?.cashArrangementFeeMarginPercent ?? null,
             };
           }),
           skipDuplicates: true,
@@ -834,6 +1097,7 @@ async function updateProduct(id, data) {
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
+      variants: { orderBy: { sortOrder: 'asc' } },
       ...REGION_INCLUDE,
     },
   });
@@ -919,6 +1183,7 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
+        variants: { orderBy: { sortOrder: 'asc' } },
         ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     }),
@@ -1056,6 +1321,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
+        variants: { orderBy: { sortOrder: 'asc' } },
         ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     });
@@ -1129,6 +1395,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
+        variants: { orderBy: { sortOrder: 'asc' } },
         ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     }),
@@ -1158,6 +1425,7 @@ async function getProductById(id, visibility = {}) {
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
+      variants: { orderBy: { sortOrder: 'asc' } },
       ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
     },
   });
@@ -1182,7 +1450,80 @@ async function getProductById(id, visibility = {}) {
  * image). Returns null when nothing matches or the variant carries no image —
  * callers fall back to the product's primary image.
  */
-function resolveVariantImage(productOptions, selectedOptions) {
+/**
+ * Finds the ProductVariant matching a chosen `selectedOptions` value, by walking only
+ * the `isVariantAxis` ProductOption group(s) (never a purely-visual group like
+ * "Colour") and resolving the chosen value to its EN/AR canonical form the same way
+ * resolveVariantImage does. Returns null (not a fallback) when nothing matches or the
+ * product has no variants — callers decide whether "no match" means "use the default"
+ * (pricing) or "no override" (image).
+ */
+function findMatchingVariant(productOptions, variants, selectedOptions) {
+  if (
+    !Array.isArray(variants) ||
+    variants.length === 0 ||
+    !selectedOptions ||
+    typeof selectedOptions !== 'object' ||
+    Array.isArray(selectedOptions) ||
+    !Array.isArray(productOptions)
+  ) {
+    return null;
+  }
+  for (const group of productOptions) {
+    if (!group || !group.isVariantAxis) continue;
+    const chosen =
+      selectedOptions[group.title] ??
+      (group.title_ar ? selectedOptions[group.title_ar] : undefined);
+    if (!chosen) continue;
+    const en = Array.isArray(group.options) ? group.options : [];
+    const ar = Array.isArray(group.options_ar) ? group.options_ar : [];
+    let idx = en.indexOf(chosen);
+    if (idx < 0) idx = ar.indexOf(chosen);
+    if (idx < 0) continue;
+    const canonical = en[idx] || ar[idx];
+    const match = variants.find((v) => v.optionValue === canonical || v.optionValue_ar === chosen);
+    if (match) return match;
+  }
+  return null;
+}
+
+/**
+ * Resolves which ProductVariant a cart/order line's `selectedOptions` picked, for
+ * PRICING purposes: always returns a variant when the product has any (falling back to
+ * the row flagged `isDefault`, else the first) so a line always has a definite price
+ * even if the client's selection is missing/stale. Returns null only when the product
+ * has no variants at all — callers then use the plain product/region price.
+ */
+function resolveVariantPricing(productOptions, variants, selectedOptions) {
+  if (!Array.isArray(variants) || variants.length === 0) return null;
+  return (
+    findMatchingVariant(productOptions, variants, selectedOptions) ||
+    variants.find((v) => v.isDefault) ||
+    variants[0]
+  );
+}
+
+/**
+ * Effective per-unit price for a product row + the line's chosen options: the matching
+ * variant's price (discounted only when lower) when the product has variants, else the
+ * existing region-aware product price. `productRow` must carry `productOptions` and
+ * `variants` (raw rows) alongside the usual `regions` scoping.
+ */
+function resolveEffectivePrice(productRow, selectedOptions) {
+  const variants = Array.isArray(productRow.variants) ? productRow.variants : null;
+  if (variants && variants.length > 0) {
+    const variant = resolveVariantPricing(productRow.productOptions, variants, selectedOptions);
+    if (variant) {
+      const price = decimalToNumber(variant.price);
+      const discountedPrice = decimalToNumber(variant.discountedPrice);
+      return discountedPrice != null && discountedPrice < price ? discountedPrice : price;
+    }
+  }
+  const { price, discountedPrice } = regionPriceFromRow(productRow);
+  return discountedPrice != null && discountedPrice < price ? discountedPrice : price;
+}
+
+function resolveVariantImage(productOptions, selectedOptions, variants) {
   if (
     !selectedOptions ||
     typeof selectedOptions !== 'object' ||
@@ -1191,6 +1532,10 @@ function resolveVariantImage(productOptions, selectedOptions) {
   ) {
     return null;
   }
+  // A variant's own photos win — that's the specific box/size the shopper picked.
+  const variantMatch = findMatchingVariant(productOptions, variants, selectedOptions);
+  const variantImg = variantMatch?.images?.find((u) => u && String(u).trim());
+  if (variantImg) return String(variantImg).trim();
   for (const group of productOptions) {
     if (!group) continue;
     const chosen =
@@ -1228,6 +1573,9 @@ module.exports = {
   regionPriceFromRow,
   optionExtraCharge,
   resolveVariantImage,
+  resolveVariantPricing,
+  resolveEffectivePrice,
+  variantPriceRange,
   decimalToNumber,
   attachResolvedDeliveryLeadDays,
 };

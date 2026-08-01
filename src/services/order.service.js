@@ -8,6 +8,9 @@ const regionService = require('../services/region.service');
 const deliveryZoneService = require('../services/deliveryZone.service');
 const productService = require('../services/product.service');
 const vatService = require('../services/vat.service');
+const cashArrangementService = require('../services/cashArrangement.service');
+const { computeCashArrangementFee } = require('../utils/cashArrangementMath');
+const { round2 } = require('../utils/vatMath');
 const { resolveDeliveryLeadDays, getDefaultDeliveryLeadDays } = require('../utils/deliveryLeadDays');
 const { resolveDeliveryConfig, isDeliverableDay, nextDeliverableKey } = require('../services/deliveryConfig.service');
 const {
@@ -25,6 +28,7 @@ const orderProductInclude = {
   images: { orderBy: { sortOrder: 'asc' } },
   descriptions: { orderBy: { sortOrder: 'asc' } },
   productOptions: { orderBy: { sortOrder: 'asc' } },
+  variants: { orderBy: { sortOrder: 'asc' } },
 };
 
 function mapProductForDisplay(product) {
@@ -95,9 +99,17 @@ function toOrderResponsePayload(order) {
     // derived from the RAW option rows on the joined product (null when the
     // product was deleted or the variant carries no image — surfaces fall back
     // to the product's primary image).
-    selectedImage: productService.resolveVariantImage(i.product?.productOptions, i.selectedOptions),
+    selectedImage: productService.resolveVariantImage(i.product?.productOptions, i.selectedOptions, i.product?.variants),
     giftCardSelected: i.giftCardSelected ?? false,
     customName: i.customName ?? null,
+    // Per-line cash arrangement snapshot (PER UNIT; amount/fee are for one unit). null when
+    // this line has no cash arrangement.
+    cashArrangementRequested: Boolean(i.cashArrangementRequested),
+    cashArrangementAmount: decimalToNumber(i.cashArrangementAmount),
+    cashArrangementDenomination: i.cashArrangementDenomination ?? null,
+    cashArrangementNote: i.cashArrangementNote ?? null,
+    cashArrangementFeeAmount: decimalToNumber(i.cashArrangementFeeAmount),
+    cashArrangementFeeVatAmount: decimalToNumber(i.cashArrangementFeeVatAmount),
     // Snapshot of the resolved "ships within N day(s)" prep/booking lead time at order
     // creation time (product -> category -> global default chain) — see
     // prisma/schema.prisma's OrderItem.resolvedLeadDays comment. Null only for orders
@@ -119,6 +131,16 @@ function toOrderResponsePayload(order) {
     // Flat shipping fee charged on this order, snapshot from Region.shippingFlatRate
     // at checkout time. 0 for legacy orders placed before this field existed.
     shippingAmount: decimalToNumber(order.shippingAmount) ?? 0,
+    // "Add cash arrangement" snapshot — all null/false when not requested (or for orders
+    // placed before this feature existed). cashArrangementAmount is the raw cash value
+    // (never taxed); cashArrangementFeeAmount/FeeVatAmount are the arrangement service fee
+    // and its own VAT (already folded into the blended taxAmount above).
+    cashArrangementRequested: Boolean(order.cashArrangementRequested),
+    cashArrangementAmount: decimalToNumber(order.cashArrangementAmount),
+    cashArrangementDenomination: order.cashArrangementDenomination ?? null,
+    cashArrangementNote: order.cashArrangementNote ?? null,
+    cashArrangementFeeAmount: decimalToNumber(order.cashArrangementFeeAmount),
+    cashArrangementFeeVatAmount: decimalToNumber(order.cashArrangementFeeVatAmount),
     // STANDARD (default) or SCHEDULED (customer picked a future date/time at checkout).
     deliveryType: order.deliveryType ?? 'STANDARD',
     // Only set for SCHEDULED orders.
@@ -284,6 +306,8 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // is null; stamped onto the order and used to back-link it to an account later.
     guestContact = null,
   } = params;
+  // Cash arrangement is now PER LINE: each lineItem may carry its own
+  // `cashArrangement: { cashAmount, denomination?, note? }`. See the per-line validation below.
 
   // Single clock for all timezone-sensitive delivery decisions in this order.
   const now = new Date();
@@ -305,6 +329,43 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   if (deliveryType === 'SCHEDULED' && !scheduledDeliveryAt) {
     return { order: null, error: 'scheduledDeliveryAt is required for a Scheduled Delivery' };
   }
+
+  // Cash arrangement (PER LINE): pure input validation only (no DB) — eligibility /
+  // denomination-list checks happen below once the order's region/zone/cart are resolved.
+  // `perLineCash[i]` is the normalized per-UNIT request for lineItems[i] (or null).
+  const perLineCash = new Array(lineItems.length).fill(null);
+  let anyCashRequested = false;
+  for (let i = 0; i < lineItems.length; i++) {
+    const ca = lineItems[i] && lineItems[i].cashArrangement;
+    if (!ca || !(Number(ca.cashAmount) > 0)) continue;
+    const amt = Number(ca.cashAmount);
+    // DB-safety ceiling (Decimal(10,2), max ~99,999,999.99) — NOT a business min/max (there
+    // is none, by design); just guards against a raw Postgres numeric-overflow 500.
+    if (!Number.isFinite(amt) || amt <= 0 || amt >= 100_000_000) {
+      return { order: null, error: 'cashArrangement.cashAmount must be a positive number' };
+    }
+    let denomination = null;
+    if (ca.denomination != null) {
+      const denom = Number(ca.denomination);
+      if (!Number.isInteger(denom) || denom <= 0) {
+        return { order: null, error: 'cashArrangement.denomination must be a positive whole number' };
+      }
+      denomination = denom;
+    }
+    const note = trimOrNullStr(ca.note);
+    if (note && note.length > 500) {
+      return { order: null, error: 'cashArrangement.note must be 500 characters or fewer' };
+    }
+    perLineCash[i] = { cashAmount: round2(amt), denomination, note };
+    anyCashRequested = true;
+  }
+  // Order-level roll-up of denomination/note — only meaningful when exactly ONE line
+  // requested cash (lines can differ otherwise); the per-line detail lives on OrderItem.
+  const cashLinesRequested = perLineCash.filter(Boolean);
+  const cashRollup = {
+    denomination: cashLinesRequested.length === 1 ? cashLinesRequested[0].denomination : null,
+    note: cashLinesRequested.length === 1 ? cashLinesRequested[0].note : null,
+  };
   // Full scheduled-date + time-slot + COD validation happens once the region/zone (and
   // thus the resolved delivery config) is known — see the deliveryConfig block below.
   // STANDARD never persists a scheduled date, even if the client sent one.
@@ -475,6 +536,10 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       // snapshotted per line below as OrderItem.resolvedLeadDays.
       deliveryLeadDays: true,
       category: { select: { id: true, deliveryLeadDays: true } },
+      // Needed (with `variants`) to resolve a variant-priced line's effective price —
+      // see resolveEffectivePrice/resolveVariantPricing in product.service.js.
+      productOptions: { orderBy: { sortOrder: 'asc' } },
+      variants: { orderBy: { sortOrder: 'asc' } },
     },
   });
   const productById = new Map(productRows.map((p) => [p.id, p]));
@@ -648,14 +713,14 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // Compute server-trusted line prices from the live Product row instead of the cart's
   // snapshot. Closes the price-edit drift window between cart load and order commit.
   // Mirrors cart.service.effectivePrice EXACTLY (discounted only when it's actually lower
-  // than the base price) so the order never charges more than the cart displayed (M2).
-  // Resolves to the order region's price (base AED price, or that region's manual
-  // override when set) via productService.regionPriceFromRow — productRow.regions is
-  // already scoped to orderRegionId by the select above.
-  function livePrice(productRow) {
+  // than the base price; a variant-priced line resolves to its matching ProductVariant
+  // instead) so the order never charges more than the cart displayed (M2). Resolves to
+  // the order region's price (base AED price, or that region's manual override when
+  // set) via productService.resolveEffectivePrice — productRow.regions is already
+  // scoped to orderRegionId by the select above.
+  function livePrice(productRow, selectedOptions) {
     if (!productRow) return 0;
-    const { price, discountedPrice } = productService.regionPriceFromRow(productRow);
-    return discountedPrice != null && discountedPrice < price ? discountedPrice : price;
+    return productService.resolveEffectivePrice(productRow, selectedOptions);
   }
   // Effective per-unit price INCLUDING this line's gift-card/custom-name add-ons —
   // depends on the LINE's own selection, not just the product. Keyed by line INDEX
@@ -668,7 +733,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     const extra = p
       ? productService.optionExtraCharge(p, { giftCardSelected: item.giftCardSelected, customName: item.customName })
       : 0;
-    return livePrice(p) + extra;
+    return livePrice(p, item.selectedOptions) + extra;
   });
 
   const promoItems = lineItems.map((item, idx) => ({
@@ -695,6 +760,29 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     }
   }
 
+  // Cash arrangement — pre-tx early rejection (friendly 400 instead of a failed tx). PER LINE:
+  // each line that requested cash must itself be eligible + its denomination still offered.
+  // The authoritative, server-trusted re-check happens again inside the tx below.
+  if (anyCashRequested) {
+    const cartLinesForCash = lineItems.map((item) => ({
+      productId: item.productId,
+      categoryId: productById.get(item.productId)?.categoryId ?? null,
+    }));
+    const preview = await cashArrangementService.resolveForLines(
+      { regionId: orderRegionId, zoneId: orderZoneId, cartLines: cartLinesForCash },
+      prisma
+    );
+    for (let i = 0; i < perLineCash.length; i++) {
+      if (!perLineCash[i]) continue;
+      if (!preview.lines[i] || !preview.lines[i].eligible) {
+        return { order: null, error: 'Cash arrangement is not available for one of the items in your cart.' };
+      }
+      if (perLineCash[i].denomination != null && !preview.denominations.includes(perLineCash[i].denomination)) {
+        return { order: null, error: 'Selected banknote denomination is no longer offered for this region.' };
+      }
+    }
+  }
+
   let createdOrderId;
   try {
   await prisma.$transaction(async (tx) => {
@@ -713,20 +801,22 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         giftCardExtraPrice: true,
         customNameEnabled: true,
         customNamePrice: true,
+        productOptions: { orderBy: { sortOrder: 'asc' } },
+        variants: { orderBy: { sortOrder: 'asc' } },
       },
     });
     const txProductById = new Map(livePriceRows.map((p) => [p.id, p]));
-    // Same effective-price rule as cart/livePrice (M2): discounted only when lower,
-    // resolved to the order region's price (base or that region's manual override) —
-    // PLUS this line's gift-card/custom-name add-on, same as livePriceByIndex above.
-    // Per-LINE effective price (index-aligned with lineItems), NOT per productId —
-    // see livePriceByIndex above for why: two lines of the same product with
-    // different add-ons must keep their own prices.
+    // Same effective-price rule as cart/livePrice (M2): discounted only when lower (or
+    // the matching ProductVariant's price for a variant-priced line), resolved to the
+    // order region's price (base or that region's manual override) — PLUS this line's
+    // gift-card/custom-name add-on, same as livePriceByIndex above. Per-LINE effective
+    // price (index-aligned with lineItems), NOT per productId — see livePriceByIndex
+    // above for why: two lines of the same product with different add-ons/variants
+    // must keep their own prices.
     const txPriceByIndex = sanitizedLineItems.map((item) => {
       const p = txProductById.get(item.productId);
       if (!p) return null;
-      const { price, discountedPrice } = productService.regionPriceFromRow(p);
-      const base = discountedPrice != null && discountedPrice < price ? discountedPrice : price;
+      const base = productService.resolveEffectivePrice(p, item.selectedOptions);
       const extra = productService.optionExtraCharge(p, { giftCardSelected: item.giftCardSelected, customName: item.customName });
       return base + extra;
     });
@@ -833,6 +923,60 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     // keying by productId would collapse two lines of the same product with different options.
     const vat = vatService.computeOrderVat(vatLines, finalDiscount ?? 0, vatConfig);
 
+    // Cash arrangement (server-trusted, PER LINE): re-resolve inside the tx — never trust the
+    // pre-tx preview at commit time. For each line that requested cash, compute a PER-UNIT fee
+    // from THAT line's own fee schedule + its per-unit cash amount, and its own fee VAT (using
+    // the line's product/category so scoped VAT tracks correctly). Accumulate order-level sums.
+    // perLineFee[i] = { feeAmount, feeVatAmount } per unit (null for non-cash lines).
+    const perLineFee = new Array(lineItems.length).fill(null);
+    let sumCash = 0; // Σ per-unit cash × qty (raw, never VAT'd)
+    let sumFee = 0; // Σ per-unit fee × qty (pre-VAT)
+    let sumFeeVat = 0; // Σ per-unit fee VAT × qty
+    let cashArrangementFeeTotal = 0; // Σ per-unit (fee + added VAT if exclusive) × qty
+    if (anyCashRequested) {
+      const cartLinesForCash = lineItems.map((item) => ({
+        productId: item.productId,
+        categoryId: productById.get(item.productId)?.categoryId ?? null,
+      }));
+      const resolvedLines = await cashArrangementService.resolveForLines(
+        { regionId: orderRegionId, zoneId: orderZoneId, cartLines: cartLinesForCash },
+        tx
+      );
+      for (let i = 0; i < perLineCash.length; i++) {
+        const cash = perLineCash[i];
+        if (!cash) continue;
+        const rl = resolvedLines.lines[i];
+        if (!rl || !rl.eligible) {
+          const err = new Error('Cash arrangement is no longer available for one of the items in your cart.');
+          err.code = 'CASH_ARRANGEMENT_NOT_ELIGIBLE';
+          throw err;
+        }
+        if (cash.denomination != null && !resolvedLines.denominations.includes(cash.denomination)) {
+          const err = new Error('Selected banknote denomination is no longer offered for this region.');
+          err.code = 'CASH_ARRANGEMENT_INVALID_DENOMINATION';
+          throw err;
+        }
+        const feePerUnit = computeCashArrangementFee(cash.cashAmount, {
+          feeStepAmount: rl.feeStepAmount,
+          feeMarginPercent: rl.feeMarginPercent,
+        });
+        // SEPARATE computeOrderVat call per line, discountAmount 0 (promo never touches the
+        // fee), using the line's GOVERNING product/category so the fee's taxability tracks
+        // isLineTaxable under a scoped VAT config. quantity:1 → per-UNIT fee VAT.
+        const feeVat = vatService.computeOrderVat(
+          [{ productId: rl.governingProductId, categoryId: rl.governingCategoryId, quantity: 1, unitPrice: feePerUnit }],
+          0,
+          vatConfig
+        );
+        const qty = lineItems[i].quantity;
+        perLineFee[i] = { feeAmount: feePerUnit, feeVatAmount: feeVat.vatAmount };
+        sumCash = round2(sumCash + cash.cashAmount * qty);
+        sumFee = round2(sumFee + feePerUnit * qty);
+        sumFeeVat = round2(sumFeeVat + feeVat.vatAmount * qty);
+        cashArrangementFeeTotal = round2(cashArrangementFeeTotal + feeVat.total * qty);
+      }
+    }
+
     // Net merchandise value (pre-VAT, post-discount) drives the delivery-area order
     // bounds and the free-delivery threshold — computed from the same live tx figures.
     const netForDelivery = Math.max(
@@ -863,7 +1007,28 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       ? 0
       : Math.round(Number(deliveryConfig.deliveryFee ?? 0) * 100) / 100;
 
-    const finalTotal = vat.total + shippingAmount;
+    // Raw cash amount is added to the total as-is — it is NEVER passed through VAT and
+    // NEVER discounted (unlike the arrangement fee, which is taxed via cashArrangementFeeTotal
+    // above). Explicitly does NOT affect netForDelivery/minOrderAmount/maxOrderAmount/
+    // freeDeliveryThreshold above — those gates exist for merchandise-order economics, and
+    // folding a cash request into them would be a silent, unrequested side effect.
+    const cashAmountForTotal = anyCashRequested ? sumCash : 0;
+    const finalTotal = round2(vat.total + shippingAmount + cashAmountForTotal + cashArrangementFeeTotal);
+
+    // Guard against a raw Postgres "numeric field overflow" crash: totalAmount (and every
+    // constituent non-negative addend above, including cashArrangementAmount/FeeAmount) is
+    // a Decimal(10,2) column, max ~99,999,999.99. The per-field cashAmount ceiling earlier
+    // in this function only bounds the RAW cash figure — it does NOT bound the arrangement
+    // fee, which scales with an admin-configured margin that has no upper limit, so a large
+    // (but individually valid) cash amount combined with a high margin can still push the
+    // FINAL total past the column's capacity. Catch it here as a friendly, tagged error
+    // rather than letting the raw DB exception surface as an unhandled 500.
+    const DECIMAL_10_2_MAX = 99999999.99;
+    if (finalTotal > DECIMAL_10_2_MAX) {
+      const err = new Error('This order total is too large to process. Please reduce the cash arrangement amount or order quantity.');
+      err.code = 'ORDER_TOTAL_TOO_LARGE';
+      throw err;
+    }
 
     // Online payment cannot charge a 0 (or negative) amount — MyFatoorah rejects it. If a
     // promo wipes the entire total, the customer must use Cash on Delivery instead.
@@ -884,7 +1049,18 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         totalAmount: finalTotal,
         discountAmount: finalDiscount,
         subtotalAmount: vat.subtotal,
-        taxAmount: vat.vatAmount,
+        // Blended total tax: merchandise VAT + the arrangement fee's own VAT (0 when no
+        // cash arrangement was requested). cashArrangementFeeVatAmount below keeps the
+        // fee's portion separately so a receipt/admin view doesn't have to reverse-engineer it.
+        taxAmount: round2(vat.vatAmount + sumFeeVat),
+        // ORDER-LEVEL roll-up of the per-line cash arrangements (the authoritative detail is
+        // on each OrderItem). Denomination/note only roll up when exactly one line has cash.
+        cashArrangementRequested: anyCashRequested,
+        cashArrangementAmount: anyCashRequested ? sumCash : null,
+        cashArrangementDenomination: cashRollup.denomination,
+        cashArrangementNote: cashRollup.note,
+        cashArrangementFeeAmount: anyCashRequested ? sumFee : null,
+        cashArrangementFeeVatAmount: anyCashRequested ? sumFeeVat : null,
         vatRatePercent: vat.applied ? vat.ratePercent : null,
         vatInclusive: vat.applied ? vat.inclusive : false,
         shippingAmount,
@@ -974,6 +1150,14 @@ async function createOrderCore(userId, params = {}, opts = {}) {
               : Prisma.DbNull,
           giftCardSelected: !!item.giftCardSelected,
           customName: item.customName ?? null,
+          // Per-line cash arrangement snapshot (PER UNIT — line total is each × quantity).
+          // null/false for lines with no cash arrangement.
+          cashArrangementRequested: !!perLineCash[idx],
+          cashArrangementAmount: perLineCash[idx]?.cashAmount ?? null,
+          cashArrangementDenomination: perLineCash[idx]?.denomination ?? null,
+          cashArrangementNote: perLineCash[idx]?.note ?? null,
+          cashArrangementFeeAmount: perLineFee[idx]?.feeAmount ?? null,
+          cashArrangementFeeVatAmount: perLineFee[idx]?.feeVatAmount ?? null,
           // Snapshot of the resolved prep/booking lead time (see
           // resolvedLeadDaysByProductId above) — never re-derived later from live
           // product/category/settings data, so a later admin change never retroactively
@@ -1028,6 +1212,14 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     }
     // Delivery-area order bounds (min/max) failed inside the tx — surface as a 400.
     if (err.code === 'DELIVERY_MIN_ORDER' || err.code === 'DELIVERY_MAX_ORDER') {
+      return { order: null, error: err.message };
+    }
+    // Cash arrangement eligibility/denomination drifted between the pre-tx preview and
+    // commit (config changed mid-checkout) — surface as a 400, not a 500.
+    if (err.code === 'CASH_ARRANGEMENT_NOT_ELIGIBLE' || err.code === 'CASH_ARRANGEMENT_INVALID_DENOMINATION') {
+      return { order: null, error: err.message };
+    }
+    if (err.code === 'ORDER_TOTAL_TOO_LARGE') {
       return { order: null, error: err.message };
     }
     throw err;
@@ -1086,6 +1278,8 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
     return { order: null, error: 'Cart is empty' };
   }
 
+  // Per-line cash arrangement comes from the stored cart line (cartService shapes it as a
+  // nested `cashArrangement` object; the fee is resolved here, never stored on the cart).
   const lineItems = cartData.items.map((it) => ({
     productId: it.productId,
     quantity: it.quantity,
@@ -1093,6 +1287,7 @@ async function createOrder(userId, checkoutInput = {}, opts = {}) {
     selectedOptions: it.selectedOptions ?? null,
     giftCardSelected: it.giftCardSelected ?? false,
     customName: it.customName ?? null,
+    cashArrangement: it.cashArrangement ?? null,
   }));
 
   return createOrderCore(
@@ -1133,6 +1328,7 @@ async function buyNow(userId, input = {}, opts = {}) {
     selectedOptions,
     giftCardSelected,
     customName,
+    cashArrangement,
   } = input;
 
   if (!productId || typeof productId !== 'string') {
@@ -1156,6 +1352,7 @@ async function buyNow(userId, input = {}, opts = {}) {
   return createOrderCore(
     userId,
     {
+      // Buy Now is a single product, so its top-level cashArrangement rides on the one line.
       lineItems: [{
         productId,
         quantity: qty,
@@ -1163,6 +1360,7 @@ async function buyNow(userId, input = {}, opts = {}) {
         selectedOptions: selectedOptions ?? null,
         giftCardSelected: giftCardSelected ?? false,
         customName: customName ?? null,
+        cashArrangement: cashArrangement ?? null,
       }],
       orderMessage: null,
       addressId,
@@ -1209,6 +1407,8 @@ async function createGuestOrder(guestInput = {}, opts = {}) {
       selectedOptions: it.selectedOptions ?? null,
       giftCardSelected: it.giftCardSelected ?? false,
       customName: it.customName ?? null,
+      // Per-line cash arrangement from the request body item.
+      cashArrangement: it.cashArrangement ?? null,
     });
   }
 
@@ -1361,6 +1561,12 @@ async function getAllOrdersAdmin(page = 1, limit = 10, status = null, regionId =
     vatAmount: decimalToNumber(o.taxAmount) ?? 0,
     vatRatePercent: decimalToNumber(o.vatRatePercent),
     vatInclusive: Boolean(o.vatInclusive),
+    cashArrangementRequested: Boolean(o.cashArrangementRequested),
+    cashArrangementAmount: decimalToNumber(o.cashArrangementAmount),
+    cashArrangementDenomination: o.cashArrangementDenomination ?? null,
+    cashArrangementNote: o.cashArrangementNote ?? null,
+    cashArrangementFeeAmount: decimalToNumber(o.cashArrangementFeeAmount),
+    cashArrangementFeeVatAmount: decimalToNumber(o.cashArrangementFeeVatAmount),
     currency: o.currency ?? 'AED',
     deliveryType: o.deliveryType ?? 'STANDARD',
     scheduledDeliveryAt: o.scheduledDeliveryAt ?? null,
@@ -1396,6 +1602,12 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
     vatAmount: decimalToNumber(order.taxAmount) ?? 0,
     vatRatePercent: decimalToNumber(order.vatRatePercent),
     vatInclusive: Boolean(order.vatInclusive),
+    cashArrangementRequested: Boolean(order.cashArrangementRequested),
+    cashArrangementAmount: decimalToNumber(order.cashArrangementAmount),
+    cashArrangementDenomination: order.cashArrangementDenomination ?? null,
+    cashArrangementNote: order.cashArrangementNote ?? null,
+    cashArrangementFeeAmount: decimalToNumber(order.cashArrangementFeeAmount),
+    cashArrangementFeeVatAmount: decimalToNumber(order.cashArrangementFeeVatAmount),
     currency: order.currency ?? 'AED',
     deliveryType: order.deliveryType ?? 'STANDARD',
     scheduledDeliveryAt: order.scheduledDeliveryAt ?? null,
@@ -1430,6 +1642,12 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
       selectedOptions: i.selectedOptions ?? null,
       giftCardSelected: i.giftCardSelected ?? false,
       customName: i.customName ?? null,
+      cashArrangementRequested: Boolean(i.cashArrangementRequested),
+      cashArrangementAmount: decimalToNumber(i.cashArrangementAmount),
+      cashArrangementDenomination: i.cashArrangementDenomination ?? null,
+      cashArrangementNote: i.cashArrangementNote ?? null,
+      cashArrangementFeeAmount: decimalToNumber(i.cashArrangementFeeAmount),
+      cashArrangementFeeVatAmount: decimalToNumber(i.cashArrangementFeeVatAmount),
       resolvedLeadDays: i.resolvedLeadDays ?? null,
       product: mapOrderItemProduct(i),
       createdAt: i.createdAt,

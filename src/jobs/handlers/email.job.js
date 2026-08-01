@@ -32,6 +32,8 @@ const ORDER_ITEMS_INCLUDE = {
     selectedOptions: true,
     giftCardSelected: true,
     customName: true,
+    // Gift card's personalized note (per line) — rendered as a quote in the email.
+    perProductMessage: true,
     // Per-line prep/lead-days snapshot — used to compute the email's delivery dates
     // (matches the storefront's getOrderDeliveryView).
     resolvedLeadDays: true,

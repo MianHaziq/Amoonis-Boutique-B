@@ -30,6 +30,16 @@ const zoneConfigValidation = [
   body('codEnabled').optional({ nullable: true }).isBoolean(),
   body('minOrderAmount').optional({ nullable: true }).isFloat({ min: 0 }),
   body('maxOrderAmount').optional({ nullable: true }).isFloat({ min: 0 }),
+  // Cash-arrangement quick-pick amounts / denominations for this zone. [] = inherit the
+  // region's CashArrangementConfig lists.
+  body('cashArrangementQuickPickAmounts').optional({ nullable: true }).isArray({ max: 20 }),
+  body('cashArrangementQuickPickAmounts.*').optional().isInt({ min: 1 }),
+  body('cashArrangementDenominations').optional({ nullable: true }).isArray({ max: 20 }),
+  body('cashArrangementDenominations.*').optional().isInt({ min: 1 }),
+  // Zone-wide flat cash-arrangement fee (both-or-neither enforced in the service). null =
+  // inherit the region's flat fee.
+  body('cashArrangementFeeStepAmount').optional({ nullable: true }).isFloat({ min: 0.01, max: 99999999.99 }),
+  body('cashArrangementFeeMarginPercent').optional({ nullable: true }).isFloat({ min: 0, max: 1000 }),
 ];
 
 const createValidation = [
