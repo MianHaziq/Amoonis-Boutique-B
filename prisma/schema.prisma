@@ -129,7 +129,8 @@ model Region {
   promoCodes    PromoCodeRegion[]
   users         User[]
   orders        Order[]
-  vatConfig     VatConfig?
+  vatConfig             VatConfig?
+  cashArrangementConfig CashArrangementConfig?
   deliveryZones DeliveryZone[]
   addresses     Address[]
   blackoutDates DeliveryBlackoutDate[]
@@ -171,6 +172,17 @@ model DeliveryZone {
   // Order (net) minimum/maximum to deliver to this zone. null = no bound.
   minOrderAmount        Decimal? @db.Decimal(10, 2)
   maxOrderAmount        Decimal? @db.Decimal(10, 2)
+  // Cash-arrangement quick-pick amounts / banknote denominations for this zone. []
+  // (default) = inherit the region's CashArrangementConfig lists. See cashArrangement.service.js.
+  cashArrangementQuickPickAmounts Int[] @default([])
+  cashArrangementDenominations    Int[] @default([])
+  // Zone-wide cash-arrangement service-fee schedule (both-or-neither). This is the FLAT
+  // per-zone fee — the base fallback for any in-scope cart line with no more-specific
+  // product/category override. Precedence (see cashArrangementMath.js): productZone >
+  // productRegion > product > categoryZone > categoryRegion > category > zoneFlat (this) >
+  // regionFlat (CashArrangementConfig). null = inherit the region's flat fee.
+  cashArrangementFeeStepAmount    Decimal? @db.Decimal(10, 2)
+  cashArrangementFeeMarginPercent Decimal? @db.Decimal(5, 2)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -216,6 +228,12 @@ model ProductRegion {
   // per-region override (falls through the chain). Distinct from
   // Region.standardDeliveryDays (region-wide courier transit).
   deliveryLeadDays Int?
+  // Per-region override of this product's cash-arrangement fee schedule. Both
+  // fields must be set together or neither (a lone step or margin is invalid) —
+  // see Product.cashArrangementFeeStepAmount for the default tier and
+  // utils/cashArrangementMath.js for the full precedence chain.
+  cashArrangementFeeStepAmount    Decimal? @db.Decimal(10, 2)
+  cashArrangementFeeMarginPercent Decimal? @db.Decimal(5, 2)
   createdAt       DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -232,6 +250,11 @@ model CategoryRegion {
   // the category's global Category.deliveryLeadDays in this region, for products
   // that don't set their own. Null = no per-region override.
   deliveryLeadDays Int?
+  // Per-region override of this category's cash-arrangement fee schedule (for
+  // products that don't set their own product-level/product-region override).
+  // Both fields must be set together or neither.
+  cashArrangementFeeStepAmount    Decimal? @db.Decimal(10, 2)
+  cashArrangementFeeMarginPercent Decimal? @db.Decimal(5, 2)
   createdAt  DateTime @default(now())
 
   category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
@@ -249,6 +272,11 @@ model ProductZone {
   productId        String
   zoneId           String
   deliveryLeadDays Int?
+  // Per-zone override of this product's cash-arrangement fee schedule — highest
+  // precedence tier in the chain (see utils/cashArrangementMath.js). Both fields
+  // must be set together or neither.
+  cashArrangementFeeStepAmount    Decimal? @db.Decimal(10, 2)
+  cashArrangementFeeMarginPercent Decimal? @db.Decimal(5, 2)
   createdAt        DateTime @default(now())
 
   product Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -264,6 +292,10 @@ model CategoryZone {
   categoryId       String
   zoneId           String
   deliveryLeadDays Int?
+  // Per-zone override of this category's cash-arrangement fee schedule. Both
+  // fields must be set together or neither.
+  cashArrangementFeeStepAmount    Decimal? @db.Decimal(10, 2)
+  cashArrangementFeeMarginPercent Decimal? @db.Decimal(5, 2)
   createdAt        DateTime @default(now())
 
   category Category     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
@@ -528,6 +560,76 @@ model VatConfigCategory {
 }
 
 // ============================================
+// CASH ARRANGEMENT
+// ============================================
+
+/// Scope selector for cash-arrangement ENABLEMENT (mirrors VatAppliesTo). This governs only
+/// whether the "Add cash arrangement" option is offered for a cart — NOT what it costs. The
+/// fee schedule itself (feeStepAmount/feeMarginPercent) lives on Product/Category and their
+/// per-region/per-zone override rows (ProductRegion, CategoryRegion, ProductZone, CategoryZone)
+/// — see utils/cashArrangementMath.js for the full precedence chain.
+enum CashArrangementAppliesTo {
+  ALL_PRODUCTS
+  SPECIFIC_PRODUCTS
+  SPECIFIC_CATEGORIES
+}
+
+/// Per-region cash-arrangement config — ONE ROW PER REGION, mirrors VatConfig's shape.
+/// Controls whether the feature is offered at all in this region, which products/categories
+/// it's scoped to, the admin-curated quick-pick cash amounts + banknote denomination presets
+/// shown at checkout, AND the region-wide FLAT service-fee schedule (the base of the fee
+/// precedence chain — product/category/zone overrides win over it; see cashArrangementMath.js).
+model CashArrangementConfig {
+  id               String                   @id @default(uuid())
+  regionId         String                   @unique
+  /// Master switch. When false, cash arrangement is never offered in this region.
+  enabled          Boolean                  @default(false)
+  appliesTo        CashArrangementAppliesTo @default(ALL_PRODUCTS)
+  /// Admin-configurable quick-pick cash amounts shown as buttons (e.g. [500,1000,5000,10000]).
+  /// Presets only — the customer may still type a different custom amount.
+  quickPickAmounts Int[]                    @default([])
+  /// Admin-configurable banknote denomination presets (e.g. [50,100,500,1000]). UNLIKE
+  /// quickPickAmounts this IS a whitelist — a submitted denomination must be one of these.
+  denominations    Int[]                    @default([])
+  /// Region-wide FLAT service-fee schedule (both-or-neither). The base fallback for every
+  /// in-scope cart line with no more-specific product/category/zone override. null = no
+  /// region-wide fee (feature then only resolves for lines that DO have a specific override).
+  feeStepAmount    Decimal?                 @db.Decimal(10, 2)
+  feeMarginPercent Decimal?                 @db.Decimal(5, 2)
+  updatedAt        DateTime                 @updatedAt
+
+  region     Region                          @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  products   CashArrangementConfigProduct[]
+  categories CashArrangementConfigCategory[]
+}
+
+/// Products cash arrangement applies to when appliesTo = SPECIFIC_PRODUCTS.
+model CashArrangementConfigProduct {
+  cashArrangementConfigId String
+  productId               String
+  createdAt               DateTime @default(now())
+
+  cashArrangementConfig CashArrangementConfig @relation(fields: [cashArrangementConfigId], references: [id], onDelete: Cascade)
+  product               Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([cashArrangementConfigId, productId])
+  @@index([productId])
+}
+
+/// Categories cash arrangement applies to when appliesTo = SPECIFIC_CATEGORIES.
+model CashArrangementConfigCategory {
+  cashArrangementConfigId String
+  categoryId              String
+  createdAt               DateTime @default(now())
+
+  cashArrangementConfig CashArrangementConfig @relation(fields: [cashArrangementConfigId], references: [id], onDelete: Cascade)
+  category              Category              @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([cashArrangementConfigId, categoryId])
+  @@index([categoryId])
+}
+
+// ============================================
 // CONTACT
 // ============================================
 
@@ -566,15 +668,22 @@ model Category {
   /// that doesn't set its own Product.deliveryLeadDays. Null = no override (falls
   /// through to the global default).
   deliveryLeadDays Int?
+  /// Default cash-arrangement fee schedule for every product in this category that
+  /// doesn't set its own Product.cashArrangementFeeStepAmount. Overridden per-region
+  /// by CategoryRegion.cashArrangementFee*, and per-zone by CategoryZone.cashArrangementFee*.
+  /// Both fields must be set together or neither. Null = no fee schedule at this tier.
+  cashArrangementFeeStepAmount    Decimal? @db.Decimal(10, 2)
+  cashArrangementFeeMarginPercent Decimal? @db.Decimal(5, 2)
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
-  products            Product[]
-  sectionCategories   SectionCategory[]
-  promoCodeCategories PromoCodeCategory[]
-  vatConfigCategories VatConfigCategory[]
-  regions             CategoryRegion[]
-  zoneLeadDays        CategoryZone[]
+  products                Product[]
+  sectionCategories       SectionCategory[]
+  promoCodeCategories     PromoCodeCategory[]
+  vatConfigCategories     VatConfigCategory[]
+  cashArrangementConfigs  CashArrangementConfigCategory[]
+  regions                 CategoryRegion[]
+  zoneLeadDays            CategoryZone[]
 
   @@index([title])
   @@index([status])
@@ -600,6 +709,13 @@ model Product {
   // for this product specifically. Null = no override (falls through the chain:
   // product -> category -> global default).
   deliveryLeadDays   Int?
+  // Default cash-arrangement fee schedule for this product specifically. Overridden
+  // per-region by ProductRegion.cashArrangementFee*, and per-zone by
+  // ProductZone.cashArrangementFee* (see utils/cashArrangementMath.js for the full
+  // precedence chain: productZone ?? productRegion ?? product ?? categoryZone ??
+  // categoryRegion ?? category). Both fields must be set together or neither.
+  cashArrangementFeeStepAmount    Decimal? @db.Decimal(10, 2)
+  cashArrangementFeeMarginPercent Decimal? @db.Decimal(5, 2)
   quantity           Int           @default(0)
   categoryId         String?
   status             PublishStatus @default(DRAFT)
@@ -609,18 +725,20 @@ model Product {
   createdAt          DateTime      @default(now())
   updatedAt          DateTime      @updatedAt
 
-  category          Category?            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  images            ProductImage[]
-  descriptions      ProductDescription[]
-  productOptions    ProductOption[]
-  cartItems         CartItem[]
-  orderItems        OrderItem[]
-  sectionProducts   SectionProduct[]
-  promoCodeProducts PromoCodeProduct[]
-  vatConfigProducts VatConfigProduct[]
-  regions           ProductRegion[]
-  zoneLeadDays      ProductZone[]
-  reviews           Review[]
+  category               Category?                       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  images                 ProductImage[]
+  descriptions           ProductDescription[]
+  productOptions         ProductOption[]
+  variants               ProductVariant[]
+  cartItems              CartItem[]
+  orderItems             OrderItem[]
+  sectionProducts        SectionProduct[]
+  promoCodeProducts      PromoCodeProduct[]
+  vatConfigProducts      VatConfigProduct[]
+  cashArrangementConfigs CashArrangementConfigProduct[]
+  regions                ProductRegion[]
+  zoneLeadDays           ProductZone[]
+  reviews                Review[]
 
   @@index([categoryId])
   @@index([title])
@@ -681,11 +799,50 @@ model ProductOption {
   // each set is mirrored into `optionImages` above, which the mobile app keeps
   // reading — so this is purely additive and mobile-safe. Null when unused.
   optionImageSets Json?
+  // Marks this option group as the one whose values map 1:1 to Product.variants
+  // (e.g. "Size"), so picking a value changes price/photos/contents, not just the
+  // photo. At most one group per product should be true — enforced in
+  // product.service.js, not at the DB level. False for purely-visual groups
+  // (e.g. "Colour") that never carry their own price. Purely additive/mobile-safe:
+  // older clients that don't read this just keep behaving as a display-only option.
+  isVariantAxis   Boolean  @default(false)
   sortOrder       Int      @default(0)
   createdAt       DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
+  @@index([productId])
+  @@index([productId, sortOrder])
+}
+
+/// One priced/photographed size (or other single-axis variant) of a Product — e.g. the
+/// Small/Medium/Large Graduation Giveaway Box each has its own price, photos, and box
+/// contents but is otherwise the same catalog listing. `optionValue` matches a value in
+/// the product's `isVariantAxis` ProductOption group (see resolveVariantPricing in
+/// product.service.js) so a cart/order's `selectedOptions` resolves to the right row.
+/// Stock stays PRODUCT-level (Product.quantity), matching how Colour variants already
+/// work here — no separate per-variant inventory in this iteration.
+model ProductVariant {
+  id              String   @id @default(uuid())
+  productId       String
+  optionValue     String
+  optionValue_ar  String?
+  price           Decimal  @db.Decimal(10, 2)
+  discountedPrice Decimal? @db.Decimal(10, 2)
+  images          String[] @default([])
+  contents        String?  @db.Text
+  contents_ar     String?  @db.Text
+  sortOrder       Int      @default(0)
+  // Exactly one variant per product should be true — the price/photo shown before
+  // the shopper picks a value, and the one Product.price/discountedPrice mirrors
+  // for older (variant-unaware) clients. Enforced in product.service.js.
+  isDefault       Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, optionValue])
   @@index([productId])
   @@index([productId, sortOrder])
 }
@@ -795,6 +952,12 @@ model CartItem {
   // gift card's personalized note when giftCardSelected is true.
   giftCardSelected Boolean  @default(false)
   customName       String?
+  // Per-UNIT cash arrangement for this line (the fee itself is resolved at checkout, never
+  // stored here). null amount = no cash for this line. Folded into variantKey below (like
+  // the gift card message) so units with different cash configs stay separate lines.
+  cashArrangementAmount       Decimal? @db.Decimal(10, 2)
+  cashArrangementDenomination Int?
+  cashArrangementNote         String?  @db.Text
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -872,6 +1035,27 @@ model Order {
   /// Flat shipping fee charged on this order, snapshot from Region.shippingFlatRate
   /// at checkout time. Null/0 = free (no rate configured for the region at the time).
   shippingAmount        Decimal?      @db.Decimal(10, 2)
+  /// ORDER-LEVEL ROLL-UP of the per-line cash arrangements (cash arrangement is now PER
+  /// ITEM — see OrderItem.cashArrangement*). These are the aggregate across all lines,
+  /// kept so older consumers (mobile app, exports) still see one total per order.
+  /// Snapshotted at order-creation time and NEVER re-derived later.
+  /// requested = any line requested cash.
+  cashArrangementRequested    Boolean  @default(false)
+  /// SUM of every line's (per-unit cash × quantity). Never passed through VAT — added to
+  /// totalAmount as-is, unlike cashArrangementFeeAmount below.
+  cashArrangementAmount       Decimal? @db.Decimal(10, 2)
+  /// Preferred banknote denomination — order-level roll-up is only meaningful for a
+  /// single cash line; null when lines differ. The authoritative per-line value is on
+  /// OrderItem. Purely informational for fulfilment — never affects price.
+  cashArrangementDenomination Int?
+  /// Order-level note roll-up — only meaningful for a single cash line; null when lines
+  /// differ. The authoritative per-line note is on OrderItem.
+  cashArrangementNote         String?  @db.Text
+  /// SUM of every line's (per-unit pre-VAT service fee × quantity).
+  cashArrangementFeeAmount    Decimal? @db.Decimal(10, 2)
+  /// SUM of every line's (per-unit fee VAT × quantity) — already folded into the order's
+  /// blended taxAmount above, kept separately for receipts/admin.
+  cashArrangementFeeVatAmount Decimal? @db.Decimal(10, 2)
   /// STANDARD (default, today's behavior) or SCHEDULED (customer picked a future
   /// date/time at checkout).
   deliveryType          DeliveryType  @default(STANDARD)
@@ -952,6 +1136,16 @@ model OrderItem {
   /// historical order's displayed lead time. Null for orders placed before this
   /// feature existed.
   resolvedLeadDays  Int?
+  /// Per-line "add cash arrangement" snapshot, PER UNIT (the line's total contribution is
+  /// each × quantity). requested=false + the rest null when this line has no cash arrangement.
+  /// amount = raw cash (never VAT'd); feeAmount = the per-unit service fee; feeVatAmount = VAT
+  /// on that fee. The Order-level cashArrangement* fields are the roll-up (sum across lines).
+  cashArrangementRequested    Boolean  @default(false)
+  cashArrangementAmount       Decimal? @db.Decimal(10, 2)
+  cashArrangementDenomination Int?
+  cashArrangementNote         String?  @db.Text
+  cashArrangementFeeAmount    Decimal? @db.Decimal(10, 2)
+  cashArrangementFeeVatAmount Decimal? @db.Decimal(10, 2)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -1203,6 +1397,7 @@ enum ManagerPermission {
   REVIEWS
   DELIVERY_ZONES
   VAT
+  CASH_ARRANGEMENT
   NOTIFICATIONS
   USERS
   MANAGERS
