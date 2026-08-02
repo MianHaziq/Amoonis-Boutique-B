@@ -121,6 +121,9 @@ const validateCodeValidation = [
   body('items.*.productId').optional().isUUID(),
   body('items.*.quantity').optional().isInt({ min: 1 }),
   body('items.*.price').optional().isFloat({ min: 0 }),
+  // Chosen variant for this line (e.g. {"Size":"Medium"}), so a priced-variant
+  // product previews against the variant's own price, not the parent product's.
+  body('items.*.selectedOptions').optional({ nullable: true }).isObject(),
 ];
 
 // ---------- user-facing (must come before /:id to not be shadowed) ----------

@@ -32,6 +32,7 @@
     "test:region-hide": "node scripts/region-hide-verify.js",
     "test:delivery-zones": "node scripts/delivery-zone-verify.js",
     "test:product-variants": "node scripts/product-variant-verify.js",
+    "test:promo-variant-price": "node scripts/promo-variant-price-verify.js",
     "kill-port-5000": "powershell -ExecutionPolicy Bypass -File scripts/kill-port-5000.ps1",
     "migrate:fix-p3009": "node scripts/fix-p3009-ecommerce-migration.js"
   },

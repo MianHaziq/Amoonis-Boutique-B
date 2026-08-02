@@ -1,6 +1,22 @@
 const prisma = require('../config/db');
 const promoCodeService = require('../services/promoCode.service');
+const productService = require('../services/product.service');
 const { success, error } = require('../utils/response');
+
+// Fetches enough of each product row (productOptions + variants) to resolve a
+// variant-priced line's real price via productService.resolveEffectivePrice —
+// same shape cart.service.js's cartProductInclude uses. Needed by both promo
+// preview paths below so a Small/Medium/Large-style line previews against the
+// price it will actually be charged, not the parent Product's own (default-
+// variant-mirrored) price/discountedPrice.
+const PROMO_PREVIEW_PRODUCT_SELECT = {
+  id: true,
+  price: true,
+  discountedPrice: true,
+  categoryId: true,
+  productOptions: { orderBy: { sortOrder: 'asc' } },
+  variants: { orderBy: { sortOrder: 'asc' } },
+};
 
 function handlePromoError(err, res, next) {
   switch (err.code) {
@@ -148,9 +164,7 @@ async function validatePromoCode(req, res, next) {
         include: {
           items: {
             include: {
-              product: {
-                select: { id: true, price: true, discountedPrice: true, categoryId: true },
-              },
+              product: { select: PROMO_PREVIEW_PRODUCT_SELECT },
             },
           },
         },
@@ -158,17 +172,12 @@ async function validatePromoCode(req, res, next) {
       if (!cart || cart.items.length === 0) {
         return error(res, 'Your cart is empty', 400);
       }
-      items = cart.items.map((ci) => {
-        const price = ci.product.discountedPrice != null
-          ? Number(ci.product.discountedPrice)
-          : Number(ci.product.price);
-        return {
-          productId: ci.productId,
-          quantity: ci.quantity,
-          price,
-          categoryId: ci.product.categoryId ?? null,
-        };
-      });
+      items = cart.items.map((ci) => ({
+        productId: ci.productId,
+        quantity: ci.quantity,
+        price: productService.resolveEffectivePrice(ci.product, ci.selectedOptions),
+        categoryId: ci.product.categoryId ?? null,
+      }));
     } else {
       // Hydrate missing price / categoryId from DB if client sent only productId + quantity
       const needsHydration = items.some(
@@ -178,15 +187,18 @@ async function validatePromoCode(req, res, next) {
         const productIds = [...new Set(items.map((it) => it.productId).filter(Boolean))];
         const products = await prisma.product.findMany({
           where: { id: { in: productIds } },
-          select: { id: true, price: true, discountedPrice: true, categoryId: true },
+          select: PROMO_PREVIEW_PRODUCT_SELECT,
         });
         const map = new Map(products.map((p) => [p.id, p]));
         items = items.map((it) => {
           const p = map.get(it.productId);
           if (!p) return it;
+          // A variant-priced line (e.g. Size: Medium) must preview against THAT
+          // variant's price, not the parent Product's own (default-variant-
+          // mirrored) price/discountedPrice — see PROMO_PREVIEW_PRODUCT_SELECT.
           const price = it.price != null
             ? Number(it.price)
-            : p.discountedPrice != null ? Number(p.discountedPrice) : Number(p.price);
+            : productService.resolveEffectivePrice(p, it.selectedOptions);
           return {
             productId: it.productId,
             quantity: Number(it.quantity) || 1,
