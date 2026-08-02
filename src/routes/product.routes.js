@@ -249,11 +249,23 @@ const createValidation = [
   body('variants.*.contents').optional().trim(),
   body('variants.*.contents_ar').optional().trim(),
   body('variants.*.isDefault').optional().isBoolean().withMessage('variants.*.isDefault must be a boolean'),
+  // Optional per-variant description blocks (same shape as the top-level
+  // `descriptions` array) — empty/omitted = this size shares the shared blocks.
+  body('variants.*.descriptions').optional().isArray().withMessage('variants[].descriptions must be an array'),
+  body('variants.*.descriptions.*.title').optional().trim(),
+  body('variants.*.descriptions.*.title_ar').optional().trim(),
+  body('variants.*.descriptions.*.description').optional().trim(),
+  body('variants.*.descriptions.*.description_ar').optional().trim(),
   // Each variant row must have at least one side filled for its label (English OR Arabic).
   body('variants')
     .optional()
     .custom((arr) => eachRowHasOneSide(arr, [['optionValue', 'optionValue_ar']]))
     .withMessage('Each variant must have either "optionValue" or "optionValue_ar"'),
+  // Each variant's own description row (when present) needs one filled side too.
+  body('variants')
+    .optional()
+    .custom((arr) => !Array.isArray(arr) || arr.every((row) => eachRowHasOneSide(row?.descriptions, [['description', 'description_ar']])))
+    .withMessage('Each variant description item must have either "description" or "description_ar"'),
   // Each productOption row must have at least one side filled for its title.
   body('productOptions')
     .optional()
@@ -400,11 +412,23 @@ const updateValidation = [
   body('variants.*.contents').optional().trim(),
   body('variants.*.contents_ar').optional().trim(),
   body('variants.*.isDefault').optional().isBoolean().withMessage('variants.*.isDefault must be a boolean'),
+  // Optional per-variant description blocks (same shape as the top-level
+  // `descriptions` array) — empty/omitted = this size shares the shared blocks.
+  body('variants.*.descriptions').optional().isArray().withMessage('variants[].descriptions must be an array'),
+  body('variants.*.descriptions.*.title').optional().trim(),
+  body('variants.*.descriptions.*.title_ar').optional().trim(),
+  body('variants.*.descriptions.*.description').optional().trim(),
+  body('variants.*.descriptions.*.description_ar').optional().trim(),
   // Each variant row must have at least one side filled for its label (English OR Arabic).
   body('variants')
     .optional()
     .custom((arr) => eachRowHasOneSide(arr, [['optionValue', 'optionValue_ar']]))
     .withMessage('Each variant must have either "optionValue" or "optionValue_ar"'),
+  // Each variant's own description row (when present) needs one filled side too.
+  body('variants')
+    .optional()
+    .custom((arr) => !Array.isArray(arr) || arr.every((row) => eachRowHasOneSide(row?.descriptions, [['description', 'description_ar']])))
+    .withMessage('Each variant description item must have either "description" or "description_ar"'),
   body('productOptions')
     .optional()
     .custom((arr) => eachRowHasOneSide(arr, [['title', 'title_ar']]))

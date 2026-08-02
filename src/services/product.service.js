@@ -93,11 +93,14 @@ function orderedImages(product) {
   return list.map((img) => ({ url: img.url, sortOrder: img.sortOrder }));
 }
 
-function orderedDescriptions(product) {
-  const list = product.descriptions && Array.isArray(product.descriptions)
-    ? [...product.descriptions].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+// Takes a raw ProductDescription[] (either product.descriptions or a single
+// variant's own .descriptions — same row shape either way) and returns the
+// ordered display list. Shared by orderedVariants below for the per-variant blocks.
+function orderedDescriptions(list) {
+  const sorted = Array.isArray(list)
+    ? [...list].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
     : [];
-  return list.map((d) => ({
+  return sorted.map((d) => ({
     id: d.id,
     title: d.title ?? null,
     title_ar: d.title_ar ?? null,
@@ -144,6 +147,10 @@ function orderedVariants(product) {
     contents_ar: v.contents_ar ?? null,
     isDefault: !!v.isDefault,
     sortOrder: v.sortOrder,
+    // This variant's own description blocks. Empty = it has none of its own and
+    // shares the product's top-level `descriptions` instead — storefront picks
+    // whichever list is non-empty for the selected variant (variant own > shared).
+    descriptions: orderedDescriptions(v.descriptions),
   }));
 }
 
@@ -184,7 +191,14 @@ function mapProduct(product) {
     ...rest
   } = product;
   const imagesList = orderedImages(product);
-  const descriptionsList = orderedDescriptions(product);
+  // product.descriptions (the Product -> ProductDescription relation) carries EVERY
+  // description row for this product, shared AND variant-scoped alike, since both kinds
+  // share the same productId — filter down to the shared ones (variantId: null) here.
+  // A variant's own rows are surfaced separately, via orderedVariants -> v.descriptions.
+  const sharedDescriptionRows = Array.isArray(product.descriptions)
+    ? product.descriptions.filter((d) => d.variantId == null)
+    : product.descriptions;
+  const descriptionsList = orderedDescriptions(sharedDescriptionRows);
   const productOptionsList = orderedProductOptions(product);
   const variantsList = orderedVariants(product);
   const out = {
@@ -537,8 +551,11 @@ function normalizeProductOptions(productOptions) {
 
 /**
  * Validate & normalize a `variants: [{optionValue, price, discountedPrice, images,
- * contents, isDefault}]` payload into ProductVariant create rows. Throws INVALID_PRICE
- * (code set) on a missing/invalid price or a discount exceeding its own row's price —
+ * contents, isDefault, descriptions}]` payload into ProductVariant create rows. Each
+ * row's own `descriptions` (same shape as the top-level description blocks) is
+ * normalized too, via normalizeDescriptions — empty means this size has no override
+ * and shares the product's shared blocks. Throws INVALID_PRICE (code set) on a
+ * missing/invalid price or a discount exceeding its own row's price —
  * same convention as buildRegionPriceMap. Drops rows with no label on either side.
  * De-dupes by (case-insensitive) label — the DB's @@unique([productId, optionValue])
  * would otherwise reject the whole write. Exactly one row ends up `isDefault: true`:
@@ -579,6 +596,10 @@ function normalizeVariants(variants) {
         contents_ar: item.contents_ar != null ? String(item.contents_ar).trim() || null : null,
         isDefault: !!item.isDefault,
         sortOrder: i,
+        // This variant's own description blocks (same shape as the top-level
+        // `descriptions` card). Empty array = admin left this size on the shared
+        // copy; a non-empty array overrides the shared blocks for this size only.
+        descriptions: normalizeDescriptions(item.descriptions),
       };
     })
     .filter(Boolean);
@@ -701,6 +722,9 @@ async function createProduct(data) {
   // price/discountedPrice mirror the default variant so older (variant-unaware)
   // clients, e.g. the mobile app, still show a sensible single price.
   const defaultVariantRow = variantRows.find((v) => v.isDefault) ?? null;
+  // Flattened across every variant, for one batched translate/gap-fill call — same
+  // pattern as the top-level descriptionRows.
+  const variantDescriptionRows = variantRows.flatMap((v) => v.descriptions);
 
   // Auto-translate the en/_ar twins before the DB write. We translate the parent product
   // fields and every child description/option/variant in a single batched call so an
@@ -716,6 +740,7 @@ async function createProduct(data) {
     autoTranslateMany(descriptionRows, PRODUCT_DESCRIPTION_BILINGUAL),
     autoTranslateMany(productOptionRows, PRODUCT_OPTION_BILINGUAL),
     autoTranslateMany(variantRows, PRODUCT_VARIANT_BILINGUAL),
+    autoTranslateMany(variantDescriptionRows, PRODUCT_DESCRIPTION_BILINGUAL),
   ]);
 
   // If translation failed for any required column, copy the populated side across so
@@ -724,6 +749,7 @@ async function createProduct(data) {
   for (const row of descriptionRows) fillBilingualGapsFromTwin(row, PRODUCT_DESCRIPTION_REQUIRED_PAIRS);
   for (const row of productOptionRows) fillBilingualGapsFromTwin(row, PRODUCT_OPTION_REQUIRED_PAIRS);
   for (const row of variantRows) fillBilingualGapsFromTwin(row, PRODUCT_VARIANT_REQUIRED_PAIRS);
+  for (const row of variantDescriptionRows) fillBilingualGapsFromTwin(row, PRODUCT_DESCRIPTION_REQUIRED_PAIRS);
 
   // Wrap product create + category counter bump in a single transaction so a counter-update
   // failure rolls the product create back instead of leaving the cached count drifted.
@@ -787,19 +813,19 @@ async function createProduct(data) {
           : {}),
         ...(variantRows.length > 0
           ? {
+              // Own description blocks are attached in a second pass below, once the
+              // variant rows (and this new product's id) actually exist — a variant's
+              // `descriptions` relation points at Product too (productId), and Prisma's
+              // nested-write auto-FK only reaches the IMMEDIATE parent (variantId), not
+              // a grandparent id that doesn't exist yet within this same insert.
               variants: {
-                create: variantRows,
+                create: variantRows.map(({ descriptions, ...rest }) => rest),
               },
             }
           : {}),
       },
       include: {
-        category: { select: { id: true, title: true, deliveryLeadDays: true } },
-        images: { orderBy: { sortOrder: 'asc' } },
-        descriptions: { orderBy: { sortOrder: 'asc' } },
-        productOptions: { orderBy: { sortOrder: 'asc' } },
         variants: { orderBy: { sortOrder: 'asc' } },
-        ...REGION_INCLUDE,
       },
     });
     if (categoryId) {
@@ -808,7 +834,30 @@ async function createProduct(data) {
         data: { totalProducts: { increment: 1 } },
       });
     }
-    return product;
+
+    // Second pass: attach each variant's own description blocks now that both the
+    // product id and each variant's id exist. `product.variants` is sorted by the same
+    // sortOrder used to build variantRows, so index i always lines up with variantRows[i].
+    for (let i = 0; i < variantRows.length; i++) {
+      const ownDescriptions = variantRows[i].descriptions;
+      if (ownDescriptions.length > 0) {
+        await tx.productDescription.createMany({
+          data: ownDescriptions.map((d) => ({ ...d, productId: product.id, variantId: product.variants[i].id })),
+        });
+      }
+    }
+
+    return tx.product.findUnique({
+      where: { id: product.id },
+      include: {
+        category: { select: { id: true, title: true, deliveryLeadDays: true } },
+        images: { orderBy: { sortOrder: 'asc' } },
+        descriptions: { orderBy: { sortOrder: 'asc' } },
+        productOptions: { orderBy: { sortOrder: 'asc' } },
+        variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
+        ...REGION_INCLUDE,
+      },
+    });
   });
 }
 
@@ -873,6 +922,10 @@ async function updateProduct(id, data) {
   // When this update sends a non-empty variants array, it becomes the source of truth
   // for price — see the matching comment in createProduct.
   const defaultVariantRow = variantRows && variantRows.length > 0 ? variantRows.find((v) => v.isDefault) ?? null : null;
+  // Flattened across every incoming variant, for one batched translate/gap-fill call —
+  // same pattern as createProduct. [] (not null) when variantRows is null so the
+  // Promise.all/for-of below don't need a separate null check.
+  const variantDescriptionRows = variantRows ? variantRows.flatMap((v) => v.descriptions) : [];
 
   // Region links are replaced wholesale when `regionIds` OR `regionPrices` is sent — a
   // price-only update (visibility untouched) still needs the full existing region set so
@@ -917,6 +970,9 @@ async function updateProduct(id, data) {
     descriptionRows ? autoTranslateMany(descriptionRows, PRODUCT_DESCRIPTION_BILINGUAL) : Promise.resolve(),
     productOptionRows ? autoTranslateMany(productOptionRows, PRODUCT_OPTION_BILINGUAL) : Promise.resolve(),
     variantRows ? autoTranslateMany(variantRows, PRODUCT_VARIANT_BILINGUAL) : Promise.resolve(),
+    variantDescriptionRows.length > 0
+      ? autoTranslateMany(variantDescriptionRows, PRODUCT_DESCRIPTION_BILINGUAL)
+      : Promise.resolve(),
   ]);
 
   // Child rows are fully replaced (delete + createMany) on update, so the NOT NULL columns
@@ -932,6 +988,7 @@ async function updateProduct(id, data) {
   if (variantRows) {
     for (const row of variantRows) fillBilingualGapsFromTwin(row, PRODUCT_VARIANT_REQUIRED_PAIRS);
   }
+  for (const row of variantDescriptionRows) fillBilingualGapsFromTwin(row, PRODUCT_DESCRIPTION_REQUIRED_PAIRS);
 
   const updatePayload = {
     ...(bilingualDraft.title != null && { title: bilingualDraft.title }),
@@ -1029,10 +1086,13 @@ async function updateProduct(id, data) {
     }
 
     if (descriptionRows !== null) {
-      await tx.productDescription.deleteMany({ where: { productId: id } });
+      // Scoped to the SHARED blocks only (variantId: null) — a variant's own override
+      // blocks live under its own ProductVariant row and are replaced below instead,
+      // so editing the shared copy never wipes a size's custom description.
+      await tx.productDescription.deleteMany({ where: { productId: id, variantId: null } });
       if (descriptionRows.length > 0) {
         await tx.productDescription.createMany({
-          data: descriptionRows.map((row) => ({ productId: id, ...row })),
+          data: descriptionRows.map((row) => ({ productId: id, variantId: null, ...row })),
         });
       }
     }
@@ -1047,10 +1107,24 @@ async function updateProduct(id, data) {
     }
 
     if (variantRows !== null) {
+      // Deleting a variant cascades (DB-level) to its own description rows, so this
+      // alone clears any prior per-variant overrides too.
       await tx.productVariant.deleteMany({ where: { productId: id } });
-      if (variantRows.length > 0) {
-        await tx.productVariant.createMany({
-          data: variantRows.map((row) => ({ productId: id, ...row })),
+      // One-by-one create (not createMany) because a variant with its own description
+      // blocks needs a nested write — createMany can't attach child relations.
+      for (const row of variantRows) {
+        const { descriptions, ...rest } = row;
+        await tx.productVariant.create({
+          data: {
+            productId: id,
+            ...rest,
+            // productId is supplied explicitly (not left to relation auto-connect) — the
+            // product already exists here (unlike in createProduct's single-shot nested
+            // write), so there's no chicken-and-egg id problem.
+            ...(descriptions.length > 0
+              ? { descriptions: { create: descriptions.map((d) => ({ ...d, productId: id })) } }
+              : {}),
+          },
         });
       }
     }
@@ -1097,7 +1171,7 @@ async function updateProduct(id, data) {
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
-      variants: { orderBy: { sortOrder: 'asc' } },
+      variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
       ...REGION_INCLUDE,
     },
   });
@@ -1183,7 +1257,7 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
-        variants: { orderBy: { sortOrder: 'asc' } },
+        variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
         ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     }),
@@ -1321,7 +1395,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
-        variants: { orderBy: { sortOrder: 'asc' } },
+        variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
         ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     });
@@ -1395,7 +1469,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
-        variants: { orderBy: { sortOrder: 'asc' } },
+        variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
         ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     }),
@@ -1425,7 +1499,7 @@ async function getProductById(id, visibility = {}) {
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
-      variants: { orderBy: { sortOrder: 'asc' } },
+      variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
       ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
     },
   });
