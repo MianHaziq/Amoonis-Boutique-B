@@ -25,12 +25,12 @@ function ok(name, cond, extra = '') {
 
 async function cleanup() {
   await prisma.cartItem.deleteMany({ where: { product: { title: { contains: TAG } } } });
-  await prisma.cart.deleteMany({ where: { user: { email: { contains: TAG } } } });
+  await prisma.cart.deleteMany({ where: { user: { email: { contains: TAG.toLowerCase() } } } });
   await prisma.orderItem.deleteMany({ where: { product: { title: { contains: TAG } } } });
   await prisma.order.deleteMany({ where: { guestEmail: { contains: TAG.toLowerCase() } } });
   await prisma.product.deleteMany({ where: { title: { contains: TAG } } });
   await prisma.category.deleteMany({ where: { title: { contains: TAG } } });
-  await prisma.user.deleteMany({ where: { email: { contains: TAG } } });
+  await prisma.user.deleteMany({ where: { email: { contains: TAG.toLowerCase() } } });
 }
 
 const SHIPPING = {
@@ -185,6 +185,70 @@ async function main() {
   });
   const mappedDupes = productService.mapProduct(dupes);
   ok('case-insensitive duplicate variant labels are de-duped', mappedDupes.variants.length === 1, `got ${mappedDupes.variants.length}`);
+
+  // --- 11. Per-variant description blocks: shared vs override, at create -----------
+  const descProduct = await productService.createProduct({
+    title: `${TAG} Variant Descriptions`, title_ar: `${TAG} أوصاف المتغيرات`,
+    price: 10, quantity: 5, status: 'PUBLISHED', categoryId: cat.id,
+    descriptions: [
+      { title: 'Shared Care Info', title_ar: 'معلومات العناية المشتركة', description: 'Shared care text', description_ar: 'نص العناية المشترك' },
+    ],
+    productOptions: [
+      { title: 'Size', title_ar: 'المقاس', options: ['Small', 'Medium', 'Large'], options_ar: ['صغير', 'وسط', 'كبير'], isVariantAxis: true },
+    ],
+    variants: [
+      { optionValue: 'Small', optionValue_ar: 'صغير', price: 25, isDefault: true },
+      { optionValue: 'Medium', optionValue_ar: 'وسط', price: 30 },
+      {
+        optionValue: 'Large', optionValue_ar: 'كبير', price: 40,
+        descriptions: [
+          { title: 'Large-only note', title_ar: 'ملاحظة خاصة بالكبير', description: 'Large only text', description_ar: 'نص خاص بالكبير' },
+        ],
+      },
+    ],
+  });
+  const mappedDesc = productService.mapProduct(descProduct);
+  ok('shared descriptions list has 1 block', mappedDesc.descriptions.length === 1, `got ${mappedDesc.descriptions.length}`);
+  const smallV = mappedDesc.variants.find((v) => v.optionValue === 'Small');
+  const mediumV = mappedDesc.variants.find((v) => v.optionValue === 'Medium');
+  const largeV = mappedDesc.variants.find((v) => v.optionValue === 'Large');
+  ok('Small variant has no description override (shares the shared blocks)', smallV?.descriptions.length === 0, `got ${smallV?.descriptions.length}`);
+  ok('Medium variant has no description override', mediumV?.descriptions.length === 0, `got ${mediumV?.descriptions.length}`);
+  ok('Large variant has its own 1 override block', largeV?.descriptions.length === 1, `got ${largeV?.descriptions.length}`);
+  ok('Large override title is correct', largeV?.descriptions[0]?.title === 'Large-only note', largeV?.descriptions[0]?.title);
+
+  // --- 12. Same shape survives a fresh read via getProductById ----------------------
+  const fetchedDesc = await productService.getProductById(descProduct.id, { isStaff: true });
+  const fetchedLarge = fetchedDesc.variants.find((v) => v.optionValue === 'Large');
+  ok('getProductById: Large override still present after fresh read', fetchedLarge?.descriptions.length === 1 && fetchedLarge.descriptions[0].description === 'Large only text');
+
+  // --- 13. Update: give Medium its own override, remove Large's (revert to shared) --
+  const updated1 = await productService.updateProduct(descProduct.id, {
+    variants: [
+      { optionValue: 'Small', optionValue_ar: 'صغير', price: 25, isDefault: true },
+      {
+        optionValue: 'Medium', optionValue_ar: 'وسط', price: 30,
+        descriptions: [{ title: 'Medium note', title_ar: 'ملاحظة متوسطة', description: 'Medium only text', description_ar: 'نص خاص بالمتوسط' }],
+      },
+      { optionValue: 'Large', optionValue_ar: 'كبير', price: 40 }, // no descriptions -> reverts to shared
+    ],
+  });
+  const mappedUpdated1 = productService.mapProduct(updated1);
+  const mediumV2 = mappedUpdated1.variants.find((v) => v.optionValue === 'Medium');
+  const largeV2 = mappedUpdated1.variants.find((v) => v.optionValue === 'Large');
+  ok('after update: Medium now has its own override', mediumV2?.descriptions.length === 1 && mediumV2.descriptions[0].description === 'Medium only text');
+  ok('after update: Large reverted to sharing (no override rows)', largeV2?.descriptions.length === 0, `got ${largeV2?.descriptions.length}`);
+
+  // --- 14. Editing ONLY the shared descriptions must NOT wipe Medium's override -----
+  const updated2 = await productService.updateProduct(descProduct.id, {
+    descriptions: [
+      { title: 'Shared Care Info v2', title_ar: 'معلومات العناية المشتركة 2', description: 'Shared care text v2', description_ar: 'نص العناية المشترك 2' },
+    ],
+  });
+  const mappedUpdated2 = productService.mapProduct(updated2);
+  ok('shared descriptions replaced (v2 text)', mappedUpdated2.descriptions[0]?.description === 'Shared care text v2');
+  const mediumV3 = mappedUpdated2.variants.find((v) => v.optionValue === 'Medium');
+  ok('Medium override SURVIVES an edit to the shared blocks (scoped delete)', mediumV3?.descriptions.length === 1 && mediumV3.descriptions[0].description === 'Medium only text');
 
   await cleanup();
   console.log(`\n${failures === 0 ? '🎉 ALL PASSED' : `❌ ${failures} FAILED`}`);
