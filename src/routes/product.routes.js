@@ -256,6 +256,15 @@ const createValidation = [
   body('variants.*.descriptions.*.title_ar').optional().trim(),
   body('variants.*.descriptions.*.description').optional().trim(),
   body('variants.*.descriptions.*.description_ar').optional().trim(),
+  // Optional per-variant colour choices — e.g. Large offers Pink/Blue/Red while
+  // Medium only offers Blue/Black. Entirely independent per size; empty/omitted =
+  // this size has no colour picker at all.
+  body('variants.*.colors').optional().isArray().withMessage('variants[].colors must be an array'),
+  body('variants.*.colors.*.label').optional().trim(),
+  body('variants.*.colors.*.label_ar').optional().trim(),
+  body('variants.*.colors.*.images').optional().isArray().withMessage('variants[].colors[].images must be an array of image URLs'),
+  body('variants.*.colors.*.images.*').optional().isString().trim().notEmpty().withMessage('Each colour image must be a non-empty URL string'),
+  body('variants.*.colors.*.isDefault').optional().isBoolean().withMessage('variants[].colors[].isDefault must be a boolean'),
   // Each variant row must have at least one side filled for its label (English OR Arabic).
   body('variants')
     .optional()
@@ -266,6 +275,11 @@ const createValidation = [
     .optional()
     .custom((arr) => !Array.isArray(arr) || arr.every((row) => eachRowHasOneSide(row?.descriptions, [['description', 'description_ar']])))
     .withMessage('Each variant description item must have either "description" or "description_ar"'),
+  // Each variant's own colour row (when present) needs one filled side too.
+  body('variants')
+    .optional()
+    .custom((arr) => !Array.isArray(arr) || arr.every((row) => eachRowHasOneSide(row?.colors, [['label', 'label_ar']])))
+    .withMessage('Each variant colour must have either "label" or "label_ar"'),
   // Each productOption row must have at least one side filled for its title.
   body('productOptions')
     .optional()
@@ -419,6 +433,15 @@ const updateValidation = [
   body('variants.*.descriptions.*.title_ar').optional().trim(),
   body('variants.*.descriptions.*.description').optional().trim(),
   body('variants.*.descriptions.*.description_ar').optional().trim(),
+  // Optional per-variant colour choices — e.g. Large offers Pink/Blue/Red while
+  // Medium only offers Blue/Black. Entirely independent per size; empty/omitted =
+  // this size has no colour picker at all.
+  body('variants.*.colors').optional().isArray().withMessage('variants[].colors must be an array'),
+  body('variants.*.colors.*.label').optional().trim(),
+  body('variants.*.colors.*.label_ar').optional().trim(),
+  body('variants.*.colors.*.images').optional().isArray().withMessage('variants[].colors[].images must be an array of image URLs'),
+  body('variants.*.colors.*.images.*').optional().isString().trim().notEmpty().withMessage('Each colour image must be a non-empty URL string'),
+  body('variants.*.colors.*.isDefault').optional().isBoolean().withMessage('variants[].colors[].isDefault must be a boolean'),
   // Each variant row must have at least one side filled for its label (English OR Arabic).
   body('variants')
     .optional()
@@ -429,6 +452,11 @@ const updateValidation = [
     .optional()
     .custom((arr) => !Array.isArray(arr) || arr.every((row) => eachRowHasOneSide(row?.descriptions, [['description', 'description_ar']])))
     .withMessage('Each variant description item must have either "description" or "description_ar"'),
+  // Each variant's own colour row (when present) needs one filled side too.
+  body('variants')
+    .optional()
+    .custom((arr) => !Array.isArray(arr) || arr.every((row) => eachRowHasOneSide(row?.colors, [['label', 'label_ar']])))
+    .withMessage('Each variant colour must have either "label" or "label_ar"'),
   body('productOptions')
     .optional()
     .custom((arr) => eachRowHasOneSide(arr, [['title', 'title_ar']]))
@@ -444,9 +472,15 @@ const pagination = [
   query('page').optional().isInt({ min: 1 }),
   query('limit').optional().isInt({ min: 1, max: 100 }),
 ];
+// Admin panel's category filter — narrows GET /products or /products/search to one
+// category, standalone or combined with a search term.
+const categoryFilterQuery = [
+  query('categoryId').optional().isUUID().withMessage('categoryId must be a valid UUID when provided'),
+];
 const searchValidation = [
   query('q').optional().trim().isLength({ max: 100 }).withMessage('q must be at most 100 characters'),
   ...pagination,
+  ...categoryFilterQuery,
 ];
 
 router.post(
@@ -648,6 +682,10 @@ router.delete(
  *         name: limit
  *         schema: { type: integer, default: 10 }
  *         description: Items per page (max 100)
+ *       - in: query
+ *         name: categoryId
+ *         schema: { type: string, format: uuid }
+ *         description: Narrow the list to one category (same effect as GET /products/category/{categoryId}, exposed here as a query filter for the admin panel).
  *       - $ref: '#/components/parameters/RegionFilterQuery'
  *       - $ref: '#/components/parameters/StatusFilterQuery'
  *     responses:
@@ -664,7 +702,7 @@ router.delete(
  *               meta:
  *                 pagination: { page: 1, limit: 10, total: 0, totalPages: 0 }
  */
-router.get('/', publicLimiter, attachStaffIfPresent, resolveRegion, pagination, handleValidationErrors, productController.getAllProducts);
+router.get('/', publicLimiter, attachStaffIfPresent, resolveRegion, pagination, categoryFilterQuery, handleValidationErrors, productController.getAllProducts);
 
 /**
  * @swagger
@@ -672,10 +710,11 @@ router.get('/', publicLimiter, attachStaffIfPresent, resolveRegion, pagination, 
  *   get:
  *     summary: Search products (paginated)
  *     description: |
- *       Case-insensitive search across product title/subtitle (EN + AR) and the
- *       product's category name. Backed by pg_trgm GIN indexes so it stays fast as the
- *       catalog grows. Storefront requests (X-Region) match only PUBLISHED products in
- *       that region; staff match everything (optionally narrowed by region/status).
+ *       Case-insensitive search across product title/subtitle (EN + AR), description
+ *       blocks (EN + AR), and the product's category name (EN + AR). Backed by pg_trgm
+ *       GIN indexes so it stays fast as the catalog grows. Storefront requests
+ *       (X-Region) match only PUBLISHED products in that region; staff match everything
+ *       (optionally narrowed by region/status/categoryId).
  *       An empty `q` returns no results. `meta.query` echoes the normalized term.
  *     tags: [Products]
  *     parameters:
@@ -690,6 +729,10 @@ router.get('/', publicLimiter, attachStaffIfPresent, resolveRegion, pagination, 
  *       - in: query
  *         name: limit
  *         schema: { type: integer, default: 10 }
+ *       - in: query
+ *         name: categoryId
+ *         schema: { type: string, format: uuid }
+ *         description: Narrow search results to one category.
  *       - $ref: '#/components/parameters/RegionFilterQuery'
  *       - $ref: '#/components/parameters/StatusFilterQuery'
  *     responses:

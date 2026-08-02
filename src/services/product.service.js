@@ -75,12 +75,14 @@ const PRODUCT_VARIANT_BILINGUAL = [
   { src: 'optionValue', dst: 'optionValue_ar' },
   { src: 'contents', dst: 'contents_ar' },
 ];
+const PRODUCT_VARIANT_COLOR_BILINGUAL = [{ src: 'label', dst: 'label_ar' }];
 
 // NOT NULL constraints in the schema — must be filled at write time.
 const PRODUCT_REQUIRED_PAIRS = [{ src: 'title', dst: 'title_ar' }];
 const PRODUCT_DESCRIPTION_REQUIRED_PAIRS = [{ src: 'description', dst: 'description_ar' }];
 const PRODUCT_OPTION_REQUIRED_PAIRS = [{ src: 'title', dst: 'title_ar' }];
 const PRODUCT_VARIANT_REQUIRED_PAIRS = [{ src: 'optionValue', dst: 'optionValue_ar' }];
+const PRODUCT_VARIANT_COLOR_REQUIRED_PAIRS = [{ src: 'label', dst: 'label_ar' }];
 
 const MAX_IMAGES = 10;
 const ACTIVE_ORDER_STATUSES = ['PENDING_PAYMENT', 'PROCESSING', 'ON_HOLD'];
@@ -132,6 +134,22 @@ function orderedProductOptions(product) {
   }));
 }
 
+// This variant's own colour choices (e.g. Large offers Pink/Blue/Red while Medium
+// only offers Blue/Black) — completely independent per variant, unlike the shared
+// ProductOption groups. Purely cosmetic: never affects price/stock.
+function orderedVariantColors(variant) {
+  const list = variant.colors && Array.isArray(variant.colors)
+    ? [...variant.colors].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+    : [];
+  return list.map((c) => ({
+    id: c.id,
+    label: c.label,
+    label_ar: c.label_ar ?? null,
+    images: Array.isArray(c.images) ? c.images : [],
+    isDefault: !!c.isDefault,
+  }));
+}
+
 function orderedVariants(product) {
   const list = product.variants && Array.isArray(product.variants)
     ? [...product.variants].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
@@ -151,6 +169,9 @@ function orderedVariants(product) {
     // shares the product's top-level `descriptions` instead — storefront picks
     // whichever list is non-empty for the selected variant (variant own > shared).
     descriptions: orderedDescriptions(v.descriptions),
+    // This variant's own colour choices. Empty = this size offers no colour picker
+    // at all (most products) — see ProductVariantColor.
+    colors: orderedVariantColors(v),
   }));
 }
 
@@ -561,6 +582,52 @@ function normalizeProductOptions(productOptions) {
  * would otherwise reject the whole write. Exactly one row ends up `isDefault: true`:
  * the admin's first explicit choice, else the first remaining row.
  */
+/**
+ * Validate & normalize a `colors: [{label, label_ar, images, isDefault}]` payload
+ * scoped to ONE variant — e.g. Large's own Pink/Blue/Red, entirely independent from
+ * any other size's colour list. Drops rows with no label on either side, de-dupes
+ * by (case-insensitive) label (no DB unique constraint to rely on here, so this is
+ * belt-and-suspenders against the admin accidentally listing the same colour twice),
+ * and collapses to exactly one `isDefault: true` — same convention as normalizeVariants.
+ */
+function normalizeVariantColors(colors) {
+  if (!Array.isArray(colors)) return [];
+  const rows = colors
+    .map((item, i) => {
+      if (item == null || typeof item !== 'object') return null;
+      const label = item.label != null ? String(item.label).trim() : '';
+      const label_ar = item.label_ar != null ? String(item.label_ar).trim() : '';
+      if (!label && !label_ar) return null;
+      const images = Array.isArray(item.images)
+        ? item.images.filter((u) => typeof u === 'string' && u.trim()).map((u) => u.trim())
+        : [];
+      return {
+        label: label || null,
+        label_ar: label_ar || null,
+        images,
+        isDefault: !!item.isDefault,
+        sortOrder: i,
+      };
+    })
+    .filter(Boolean);
+
+  const seenLabels = new Set();
+  const deduped = rows.filter((row) => {
+    const key = (row.label || row.label_ar || '').toLowerCase();
+    if (seenLabels.has(key)) return false;
+    seenLabels.add(key);
+    return true;
+  });
+
+  const defaultIdx = deduped.findIndex((r) => r.isDefault);
+  deduped.forEach((r, i) => {
+    r.isDefault = defaultIdx >= 0 ? i === defaultIdx : i === 0;
+    r.sortOrder = i;
+  });
+
+  return deduped;
+}
+
 function normalizeVariants(variants) {
   if (!Array.isArray(variants)) return [];
   const rows = variants
@@ -600,6 +667,10 @@ function normalizeVariants(variants) {
         // `descriptions` card). Empty array = admin left this size on the shared
         // copy; a non-empty array overrides the shared blocks for this size only.
         descriptions: normalizeDescriptions(item.descriptions),
+        // This variant's own colour choices (e.g. Large's Pink/Blue/Red) — entirely
+        // independent from any other size's list. Empty = this size offers no
+        // colour picker at all.
+        colors: normalizeVariantColors(item.colors),
       };
     })
     .filter(Boolean);
@@ -725,6 +796,7 @@ async function createProduct(data) {
   // Flattened across every variant, for one batched translate/gap-fill call — same
   // pattern as the top-level descriptionRows.
   const variantDescriptionRows = variantRows.flatMap((v) => v.descriptions);
+  const variantColorRows = variantRows.flatMap((v) => v.colors);
 
   // Auto-translate the en/_ar twins before the DB write. We translate the parent product
   // fields and every child description/option/variant in a single batched call so an
@@ -741,6 +813,7 @@ async function createProduct(data) {
     autoTranslateMany(productOptionRows, PRODUCT_OPTION_BILINGUAL),
     autoTranslateMany(variantRows, PRODUCT_VARIANT_BILINGUAL),
     autoTranslateMany(variantDescriptionRows, PRODUCT_DESCRIPTION_BILINGUAL),
+    autoTranslateMany(variantColorRows, PRODUCT_VARIANT_COLOR_BILINGUAL),
   ]);
 
   // If translation failed for any required column, copy the populated side across so
@@ -750,6 +823,7 @@ async function createProduct(data) {
   for (const row of productOptionRows) fillBilingualGapsFromTwin(row, PRODUCT_OPTION_REQUIRED_PAIRS);
   for (const row of variantRows) fillBilingualGapsFromTwin(row, PRODUCT_VARIANT_REQUIRED_PAIRS);
   for (const row of variantDescriptionRows) fillBilingualGapsFromTwin(row, PRODUCT_DESCRIPTION_REQUIRED_PAIRS);
+  for (const row of variantColorRows) fillBilingualGapsFromTwin(row, PRODUCT_VARIANT_COLOR_REQUIRED_PAIRS);
 
   // Wrap product create + category counter bump in a single transaction so a counter-update
   // failure rolls the product create back instead of leaving the cached count drifted.
@@ -817,9 +891,14 @@ async function createProduct(data) {
               // variant rows (and this new product's id) actually exist — a variant's
               // `descriptions` relation points at Product too (productId), and Prisma's
               // nested-write auto-FK only reaches the IMMEDIATE parent (variantId), not
-              // a grandparent id that doesn't exist yet within this same insert.
+              // a grandparent id that doesn't exist yet within this same insert. Colours
+              // don't have that problem (they only need variantId, the IMMEDIATE parent
+              // of this very nesting level), so they're safe to create in this same pass.
               variants: {
-                create: variantRows.map(({ descriptions, ...rest }) => rest),
+                create: variantRows.map(({ descriptions, colors, ...rest }) => ({
+                  ...rest,
+                  ...(colors.length > 0 ? { colors: { create: colors } } : {}),
+                })),
               },
             }
           : {}),
@@ -854,7 +933,13 @@ async function createProduct(data) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
-        variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
+        variants: {
+          orderBy: { sortOrder: 'asc' },
+          include: {
+            descriptions: { orderBy: { sortOrder: 'asc' } },
+            colors: { orderBy: { sortOrder: 'asc' } },
+          },
+        },
         ...REGION_INCLUDE,
       },
     });
@@ -926,6 +1011,7 @@ async function updateProduct(id, data) {
   // same pattern as createProduct. [] (not null) when variantRows is null so the
   // Promise.all/for-of below don't need a separate null check.
   const variantDescriptionRows = variantRows ? variantRows.flatMap((v) => v.descriptions) : [];
+  const variantColorRows = variantRows ? variantRows.flatMap((v) => v.colors) : [];
 
   // Region links are replaced wholesale when `regionIds` OR `regionPrices` is sent — a
   // price-only update (visibility untouched) still needs the full existing region set so
@@ -973,6 +1059,9 @@ async function updateProduct(id, data) {
     variantDescriptionRows.length > 0
       ? autoTranslateMany(variantDescriptionRows, PRODUCT_DESCRIPTION_BILINGUAL)
       : Promise.resolve(),
+    variantColorRows.length > 0
+      ? autoTranslateMany(variantColorRows, PRODUCT_VARIANT_COLOR_BILINGUAL)
+      : Promise.resolve(),
   ]);
 
   // Child rows are fully replaced (delete + createMany) on update, so the NOT NULL columns
@@ -989,6 +1078,7 @@ async function updateProduct(id, data) {
     for (const row of variantRows) fillBilingualGapsFromTwin(row, PRODUCT_VARIANT_REQUIRED_PAIRS);
   }
   for (const row of variantDescriptionRows) fillBilingualGapsFromTwin(row, PRODUCT_DESCRIPTION_REQUIRED_PAIRS);
+  for (const row of variantColorRows) fillBilingualGapsFromTwin(row, PRODUCT_VARIANT_COLOR_REQUIRED_PAIRS);
 
   const updatePayload = {
     ...(bilingualDraft.title != null && { title: bilingualDraft.title }),
@@ -1113,7 +1203,7 @@ async function updateProduct(id, data) {
       // One-by-one create (not createMany) because a variant with its own description
       // blocks needs a nested write — createMany can't attach child relations.
       for (const row of variantRows) {
-        const { descriptions, ...rest } = row;
+        const { descriptions, colors, ...rest } = row;
         await tx.productVariant.create({
           data: {
             productId: id,
@@ -1124,6 +1214,9 @@ async function updateProduct(id, data) {
             ...(descriptions.length > 0
               ? { descriptions: { create: descriptions.map((d) => ({ ...d, productId: id })) } }
               : {}),
+            // Colours only need variantId (this create's own immediate relation, not a
+            // grandparent), so unlike descriptions they're safe to nest directly here.
+            ...(colors.length > 0 ? { colors: { create: colors } } : {}),
           },
         });
       }
@@ -1171,7 +1264,13 @@ async function updateProduct(id, data) {
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
-      variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
+      variants: {
+        orderBy: { sortOrder: 'asc' },
+        include: {
+          descriptions: { orderBy: { sortOrder: 'asc' } },
+          colors: { orderBy: { sortOrder: 'asc' } },
+        },
+      },
       ...REGION_INCLUDE,
     },
   });
@@ -1257,7 +1356,13 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
-        variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
+        variants: {
+          orderBy: { sortOrder: 'asc' },
+          include: {
+            descriptions: { orderBy: { sortOrder: 'asc' } },
+            colors: { orderBy: { sortOrder: 'asc' } },
+          },
+        },
         ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     }),
@@ -1395,7 +1500,13 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
-        variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
+        variants: {
+          orderBy: { sortOrder: 'asc' },
+          include: {
+            descriptions: { orderBy: { sortOrder: 'asc' } },
+            colors: { orderBy: { sortOrder: 'asc' } },
+          },
+        },
         ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     });
@@ -1420,20 +1531,23 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
 const MAX_SEARCH_LEN = 100;
 
 /**
- * Full-text-ish product search across the bilingual title/subtitle columns and the
- * product's category name. Backed by pg_trgm GIN indexes (see the
- * 20260702000000_product_search_trgm migration) so the case-insensitive substring
- * match is served from an index instead of a sequential scan.
+ * Full-text-ish product search across the bilingual title/subtitle columns, the
+ * product's description blocks, and its category name. Backed by pg_trgm GIN indexes
+ * (see the 20260702000000_product_search_trgm and 20260803000000_product_description_search_trgm
+ * migrations) so the case-insensitive substring match is served from an index instead
+ * of a sequential scan.
  *
  * Visibility is applied through the same buildVisibilityWhere() used everywhere else,
  * so storefront callers only ever match PUBLISHED products in their region and staff
- * see everything (optionally narrowed by their admin filters).
+ * see everything (optionally narrowed by their admin filters). An optional `categoryId`
+ * narrows results to one category — used by the admin panel's category filter, combined
+ * with a search term or on its own.
  *
  * Results are ordered by recency (createdAt desc) — the standard catalog order — after
  * the index narrows the set to matches. Returns the same paginated shape as the list
  * endpoints, plus the normalized query echoed back.
  */
-async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
+async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}, categoryId = null) {
   const q = String(rawQuery ?? '').trim().slice(0, MAX_SEARCH_LEN);
   const safePage = Math.min(MAX_PAGE, Math.max(1, page));
   const take = Math.min(100, Math.max(1, limit));
@@ -1448,6 +1562,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
   const contains = { contains: q, mode: 'insensitive' };
   const where = {
     ...buildVisibilityWhere(visibility),
+    ...(categoryId ? { categoryId } : {}),
     OR: [
       { title: contains },
       { title_ar: contains },
@@ -1455,6 +1570,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
       { subtitle_ar: contains },
       { category: { is: { title: contains } } },
       { category: { is: { title_ar: contains } } },
+      { descriptions: { some: { OR: [{ description: contains }, { description_ar: contains }] } } },
     ],
   };
 
@@ -1469,7 +1585,13 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}) {
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
-        variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
+        variants: {
+          orderBy: { sortOrder: 'asc' },
+          include: {
+            descriptions: { orderBy: { sortOrder: 'asc' } },
+            colors: { orderBy: { sortOrder: 'asc' } },
+          },
+        },
         ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
       },
     }),
@@ -1499,7 +1621,13 @@ async function getProductById(id, visibility = {}) {
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
-      variants: { orderBy: { sortOrder: 'asc' }, include: { descriptions: { orderBy: { sortOrder: 'asc' } } } },
+      variants: {
+        orderBy: { sortOrder: 'asc' },
+        include: {
+          descriptions: { orderBy: { sortOrder: 'asc' } },
+          colors: { orderBy: { sortOrder: 'asc' } },
+        },
+      },
       ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
     },
   });

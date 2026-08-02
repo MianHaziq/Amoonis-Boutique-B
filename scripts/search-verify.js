@@ -1,8 +1,9 @@
 /**
  * Verification harness for the product search feature (service + trgm indexes).
  * Exercises visibility (storefront region/PUBLISHED vs staff), bilingual + subtitle +
- * category-name matching, pagination, and confirms the pg_trgm GIN index is actually
- * used by the planner at scale.
+ * category-name + description-block matching, the categoryId filter (search and plain
+ * list), pagination, and confirms the pg_trgm GIN indexes are actually used by the
+ * planner.
  *
  * Run against a LOCAL throwaway DB only, e.g.:
  *   DATABASE_URL="postgresql://postgres@localhost:5432/amoonis_search_test" \
@@ -39,8 +40,11 @@ async function main() {
   const category = await prisma.category.create({
     data: { title: `${TAG} Roses`, title_ar: `${TAG} ورود`, status: 'PUBLISHED' },
   });
+  const category2 = await prisma.category.create({
+    data: { title: `${TAG} Gifts`, status: 'PUBLISHED' },
+  });
 
-  async function makeProduct({ title, title_ar, subtitle, status, regionId, categoryId }) {
+  async function makeProduct({ title, title_ar, subtitle, status, regionId, categoryId, descriptions }) {
     return prisma.product.create({
       data: {
         title: `${TAG} ${title}`,
@@ -51,6 +55,7 @@ async function main() {
         status,
         ...(categoryId ? { categoryId } : {}),
         regions: { create: [{ regionId }] },
+        ...(descriptions ? { descriptions: { create: descriptions } } : {}),
       },
     });
   }
@@ -65,6 +70,15 @@ async function main() {
   await makeProduct({ title: 'Rose in Other Region', status: 'PUBLISHED', regionId: region2.id });
   // Unrelated published product in region 1
   await makeProduct({ title: 'Sunflower Basket', status: 'PUBLISHED', regionId: region1.id });
+  // A second "rose" product, but in category2 — used to prove categoryId actually narrows.
+  await makeProduct({ title: 'Rose Scented Candle', status: 'PUBLISHED', regionId: region1.id, categoryId: category2.id });
+  // No "rose" anywhere in title/subtitle/category — only findable via its description block.
+  await makeProduct({
+    title: 'Cedar Keepsake Box',
+    status: 'PUBLISHED',
+    regionId: region1.id,
+    descriptions: [{ description: `${TAG}RATTANWEAVE hand-woven lid detail`, sortOrder: 0 }],
+  });
 
   const storefront = { isStaff: false, regionId: region1.id };
   const storefront2 = { isStaff: false, regionId: region2.id };
@@ -73,10 +87,11 @@ async function main() {
   // --- 1. Storefront: title match, region + PUBLISHED scoped --------------------
   const r1 = await productService.searchProducts('rose', 1, 50, storefront);
   const titles1 = r1.items.map((p) => p.title);
-  ok('storefront finds published rose products in region', r1.total === 3, `got ${r1.total}: ${titles1.join(' | ')}`);
+  ok('storefront finds published rose products in region', r1.total === 4, `got ${r1.total}: ${titles1.join(' | ')}`);
   ok('storefront excludes DRAFT', !titles1.some((t) => t.includes('Secret Rose Draft')));
   ok('storefront excludes other-region product', !titles1.some((t) => t.includes('Other Region')));
   ok('subtitle match is included', titles1.some((t) => t.includes('White Lily Stems')));
+  ok('cross-category rose match is included (no categoryId filter yet)', titles1.some((t) => t.includes('Rose Scented Candle')));
   ok('every result carries an id (navigable slug)', r1.items.length > 0 && r1.items.every((p) => typeof p.id === 'string' && p.id.length > 0));
 
   // --- 1b. Region isolation: a different region sees ONLY its own product -------
@@ -94,7 +109,7 @@ async function main() {
 
   // --- 3. Case-insensitive ------------------------------------------------------
   const r3 = await productService.searchProducts('ROSE', 1, 50, storefront);
-  ok('search is case-insensitive', r3.total === 3, `got ${r3.total}`);
+  ok('search is case-insensitive', r3.total === 4, `got ${r3.total}`);
 
   // --- 4. Arabic title match ----------------------------------------------------
   const r4 = await productService.searchProducts('ورد', 1, 50, storefront);
@@ -104,7 +119,42 @@ async function main() {
   const r5 = await productService.searchProducts('sunflower', 1, 50, storefront);
   ok('non-rose term matches its own product only', r5.total === 1 && r5.items[0].title.includes('Sunflower'), `got ${r5.total}`);
 
-  // --- 5b. Click-through: search result -> product detail is region-consistent --
+  // --- 5a. Description-block match — term appears ONLY inside a ProductDescription row,
+  // nowhere in title/subtitle/category, so a hit here proves the new description join works.
+  const rDesc = await productService.searchProducts('rattanweave', 1, 50, storefront);
+  ok(
+    'description-only term finds its product',
+    rDesc.total === 1 && rDesc.items[0].title.includes('Cedar Keepsake Box'),
+    `got ${rDesc.total}: ${rDesc.items.map((p) => p.title).join(' | ')}`
+  );
+  const rDescMiss = await productService.searchProducts('rattanweave', 1, 50, storefront, category.id);
+  ok('description match respects an unrelated categoryId filter (excluded)', rDescMiss.total === 0, `got ${rDescMiss.total}`);
+
+  // --- 5b. categoryId narrows search — two products both match "rose" but live in
+  // different categories; filtering by each category returns only that one.
+  const rCat1 = await productService.searchProducts('rose', 1, 50, storefront, category.id);
+  ok(
+    'categoryId narrows to category 1\'s rose product only',
+    rCat1.total === 1 && rCat1.items[0].title.includes('Red Rose Bouquet'),
+    `got ${rCat1.total}: ${rCat1.items.map((p) => p.title).join(' | ')}`
+  );
+  const rCat2 = await productService.searchProducts('rose', 1, 50, storefront, category2.id);
+  ok(
+    'categoryId narrows to category 2\'s rose product only',
+    rCat2.total === 1 && rCat2.items[0].title.includes('Rose Scented Candle'),
+    `got ${rCat2.total}: ${rCat2.items.map((p) => p.title).join(' | ')}`
+  );
+
+  // --- 5c. Admin panel's plain category filter (no search term) — GET /products?categoryId=
+  // wires straight into getAllProducts, which already accepted categoryId as a parameter.
+  const listCat2 = await productService.getAllProducts(1, 50, category2.id, staff);
+  ok(
+    'getAllProducts(categoryId) returns only that category\'s products',
+    listCat2.total === 1 && listCat2.items[0].title.includes('Rose Scented Candle'),
+    `got ${listCat2.total}`
+  );
+
+  // --- 5d. Click-through: search result -> product detail is region-consistent --
   // The storefront links each result to /shop/<id>, which loads via getProductById
   // under the SAME visibility. Verify the navigation target opens in-region and is
   // blocked cross-region (so an out-of-region product can't be reached by URL either).
@@ -137,7 +187,7 @@ async function main() {
 
   // --- 8. Pagination shape ------------------------------------------------------
   const r8 = await productService.searchProducts('rose', 1, 2, storefront);
-  ok('pagination caps page size', r8.items.length === 2 && r8.total === 3 && r8.totalPages === 2, JSON.stringify({ len: r8.items.length, total: r8.total, pages: r8.totalPages }));
+  ok('pagination caps page size', r8.items.length === 2 && r8.total === 4 && r8.totalPages === 2, JSON.stringify({ len: r8.items.length, total: r8.total, pages: r8.totalPages }));
   ok('meta echoes normalized query', r8.query === 'rose');
 
   // --- 9. Index usage at scale --------------------------------------------------
@@ -165,6 +215,21 @@ async function main() {
     'trgm GIN index serves the ILIKE predicate',
     /Bitmap Index Scan/.test(planText) && /trgm/.test(planText),
     planText.slice(0, 200)
+  );
+
+  // Same check for the new description trgm index — enable_seqscan=off just proves the
+  // planner CAN use it for this predicate, independent of table size.
+  const descPlan = await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
+    return tx.$queryRawUnsafe(
+      `EXPLAIN (FORMAT JSON) SELECT id FROM "ProductDescription" WHERE "description" ILIKE '%rattanweave%';`
+    );
+  });
+  const descPlanText = JSON.stringify(descPlan);
+  ok(
+    'ProductDescription trgm GIN index serves the ILIKE predicate',
+    /Bitmap Index Scan/.test(descPlanText) && /trgm/.test(descPlanText),
+    descPlanText.slice(0, 200)
   );
 
   await cleanup();

@@ -250,6 +250,96 @@ async function main() {
   const mediumV3 = mappedUpdated2.variants.find((v) => v.optionValue === 'Medium');
   ok('Medium override SURVIVES an edit to the shared blocks (scoped delete)', mediumV3?.descriptions.length === 1 && mediumV3.descriptions[0].description === 'Medium only text');
 
+  // --- 15. Per-variant COLOURS: entirely independent set per size ------------------
+  const colorProduct = await productService.createProduct({
+    title: `${TAG} Colour Per Size`, title_ar: `${TAG} لون لكل مقاس`,
+    price: 10, quantity: 5, status: 'PUBLISHED', categoryId: cat.id,
+    productOptions: [
+      { title: 'Size', title_ar: 'المقاس', options: ['Small', 'Medium', 'Large'], options_ar: ['صغير', 'وسط', 'كبير'], isVariantAxis: true },
+    ],
+    variants: [
+      { optionValue: 'Small', optionValue_ar: 'صغير', price: 25, isDefault: true }, // no colours
+      {
+        optionValue: 'Medium', optionValue_ar: 'وسط', price: 30,
+        colors: [
+          { label: 'Blue', label_ar: 'أزرق', images: ['https://img.test/medium-blue.jpg'] },
+          { label: 'Black', label_ar: 'أسود', images: ['https://img.test/medium-black.jpg'] },
+        ],
+      },
+      {
+        optionValue: 'Large', optionValue_ar: 'كبير', price: 40,
+        colors: [
+          { label: 'Pink', label_ar: 'وردي', images: ['https://img.test/large-pink.jpg'], isDefault: true },
+          { label: 'Blue', label_ar: 'أزرق', images: ['https://img.test/large-blue.jpg'] },
+          { label: 'Red', label_ar: 'أحمر', images: ['https://img.test/large-red.jpg'] },
+        ],
+      },
+    ],
+  });
+  const mappedColor = productService.mapProduct(colorProduct);
+  const smallC = mappedColor.variants.find((v) => v.optionValue === 'Small');
+  const mediumC = mappedColor.variants.find((v) => v.optionValue === 'Medium');
+  const largeC = mappedColor.variants.find((v) => v.optionValue === 'Large');
+  ok('Small has NO colours (none configured)', smallC?.colors.length === 0, `got ${smallC?.colors.length}`);
+  ok('Medium has exactly 2 colours (Blue/Black)', mediumC?.colors.length === 2, `got ${mediumC?.colors.length}`);
+  ok('Large has exactly 3 colours (Pink/Blue/Red) — independent from Medium\'s set', largeC?.colors.length === 3, `got ${largeC?.colors.length}`);
+  ok('Large colours are NOT the same set as Medium\'s', !largeC?.colors.some((c) => c.label === 'Black'));
+  ok('Large\'s explicit isDefault (Pink) is honored', largeC?.colors.find((c) => c.isDefault)?.label === 'Pink');
+  ok('Medium has exactly one isDefault colour (auto-picked, first)', mediumC?.colors.filter((c) => c.isDefault).length === 1 && mediumC?.colors[0]?.isDefault === true);
+  ok('Large Pink colour has its own image', largeC?.colors.find((c) => c.label === 'Pink')?.images[0] === 'https://img.test/large-pink.jpg');
+
+  // Fresh read via getProductById — same shape survives a round trip.
+  const fetchedColor = await productService.getProductById(colorProduct.id, { isStaff: true });
+  const fetchedLargeC = fetchedColor.variants.find((v) => v.optionValue === 'Large');
+  ok('getProductById: Large still has 3 colours after a fresh read', fetchedLargeC?.colors.length === 3);
+
+  // Update: Small gains colours, Large loses one (Red removed), Medium untouched by
+  // sending only Small+Large — but a full variants array is required, so resend Medium
+  // unchanged too (matches how the admin form always resends the whole array).
+  const updatedColor = await productService.updateProduct(colorProduct.id, {
+    variants: [
+      {
+        optionValue: 'Small', optionValue_ar: 'صغير', price: 25, isDefault: true,
+        colors: [{ label: 'White', label_ar: 'أبيض', images: ['https://img.test/small-white.jpg'] }],
+      },
+      {
+        optionValue: 'Medium', optionValue_ar: 'وسط', price: 30,
+        colors: [
+          { label: 'Blue', label_ar: 'أزرق', images: ['https://img.test/medium-blue.jpg'] },
+          { label: 'Black', label_ar: 'أسود', images: ['https://img.test/medium-black.jpg'] },
+        ],
+      },
+      {
+        optionValue: 'Large', optionValue_ar: 'كبير', price: 40,
+        colors: [
+          { label: 'Pink', label_ar: 'وردي', images: ['https://img.test/large-pink.jpg'], isDefault: true },
+          { label: 'Blue', label_ar: 'أزرق', images: ['https://img.test/large-blue.jpg'] },
+        ],
+      },
+    ],
+  });
+  const mappedUpdatedColor = productService.mapProduct(updatedColor);
+  const smallC2 = mappedUpdatedColor.variants.find((v) => v.optionValue === 'Small');
+  const largeC2 = mappedUpdatedColor.variants.find((v) => v.optionValue === 'Large');
+  ok('after update: Small now has its own colour (White)', smallC2?.colors.length === 1 && smallC2.colors[0].label === 'White');
+  ok('after update: Large dropped Red, keeps Pink+Blue only', largeC2?.colors.length === 2 && !largeC2.colors.some((c) => c.label === 'Red'));
+
+  // Duplicate colour labels (case-insensitive) on the SAME variant are de-duped, same
+  // convention as duplicate variant option values.
+  const dupeColorProduct = await productService.createProduct({
+    title: `${TAG} Dupe Colours`, title_ar: `${TAG} ألوان مكررة`, price: 10, quantity: 1, status: 'DRAFT', categoryId: cat.id,
+    productOptions: [{ title: 'Size', title_ar: 'المقاس', options: ['Only'], options_ar: ['فقط'], isVariantAxis: true }],
+    variants: [{
+      optionValue: 'Only', optionValue_ar: 'فقط', price: 10,
+      colors: [
+        { label: 'Red', images: ['https://img.test/a.jpg'] },
+        { label: 'red', images: ['https://img.test/b.jpg'] },
+      ],
+    }],
+  });
+  const mappedDupeColor = productService.mapProduct(dupeColorProduct);
+  ok('case-insensitive duplicate colour labels are de-duped', mappedDupeColor.variants[0]?.colors.length === 1, `got ${mappedDupeColor.variants[0]?.colors.length}`);
+
   await cleanup();
   console.log(`\n${failures === 0 ? '🎉 ALL PASSED' : `❌ ${failures} FAILED`}`);
   await prisma.$disconnect();

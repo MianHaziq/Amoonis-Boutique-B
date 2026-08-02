@@ -844,10 +844,37 @@ model ProductVariant {
   // This variant's OWN description blocks (Description tab), when it overrides the
   // shared ones instead of inheriting them — see ProductDescription.variantId.
   descriptions ProductDescription[]
+  // This variant's OWN colour choices — e.g. Large might offer Pink/Blue/Red while
+  // Medium only offers Blue/Black. Purely cosmetic (never affects price/stock); see
+  // ProductVariantColor for the photo-swap contract.
+  colors ProductVariantColor[]
 
   @@unique([productId, optionValue])
   @@index([productId])
   @@index([productId, sortOrder])
+}
+
+/// One colour choice available for ONE specific ProductVariant (e.g. "Pink" for the
+/// Large size). Deliberately scoped to a single variant, not shared product-wide —
+/// different sizes can offer entirely different colour sets, each with its own
+/// photo(s). Never affects price; picking a colour only swaps the displayed photo
+/// (see resolveActivePhotoGroup-equivalent on the frontend, PdpImageContext).
+model ProductVariantColor {
+  id        String   @id @default(uuid())
+  variantId String
+  label     String
+  label_ar  String?
+  images    String[] @default([])
+  // Which colour is pre-selected when this variant is first shown (e.g. switching
+  // Size to Large opens on its default colour). Exactly one per variant should be
+  // true — enforced in product.service.js, same convention as ProductVariant.isDefault.
+  isDefault Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([variantId])
 }
 
 model ProductDescription {

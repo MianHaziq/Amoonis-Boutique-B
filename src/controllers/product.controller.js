@@ -68,8 +68,9 @@ async function getAllProducts(req, res, next) {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
+    const categoryId = req.query.categoryId || null;
     const visibility = await visibilityFromReq(req);
-    const result = await productService.getAllProducts(page, limit, null, visibility);
+    const result = await productService.getAllProducts(page, limit, categoryId, visibility);
     return success(res, result.items, 'Products fetched successfully', 200, {
       pagination: {
         page: result.page,
@@ -146,8 +147,9 @@ async function searchProducts(req, res, next) {
     const q = req.query.q != null ? String(req.query.q) : '';
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
+    const categoryId = req.query.categoryId || null;
     const visibility = await visibilityFromReq(req);
-    const result = await productService.searchProducts(q, page, limit, visibility);
+    const result = await productService.searchProducts(q, page, limit, visibility, categoryId);
     return success(res, result.items, 'Products fetched successfully', 200, {
       pagination: {
         page: result.page,
