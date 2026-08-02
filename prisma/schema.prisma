@@ -841,6 +841,9 @@ model ProductVariant {
   updatedAt       DateTime @updatedAt
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // This variant's OWN description blocks (Description tab), when it overrides the
+  // shared ones instead of inheriting them — see ProductDescription.variantId.
+  descriptions ProductDescription[]
 
   @@unique([productId, optionValue])
   @@index([productId])
@@ -850,6 +853,12 @@ model ProductVariant {
 model ProductDescription {
   id             String   @id @default(uuid())
   productId      String
+  // Null = shared block, shown for every variant (or the whole product, when it has
+  // none). Set = belongs to ONE ProductVariant only — see resolveVariantDescriptions
+  // in product.service.js: a variant with any rows of its own shows ONLY those,
+  // instead of the shared ones, so an admin can override a size's whole description
+  // while every other size keeps sharing the common copy.
+  variantId      String?
   title          String?  @db.Text
   title_ar       String?  @db.Text
   description    String   @db.Text
@@ -857,10 +866,12 @@ model ProductDescription {
   sortOrder      Int      @default(0)
   createdAt      DateTime @default(now())
 
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
 
   @@index([productId])
   @@index([productId, sortOrder])
+  @@index([variantId])
 }
 
 model ProductImage {
