@@ -38,8 +38,11 @@ async function cleanup() {
 async function main() {
   await cleanup();
 
+  // isDefault: false — a data migration seeds a real default region (UAE), and only one
+  // row may have isDefault=true (partial unique index). regionCode is always passed
+  // explicitly below, so this region never needs to actually be the default.
   const regionA = await prisma.region.create({
-    data: { code: `${TAG}A`, name: 'Zone Test Region A', isActive: true, isDefault: true, sortOrder: 900, currency: 'AED', shippingFlatRate: 25 },
+    data: { code: `${TAG}A`, name: 'Zone Test Region A', isActive: true, isDefault: false, sortOrder: 900, currency: 'AED', shippingFlatRate: 25 },
   });
   const regionB = await prisma.region.create({
     data: { code: `${TAG}B`, name: 'Zone Test Region B', isActive: true, isDefault: false, sortOrder: 901, currency: 'AED' }, // no shippingFlatRate -> null
@@ -58,8 +61,64 @@ async function main() {
   const updated = await deliveryZoneService.updateZone(zone1.id, { name: `${TAG} Dubai Updated` });
   ok('zone update succeeds', updated?.name === `${TAG} Dubai Updated`);
 
-  console.log('\n2) Duplicate name within the same region is rejected');
+  console.log('\n1b) Single-zone create accepts a full delivery-config payload (the admin "create zone" form now exposes this — same fields the edit form already sends)');
+  const zoneConfigured = await deliveryZoneService.createZone({
+    regionId: regionA.id,
+    name: `${TAG} Fujairah`,
+    shippingFlatRate: 40,
+    freeDeliveryThreshold: 300,
+    sameDayEnabled: true,
+    sameDayCutoff: '14:00',
+    standardLeadDays: 2,
+    deliveryDays: [0, 1, 2, 3, 4],
+    codEnabled: false,
+    minOrderAmount: 50,
+    maxOrderAmount: 5000,
+  });
+  ok('configured zone created', !!zoneConfigured?.id);
+  ok('shippingFlatRate persisted', Number(zoneConfigured.shippingFlatRate) === 40, `got ${zoneConfigured.shippingFlatRate}`);
+  ok('freeDeliveryThreshold persisted', Number(zoneConfigured.freeDeliveryThreshold) === 300, `got ${zoneConfigured.freeDeliveryThreshold}`);
+  ok('sameDayEnabled persisted', zoneConfigured.sameDayEnabled === true);
+  ok('sameDayCutoff persisted', zoneConfigured.sameDayCutoff === '14:00', `got ${zoneConfigured.sameDayCutoff}`);
+  ok('standardLeadDays persisted', zoneConfigured.standardLeadDays === 2, `got ${zoneConfigured.standardLeadDays}`);
+  ok('deliveryDays persisted', JSON.stringify(zoneConfigured.deliveryDays) === JSON.stringify([0, 1, 2, 3, 4]), `got ${zoneConfigured.deliveryDays}`);
+  ok('codEnabled persisted', zoneConfigured.codEnabled === false);
+  ok('minOrderAmount persisted', Number(zoneConfigured.minOrderAmount) === 50, `got ${zoneConfigured.minOrderAmount}`);
+  ok('maxOrderAmount persisted', Number(zoneConfigured.maxOrderAmount) === 5000, `got ${zoneConfigured.maxOrderAmount}`);
+  // Cash-arrangement override fields ship the same "empty = inherit" default as the
+  // pre-existing config UI's zones, since this create call didn't touch them.
+  ok('cashArrangementQuickPickAmounts defaults to empty (inherit region)', Array.isArray(zoneConfigured.cashArrangementQuickPickAmounts) && zoneConfigured.cashArrangementQuickPickAmounts.length === 0);
+  ok('cashArrangementFeeStepAmount defaults to null (inherit region)', zoneConfigured.cashArrangementFeeStepAmount === null);
+
+  console.log('\n1c) Create with NO config fields at all -> every override stays null/[] (admin skipped the section entirely)');
+  const zoneSkipped = await deliveryZoneService.createZone({ regionId: regionA.id, name: `${TAG} Ras Al Khaimah` });
+  ok('skipped-config zone created', !!zoneSkipped?.id);
+  ok('shippingFlatRate is null (inherit)', zoneSkipped.shippingFlatRate === null);
+  ok('sameDayEnabled is null (inherit)', zoneSkipped.sameDayEnabled === null);
+  ok('codEnabled is null (inherit)', zoneSkipped.codEnabled === null);
+  ok('deliveryDays is empty (inherit)', Array.isArray(zoneSkipped.deliveryDays) && zoneSkipped.deliveryDays.length === 0);
+  ok('minOrderAmount is null (no bound)', zoneSkipped.minOrderAmount === null);
+
+  console.log('\n1d) min > max is rejected on create (same guardrail as update)');
   let threw = null;
+  try {
+    await deliveryZoneService.createZone({ regionId: regionA.id, name: `${TAG} BadMinMax`, minOrderAmount: 100, maxOrderAmount: 10 });
+  } catch (err) {
+    threw = err;
+  }
+  ok('min > max rejected on create', !!threw, threw?.message || 'did not throw');
+
+  console.log('\n1e) Bulk create stays name-only — config fields sent alongside are ignored, not persisted');
+  const bulkResult = await deliveryZoneService.createZonesBulk(regionA.id, [
+    { name: `${TAG} BulkNoConfig`, shippingFlatRate: 999, sameDayEnabled: true },
+  ]);
+  ok('bulk zone created', bulkResult.count === 1, JSON.stringify(bulkResult));
+  const bulkZone = bulkResult.created[0];
+  ok('bulk-created zone ignores any config-shaped fields (shippingFlatRate stays null)', bulkZone?.shippingFlatRate === null, `got ${bulkZone?.shippingFlatRate}`);
+  ok('bulk-created zone ignores any config-shaped fields (sameDayEnabled stays null)', bulkZone?.sameDayEnabled === null, `got ${bulkZone?.sameDayEnabled}`);
+
+  console.log('\n2) Duplicate name within the same region is rejected');
+  threw = null;
   try {
     await deliveryZoneService.createZone({ regionId: regionA.id, name: `${TAG} Abu Dhabi` });
   } catch (err) {
