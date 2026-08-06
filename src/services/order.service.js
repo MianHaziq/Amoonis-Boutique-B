@@ -532,10 +532,13 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       giftCardExtraPrice: true,
       customNameEnabled: true,
       customNamePrice: true,
+      // Coming-soon items must be rejected at checkout (defense-in-depth: they can't be
+      // added to cart, but a cart item could have been marked coming-soon afterwards).
+      comingSoon: true,
       // Prep/booking lead-time override chain (see prisma/schema.prisma) — resolved and
       // snapshotted per line below as OrderItem.resolvedLeadDays.
       deliveryLeadDays: true,
-      category: { select: { id: true, deliveryLeadDays: true } },
+      category: { select: { id: true, deliveryLeadDays: true, comingSoon: true } },
       // Needed (with `variants`) to resolve a variant-priced line's effective price —
       // see resolveEffectivePrice/resolveVariantPricing in product.service.js.
       productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -692,6 +695,10 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     const p = productById.get(productId);
     if (!p) {
       return { order: null, error: 'A product in your order is no longer available' };
+    }
+    // Coming-soon items (own flag or inherited from their category) can't be ordered.
+    if (p.comingSoon || p.category?.comingSoon) {
+      return { order: null, error: `${p.title} is coming soon and cannot be ordered yet` };
     }
     if (p.quantity < requested) {
       outOfStock.push({
@@ -1007,13 +1014,38 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       ? 0
       : Math.round(Number(deliveryConfig.deliveryFee ?? 0) * 100) / 100;
 
+    // Shipping VAT (client requirement): the delivery charge is a taxable supply, taxed at the
+    // region's VAT rate whenever VAT is enabled — independent of the product VAT SCOPE
+    // (appliesTo), since shipping isn't a product. Same inclusive/exclusive rule as products:
+    //   • EXCLUSIVE: VAT is ADDED on top of the shipping fee (increases the total).
+    //   • INCLUSIVE: the shipping fee ALREADY contains the VAT (extract it for taxAmount; the
+    //     total is unchanged). Zero when shipping is free or VAT is disabled.
+    const vatRate = vatConfig && vatConfig.enabled ? Number(vatConfig.ratePercent) || 0 : 0;
+    const vatIsInclusive = Boolean(vatConfig && vatConfig.inclusive);
+    let shippingVatAmount = 0;
+    let shippingVatAdds = false;
+    if (vatRate > 0 && shippingAmount > 0) {
+      if (vatIsInclusive) {
+        shippingVatAmount = round2(shippingAmount - shippingAmount / (1 + vatRate / 100));
+      } else {
+        shippingVatAmount = round2(shippingAmount * (vatRate / 100));
+        shippingVatAdds = true;
+      }
+    }
+
     // Raw cash amount is added to the total as-is — it is NEVER passed through VAT and
     // NEVER discounted (unlike the arrangement fee, which is taxed via cashArrangementFeeTotal
     // above). Explicitly does NOT affect netForDelivery/minOrderAmount/maxOrderAmount/
     // freeDeliveryThreshold above — those gates exist for merchandise-order economics, and
     // folding a cash request into them would be a silent, unrequested side effect.
     const cashAmountForTotal = anyCashRequested ? sumCash : 0;
-    const finalTotal = round2(vat.total + shippingAmount + cashAmountForTotal + cashArrangementFeeTotal);
+    const finalTotal = round2(
+      vat.total +
+        shippingAmount +
+        (shippingVatAdds ? shippingVatAmount : 0) +
+        cashAmountForTotal +
+        cashArrangementFeeTotal
+    );
 
     // Guard against a raw Postgres "numeric field overflow" crash: totalAmount (and every
     // constituent non-negative addend above, including cashArrangementAmount/FeeAmount) is
@@ -1049,10 +1081,10 @@ async function createOrderCore(userId, params = {}, opts = {}) {
         totalAmount: finalTotal,
         discountAmount: finalDiscount,
         subtotalAmount: vat.subtotal,
-        // Blended total tax: merchandise VAT + the arrangement fee's own VAT (0 when no
-        // cash arrangement was requested). cashArrangementFeeVatAmount below keeps the
-        // fee's portion separately so a receipt/admin view doesn't have to reverse-engineer it.
-        taxAmount: round2(vat.vatAmount + sumFeeVat),
+        // Blended total tax: merchandise VAT + the arrangement fee's own VAT + shipping VAT
+        // (each 0 when not applicable). cashArrangementFeeVatAmount below keeps the fee's
+        // portion separately so a receipt/admin view doesn't have to reverse-engineer it.
+        taxAmount: round2(vat.vatAmount + sumFeeVat + shippingVatAmount),
         // ORDER-LEVEL roll-up of the per-line cash arrangements (the authoritative detail is
         // on each OrderItem). Denomination/note only roll up when exactly one line has cash.
         cashArrangementRequested: anyCashRequested,
@@ -1343,10 +1375,13 @@ async function buyNow(userId, input = {}, opts = {}) {
   // a Buy Now productId comes straight from the client and must be validated).
   const product = await prisma.product.findUnique({
     where: { id: productId },
-    select: { id: true, status: true },
+    select: { id: true, status: true, comingSoon: true, category: { select: { comingSoon: true } } },
   });
   if (!product || product.status !== 'PUBLISHED') {
     return { order: null, error: 'Product is not available for purchase' };
+  }
+  if (product.comingSoon || product.category?.comingSoon) {
+    return { order: null, error: 'This product is coming soon and cannot be ordered yet' };
   }
 
   return createOrderCore(
@@ -1426,12 +1461,16 @@ async function createGuestOrder(guestInput = {}, opts = {}) {
   const productIds = [...new Set(lineItems.map((it) => it.productId))];
   const products = await prisma.product.findMany({
     where: { id: { in: productIds } },
-    select: { id: true, status: true },
+    select: { id: true, status: true, comingSoon: true, category: { select: { comingSoon: true } } },
   });
-  const statusById = new Map(products.map((p) => [p.id, p.status]));
+  const productById = new Map(products.map((p) => [p.id, p]));
   for (const id of productIds) {
-    if (statusById.get(id) !== 'PUBLISHED') {
+    const p = productById.get(id);
+    if (!p || p.status !== 'PUBLISHED') {
       return { order: null, error: 'A product in your order is no longer available' };
+    }
+    if (p.comingSoon || p.category?.comingSoon) {
+      return { order: null, error: 'A product in your order is coming soon and cannot be ordered yet' };
     }
   }
 

@@ -1,6 +1,6 @@
 /**
  * Verification harness for Product variants (Small/Medium/Large-style, real price/
- * photos/contents per value) — covers product.service normalization + mapping,
+ * photos/subtitle per value) — covers product.service normalization + mapping,
  * cart.service line pricing, and order.service live pricing at checkout.
  *
  * Every bilingual field below supplies BOTH English and Arabic text, so autoTranslate
@@ -66,9 +66,9 @@ async function main() {
       },
     ],
     variants: [
-      { optionValue: 'Small', optionValue_ar: 'صغير', price: 25, images: ['https://img.test/small.jpg'], contents: 'Small contents', contents_ar: 'محتويات صغيرة', isDefault: true },
-      { optionValue: 'Medium', optionValue_ar: 'وسط', price: 30, images: ['https://img.test/medium.jpg'], contents: 'Medium contents', contents_ar: 'محتويات متوسطة' },
-      { optionValue: 'Large', optionValue_ar: 'كبير', price: 40, discountedPrice: 35, images: ['https://img.test/large.jpg'], contents: 'Large contents', contents_ar: 'محتويات كبيرة' },
+      { optionValue: 'Small', optionValue_ar: 'صغير', price: 25, images: ['https://img.test/small.jpg'], subtitle: 'Small subtitle', subtitle_ar: 'العنوان الفرعي الصغير', isDefault: true },
+      { optionValue: 'Medium', optionValue_ar: 'وسط', price: 30, images: ['https://img.test/medium.jpg'], subtitle: 'Medium subtitle', subtitle_ar: 'العنوان الفرعي المتوسط' },
+      { optionValue: 'Large', optionValue_ar: 'كبير', price: 40, discountedPrice: 35, images: ['https://img.test/large.jpg'], subtitle: 'Large subtitle', subtitle_ar: 'العنوان الفرعي الكبير' },
     ],
   });
 

@@ -136,8 +136,16 @@ async function addToCart(userId, {
   customName = undefined,
   cashArrangement = undefined,
 }) {
-  const product = await prisma.product.findUnique({ where: { id: productId } });
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+    include: { category: { select: { comingSoon: true } } },
+  });
   if (!product) return { cart: null, error: 'Product not found' };
+  // Coming-soon items (own flag OR inherited from their category) are visible but
+  // not orderable — block them at add-time so they never reach the cart/checkout.
+  if (product.comingSoon || product.category?.comingSoon) {
+    return { cart: null, error: 'This product is coming soon and cannot be ordered yet' };
+  }
 
   const qty = Math.max(1, parseInt(quantity, 10) || 1);
   const cart = await getOrCreateCart(userId);

@@ -919,6 +919,77 @@ async function main() {
     ok('after clearing flat fee + re-scoping, productC (Mugs) is not eligible again', cleared.eligible === false);
   }
 
+  // ---------------------------------------------------------------------
+  // 21) Shipping VAT — the delivery fee is a taxable supply (client requirement). Taxed at the
+  // region's VAT rate whenever VAT is enabled, independent of the product VAT scope. Same
+  // inclusive/exclusive rule as products.
+  // ---------------------------------------------------------------------
+  console.log('\n21) Shipping VAT (delivery fee taxed at the VAT rate)');
+  {
+    // Give the fixture zone a flat 50 shipping fee and route the order through it.
+    await deliveryZoneService.updateZone(zone.id, { shippingFlatRate: 50 });
+    const SHIPPING_WITH_ZONE = { ...SHIPPING, deliveryZoneId: zone.id };
+
+    // --- EXCLUSIVE VAT 5%, ALL_PRODUCTS, no cash: VAT added on top of shipping too ---
+    await vatService.updateConfig(region.id, { enabled: true, ratePercent: 5, inclusive: false, appliesTo: 'ALL_PRODUCTS' });
+    const { order, error } = await orderService.createGuestOrder(
+      {
+        items: [{ productId: productA.id, quantity: 1 }],
+        shippingAddress: SHIPPING_WITH_ZONE,
+        email: `${TAG.toLowerCase()}.ordership@t.local`,
+      },
+      { regionCode: region.code }
+    );
+    ok('Order with a shipping fee created without error', !error, error || '');
+    if (order) {
+      createdOrderIds.push(order.id);
+      eq('shipping fee applied (50)', order.shippingAmount, 50);
+      // product VAT 100×5% = 5 ; shipping VAT 50×5% = 2.5 ; blended taxAmount = 7.5.
+      eq('taxAmount = product VAT (5) + shipping VAT (2.5)', order.taxAmount, 7.5);
+      // total = product 100 + product VAT 5 + shipping 50 + shipping VAT 2.5 = 157.5.
+      eq('total includes shipping + shipping VAT', order.totalAmount, 157.5);
+    }
+
+    // --- INCLUSIVE VAT 5%: the shipping fee ALREADY contains VAT (extracted, total unchanged) ---
+    await vatService.updateConfig(region.id, { inclusive: true });
+    const { order: incOrder, error: incError } = await orderService.createGuestOrder(
+      {
+        items: [{ productId: productA.id, quantity: 1 }],
+        shippingAddress: SHIPPING_WITH_ZONE,
+        email: `${TAG.toLowerCase()}.ordershipinc@t.local`,
+      },
+      { regionCode: region.code }
+    );
+    ok('Inclusive-VAT order with shipping created without error', !incError, incError || '');
+    if (incOrder) {
+      createdOrderIds.push(incOrder.id);
+      // extracted: product 100-100/1.05 = 4.76 ; shipping 50-50/1.05 = 2.38 ; taxAmount = 7.14.
+      eq('inclusive: taxAmount = extracted product (4.76) + shipping (2.38) VAT', incOrder.taxAmount, 7.14);
+      // total = product 100 (VAT inside) + shipping 50 (VAT inside) = 150, nothing added on top.
+      eq('inclusive: total = product + shipping, VAT not added on top', incOrder.totalAmount, 150);
+    }
+
+    // VAT disabled -> shipping is NOT taxed.
+    await vatService.updateConfig(region.id, { enabled: false });
+    const { order: noVatOrder } = await orderService.createGuestOrder(
+      {
+        items: [{ productId: productA.id, quantity: 1 }],
+        shippingAddress: SHIPPING_WITH_ZONE,
+        email: `${TAG.toLowerCase()}.ordershipnovat@t.local`,
+      },
+      { regionCode: region.code }
+    );
+    if (noVatOrder) {
+      createdOrderIds.push(noVatOrder.id);
+      eq('VAT disabled: shipping untaxed, total = product 100 + shipping 50', noVatOrder.totalAmount, 150);
+      eq('VAT disabled: taxAmount = 0', noVatOrder.taxAmount, 0);
+    }
+
+    // Reset for cleanliness.
+    await deliveryZoneService.updateZone(zone.id, { shippingFlatRate: null });
+    await vatService.updateConfig(region.id, { enabled: true, ratePercent: 5, inclusive: false, appliesTo: 'ALL_PRODUCTS' });
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} Cash arrangement integration: ${pass} passed, ${fail} failed`);
 }
 
