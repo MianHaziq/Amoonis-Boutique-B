@@ -33,6 +33,22 @@ async function getSectionById(req, res, next) {
 }
 
 /**
+ * GET /sections/:id/preview – Staff-only. For a dynamic (Best Sellers/New Arrivals)
+ * section, the products the auto-grow would currently surface beyond the curated picks
+ * (so the admin can Pin/Hide them) plus the already-hidden (excluded) products.
+ */
+async function getSectionEditorPreview(req, res, next) {
+  try {
+    const { id } = req.params;
+    const data = await sectionService.getSectionEditorPreview(id);
+    if (!data) return error(res, 'Section not found', 404);
+    return success(res, data, 'Section preview fetched successfully', 200);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
  * POST /sections – Create section (admin). Title required; image, productIds, categoryIds optional.
  */
 async function createSection(req, res, next) {
@@ -100,6 +116,7 @@ async function deleteSection(req, res, next) {
 module.exports = {
   getSections,
   getSectionById,
+  getSectionEditorPreview,
   createSection,
   updateSection,
   reorderSections,

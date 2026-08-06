@@ -29,6 +29,46 @@ function normalizeKind(value, fallback = 'CUSTOM') {
   return VALID_SECTION_KINDS.includes(v) ? v : fallback;
 }
 
+const VALID_SECTION_LAYOUTS = ['GRID', 'SCROLL'];
+
+function normalizeLayout(value, fallback = 'SCROLL') {
+  if (value === undefined || value === null) return fallback;
+  const v = String(value).trim().toUpperCase();
+  return VALID_SECTION_LAYOUTS.includes(v) ? v : fallback;
+}
+
+// Per-breakpoint column bounds — mirror the express-validator ranges in
+// section.routes.js and the admin form's select options. clampColumns re-clamps
+// as a backstop so a malformed direct API call can never persist a layout-breaking
+// column count (e.g. 0 or 99), even if it somehow bypassed route validation.
+const COLUMN_BOUNDS = {
+  desktop: { min: 2, max: 6, default: 4 },
+  mobile: { min: 1, max: 4, default: 2 },
+};
+
+function clampColumns(value, breakpoint, fallback) {
+  const b = COLUMN_BOUNDS[breakpoint];
+  const fb = fallback ?? b.default;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fb;
+  return Math.min(b.max, Math.max(b.min, Math.round(n)));
+}
+
+// Max products rendered per breakpoint. Default 12 matches the historical per-rail
+// cap so existing sections are unchanged. Same backstop-clamp rationale as columns.
+const LIMIT_BOUNDS = {
+  desktop: { min: 1, max: 24, default: 12 },
+  mobile: { min: 1, max: 12, default: 12 },
+};
+
+function clampLimit(value, breakpoint, fallback) {
+  const b = LIMIT_BOUNDS[breakpoint];
+  const fb = fallback ?? b.default;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fb;
+  return Math.min(b.max, Math.max(b.min, Math.round(n)));
+}
+
 async function resolveWriteRegionIds(regionIds) {
   if (Array.isArray(regionIds) && regionIds.length > 0) {
     return regionService.assertValidRegionIds(regionIds);
@@ -50,7 +90,9 @@ function mapSectionRegions(section) {
  */
 function sectionProductInclude(isStaff) {
   return {
-    category: { select: { id: true, title: true } },
+    // comingSoon lets the storefront cascade a coming-soon category onto its products
+    // shown in a homepage section (a product is coming-soon if its own OR its category's).
+    category: { select: { id: true, title: true, comingSoon: true } },
     images: { orderBy: { sortOrder: 'asc' } },
     descriptions: { orderBy: { sortOrder: 'asc' } },
     productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -77,7 +119,13 @@ function sectionInclude(visibility = {}) {
       // blow up the response / DB load. orderBy(sortOrder asc) keeps the first N
       // deterministic (the intended leading products).
       take: 50,
-      ...(hasFilter ? { where: { product: contentWhere } } : {}),
+      // `excluded: false` — excluded rows record an admin's "hide this auto-added
+      // product" choice; they are NEVER rendered as curated picks (staff or storefront)
+      // and are read separately (getSectionEditorPreview) for the admin's excluded list.
+      where: {
+        excluded: false,
+        ...(hasFilter ? { product: contentWhere } : {}),
+      },
       include: {
         product: {
           include: sectionProductInclude(isStaff),
@@ -144,6 +192,15 @@ function mapSection(s, visibility = {}) {
     // Not staff-gated (unlike regions/regionIds below) — the storefront needs this
     // to build the right "View all" link for a Best Sellers/New Arrivals rail.
     kind: s.kind ?? 'CUSTOM',
+    // Per-section layout — also not staff-gated: the storefront reads these to
+    // decide grid-vs-scroll and the column count per breakpoint. Fallbacks match
+    // the schema defaults so a row written before this feature still maps cleanly.
+    desktopLayout: normalizeLayout(s.desktopLayout),
+    desktopColumns: clampColumns(s.desktopColumns, 'desktop'),
+    desktopLimit: clampLimit(s.desktopLimit, 'desktop'),
+    mobileLayout: normalizeLayout(s.mobileLayout),
+    mobileColumns: clampColumns(s.mobileColumns, 'mobile'),
+    mobileLimit: clampLimit(s.mobileLimit, 'mobile'),
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     products: (s.products || []).map((pr) => mapProductForSection(pr, visibility)).filter(Boolean),
@@ -158,10 +215,12 @@ function mapSection(s, visibility = {}) {
   return out;
 }
 
-// Matches the storefront homepage rail's per-section product cap
-// (HomeSections.tsx's PRODUCTS_PER_SECTION) — no point computing/fetching more
-// dynamic candidates than what's ever actually shown.
-const HOME_SECTION_DYNAMIC_CAP = 12;
+// Upper bound on how many products a dynamic (BEST_SELLERS/NEW_ARRIVALS) section
+// auto-fills to. Matches the storefront's largest possible per-section render count
+// (display.ts's SECTION_MAX_RENDER = max allowed desktopLimit), so a section whose
+// admin set a high desktop limit can actually be filled to it — no point fetching
+// more than what could ever be shown.
+const HOME_SECTION_DYNAMIC_CAP = 24;
 
 /**
  * For a BEST_SELLERS/NEW_ARRIVALS section, appends products beyond whatever's
@@ -190,7 +249,14 @@ async function augmentDynamicSection(rawSection, visibility = {}) {
   if (remaining <= 0) return rawSection;
 
   try {
-    const excludeWhere = { ...buildVisibilityWhere(visibility), id: { notIn: curatedIds } };
+    // Products the admin explicitly HID from this section's auto-grow (excluded=true
+    // SectionProduct rows) must never be re-added by the dynamic fill.
+    const excludedRows = await prisma.sectionProduct.findMany({
+      where: { sectionId: rawSection.id, excluded: true },
+      select: { productId: true },
+    });
+    const skipIds = [...curatedIds, ...excludedRows.map((r) => r.productId)];
+    const excludeWhere = { ...buildVisibilityWhere(visibility), id: { notIn: skipIds } };
 
     let extraIds = [];
     if (rawSection.kind === 'NEW_ARRIVALS') {
@@ -204,9 +270,9 @@ async function augmentDynamicSection(rawSection, visibility = {}) {
       });
       extraIds = rows.map((r) => r.id);
     } else {
-      const curatedSet = new Set(curatedIds);
+      const skipSet = new Set(skipIds);
       const rankedIds = (await productService.getBestSellingProductIds(visibility.regionId ?? null))
-        .filter((id) => !curatedSet.has(id));
+        .filter((id) => !skipSet.has(id));
       if (rankedIds.length > 0) {
         // getBestSellingProductIds only knows about historical OrderItem rows — a
         // product that sold well may since have been unpublished/deleted/moved out
@@ -256,6 +322,56 @@ async function getSections(visibility = {}) {
   return sections.map((s) => mapSection(s, visibility));
 }
 
+/**
+ * Distinct product ids CURRENTLY surfaced by any published section for this visibility —
+ * curated `SectionProduct` picks plus the dynamic Best Sellers / New Arrivals fill, i.e.
+ * exactly the products the storefront rails display. The shop's "Everything" list uses
+ * this to RESCUE these back into view even when their category is ENTIRE_STORE-draft, so
+ * a featured product doesn't disappear from the grid just because its category is hidden.
+ */
+async function getSurfacedProductIds(visibility = {}) {
+  const sections = await getSections(visibility);
+  const ids = new Set();
+  for (const s of sections) {
+    for (const p of s.products || []) {
+      if (p && p.id) ids.add(p.id);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Staff-only editor preview for a dynamic (BEST_SELLERS/NEW_ARRIVALS) section: the
+ * products the auto-grow WOULD surface right now beyond the curated picks (so the admin
+ * can see and Pin/Hide them), plus the products the admin has already Hidden (excluded).
+ * Runs the augmentation with a storefront-shaped visibility (default region — the primary
+ * view; best-sellers/new-arrivals ranking is region-specific) since it no-ops for staff.
+ * Returns { auto: Product[], excluded: Product[] } — empty for CUSTOM sections.
+ */
+async function getSectionEditorPreview(id) {
+  const def = await regionService.getDefaultRegion();
+  const vis = { isStaff: false, regionId: def?.id ?? null };
+  const raw = await prisma.section.findFirst({ where: { id }, include: sectionInclude(vis) });
+  if (!raw) return null;
+  if (raw.kind !== 'BEST_SELLERS' && raw.kind !== 'NEW_ARRIVALS') return { auto: [], excluded: [] };
+
+  const curatedCount = raw.products.length;
+  await augmentDynamicSection(raw, vis);
+  const auto = raw.products
+    .slice(curatedCount) // synthetic dynamic-fill rows appended by augmentDynamicSection
+    .map((pr) => mapProductForSection(pr, vis))
+    .filter(Boolean);
+
+  const excludedRows = await prisma.sectionProduct.findMany({
+    where: { sectionId: id, excluded: true },
+    include: { product: { include: sectionProductInclude(false) } },
+    orderBy: { sortOrder: 'asc' },
+  });
+  const excluded = excludedRows.map((pr) => mapProductForSection(pr, vis)).filter(Boolean);
+
+  return { auto, excluded };
+}
+
 async function getSectionById(id, visibility = {}) {
   const section = await prisma.section.findFirst({
     where: { id, ...buildVisibilityWhere(visibility) },
@@ -274,6 +390,12 @@ async function createSection(data) {
   const categoryIds = Array.isArray(data.categoryIds) ? data.categoryIds.filter((id) => id && String(id).trim()) : [];
   const status = normalizeStatus(data.status);
   const kind = normalizeKind(data.kind);
+  const desktopLayout = normalizeLayout(data.desktopLayout);
+  const mobileLayout = normalizeLayout(data.mobileLayout);
+  const desktopColumns = clampColumns(data.desktopColumns, 'desktop');
+  const mobileColumns = clampColumns(data.mobileColumns, 'mobile');
+  const desktopLimit = clampLimit(data.desktopLimit, 'desktop');
+  const mobileLimit = clampLimit(data.mobileLimit, 'mobile');
   const regionIds = await resolveWriteRegionIds(data.regionIds);
 
   const maxOrder = await prisma.section.aggregate({ _max: { sortOrder: true } }).then((r) => (r._max.sortOrder ?? -1) + 1);
@@ -296,21 +418,30 @@ async function createSection(data) {
       sortOrder: data.sortOrder != null ? Number(data.sortOrder) : maxOrder,
       status,
       kind,
+      desktopLayout,
+      desktopColumns,
+      desktopLimit,
+      mobileLayout,
+      mobileColumns,
+      mobileLimit,
       ...(regionIds.length > 0
         ? { regions: { create: regionIds.map((regionId) => ({ regionId })) } }
         : {}),
     },
   });
 
-  if (productIds.length > 0) {
-    await prisma.sectionProduct.createMany({
-      data: productIds.map((productId, i) => ({
-        sectionId: section.id,
-        productId: String(productId).trim(),
-        sortOrder: i,
-      })),
-      skipDuplicates: true,
-    });
+  // Curated picks (excluded=false) + admin-hidden auto products (excluded=true). A
+  // product can't be both — curated wins if it somehow appears in both lists.
+  const curatedSet = new Set(productIds.map((pid) => String(pid).trim()));
+  const excludedProductIds = (Array.isArray(data.excludedProductIds) ? data.excludedProductIds : [])
+    .map((pid) => String(pid ?? '').trim())
+    .filter((pid) => pid && !curatedSet.has(pid));
+  const sectionProductRows = [
+    ...productIds.map((productId, i) => ({ sectionId: section.id, productId: String(productId).trim(), sortOrder: i, excluded: false })),
+    ...excludedProductIds.map((productId) => ({ sectionId: section.id, productId, sortOrder: 0, excluded: true })),
+  ];
+  if (sectionProductRows.length > 0) {
+    await prisma.sectionProduct.createMany({ data: sectionProductRows, skipDuplicates: true });
   }
   if (categoryIds.length > 0) {
     await prisma.sectionCategory.createMany({
@@ -345,6 +476,12 @@ async function updateSection(id, data) {
   if (data.sortOrder !== undefined) updatePayload.sortOrder = Number(data.sortOrder);
   if (data.status !== undefined) updatePayload.status = normalizeStatus(data.status, existing.status);
   if (data.kind !== undefined) updatePayload.kind = normalizeKind(data.kind, existing.kind);
+  if (data.desktopLayout !== undefined) updatePayload.desktopLayout = normalizeLayout(data.desktopLayout, existing.desktopLayout);
+  if (data.mobileLayout !== undefined) updatePayload.mobileLayout = normalizeLayout(data.mobileLayout, existing.mobileLayout);
+  if (data.desktopColumns !== undefined) updatePayload.desktopColumns = clampColumns(data.desktopColumns, 'desktop', existing.desktopColumns);
+  if (data.mobileColumns !== undefined) updatePayload.mobileColumns = clampColumns(data.mobileColumns, 'mobile', existing.mobileColumns);
+  if (data.desktopLimit !== undefined) updatePayload.desktopLimit = clampLimit(data.desktopLimit, 'desktop', existing.desktopLimit);
+  if (data.mobileLimit !== undefined) updatePayload.mobileLimit = clampLimit(data.mobileLimit, 'mobile', existing.mobileLimit);
 
   const newRegionIds = data.regionIds !== undefined
     ? await regionService.assertValidRegionIds(Array.isArray(data.regionIds) ? data.regionIds : [])
@@ -367,18 +504,30 @@ async function updateSection(id, data) {
     }
   }
 
-  if (data.productIds !== undefined) {
+  // Curated picks (excluded=false) and admin-hidden auto products (excluded=true) share
+  // the SectionProduct table, so a productIds OR excludedProductIds change rebuilds BOTH
+  // (deleteMany wipes all). Whichever list the payload omits is preserved from existing.
+  if (data.productIds !== undefined || data.excludedProductIds !== undefined) {
+    const existingRows = await prisma.sectionProduct.findMany({
+      where: { sectionId: id },
+      select: { productId: true, excluded: true, sortOrder: true },
+    });
+    const curated = data.productIds !== undefined
+      ? (Array.isArray(data.productIds) ? data.productIds : []).map((pid) => String(pid ?? '').trim()).filter(Boolean)
+      : existingRows.filter((r) => !r.excluded).sort((a, b) => a.sortOrder - b.sortOrder).map((r) => r.productId);
+    const excludedRaw = data.excludedProductIds !== undefined
+      ? (Array.isArray(data.excludedProductIds) ? data.excludedProductIds : []).map((pid) => String(pid ?? '').trim()).filter(Boolean)
+      : existingRows.filter((r) => r.excluded).map((r) => r.productId);
+    const curatedSet = new Set(curated);
+    const excluded = excludedRaw.filter((pid) => !curatedSet.has(pid));
+
     await prisma.sectionProduct.deleteMany({ where: { sectionId: id } });
-    const productIds = Array.isArray(data.productIds) ? data.productIds.filter((id) => id && String(id).trim()) : [];
-    if (productIds.length > 0) {
-      await prisma.sectionProduct.createMany({
-        data: productIds.map((productId, i) => ({
-          sectionId: id,
-          productId: String(productId).trim(),
-          sortOrder: i,
-        })),
-        skipDuplicates: true,
-      });
+    const rows = [
+      ...curated.map((productId, i) => ({ sectionId: id, productId, sortOrder: i, excluded: false })),
+      ...excluded.map((productId) => ({ sectionId: id, productId, sortOrder: 0, excluded: true })),
+    ];
+    if (rows.length > 0) {
+      await prisma.sectionProduct.createMany({ data: rows, skipDuplicates: true });
     }
   }
 
@@ -426,6 +575,8 @@ async function reorderSections(items) {
 
 module.exports = {
   getSections,
+  getSurfacedProductIds,
+  getSectionEditorPreview,
   getSectionById,
   createSection,
   updateSection,

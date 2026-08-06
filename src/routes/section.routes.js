@@ -15,6 +15,18 @@ const regionStatusValidation = [
   body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
 ];
 
+// Shared per-section display-layout validators for create + update. The service
+// re-clamps columns as a backstop (section.service.js), but validating the exact
+// bounds here gives the admin a clear 400 instead of a silently-clamped value.
+const displayValidation = [
+  body('desktopLayout').optional().isIn(['GRID', 'SCROLL']).withMessage('desktopLayout must be GRID or SCROLL'),
+  body('mobileLayout').optional().isIn(['GRID', 'SCROLL']).withMessage('mobileLayout must be GRID or SCROLL'),
+  body('desktopColumns').optional().isInt({ min: 2, max: 6 }).withMessage('desktopColumns must be an integer between 2 and 6'),
+  body('mobileColumns').optional().isInt({ min: 1, max: 4 }).withMessage('mobileColumns must be an integer between 1 and 4'),
+  body('desktopLimit').optional().isInt({ min: 1, max: 24 }).withMessage('desktopLimit must be an integer between 1 and 24'),
+  body('mobileLimit').optional().isInt({ min: 1, max: 12 }).withMessage('mobileLimit must be an integer between 1 and 12'),
+];
+
 /**
  * @swagger
  * tags:
@@ -81,6 +93,17 @@ router.get(
   [param('id').isUUID().withMessage('Valid section ID required')],
   handleValidationErrors,
   sectionController.getSectionById
+);
+
+// Staff-only editor preview: the dynamic auto-grow products (Pin/Hide candidates) plus
+// the admin's already-hidden products for a Best Sellers / New Arrivals section.
+router.get(
+  '/:id/preview',
+  verifyAdminOrManager,
+  requireManagerPermission('SECTIONS'),
+  [param('id').isUUID().withMessage('Valid section ID required')],
+  handleValidationErrors,
+  sectionController.getSectionEditorPreview
 );
 
 /**
@@ -152,10 +175,14 @@ const createValidation = [
   body('image').optional().trim(),
   body('productIds').optional().isArray().withMessage('productIds must be an array'),
   body('productIds.*').optional().isUUID().withMessage('Each productId must be a valid UUID'),
+  // Products the admin explicitly HID from a dynamic section's auto-grow.
+  body('excludedProductIds').optional().isArray().withMessage('excludedProductIds must be an array'),
+  body('excludedProductIds.*').optional().isUUID().withMessage('Each excludedProductId must be a valid UUID'),
   body('categoryIds').optional().isArray().withMessage('categoryIds must be an array'),
   body('categoryIds.*').optional().isUUID().withMessage('Each categoryId must be a valid UUID'),
   body('sortOrder').optional().isInt({ min: 0 }).withMessage('sortOrder must be a non-negative integer'),
   ...regionStatusValidation,
+  ...displayValidation,
 ];
 router.post('/', verifyAdminOrManager, requireManagerPermission('SECTIONS'), createValidation, handleValidationErrors, sectionController.createSection);
 
@@ -218,9 +245,13 @@ const updateValidation = [
   body('sortOrder').optional().isInt({ min: 0 }).withMessage('sortOrder must be a non-negative integer'),
   body('productIds').optional().isArray().withMessage('productIds must be an array'),
   body('productIds.*').optional().isUUID().withMessage('Each productId must be a valid UUID'),
+  // Products the admin explicitly HID from a dynamic section's auto-grow.
+  body('excludedProductIds').optional().isArray().withMessage('excludedProductIds must be an array'),
+  body('excludedProductIds.*').optional().isUUID().withMessage('Each excludedProductId must be a valid UUID'),
   body('categoryIds').optional().isArray().withMessage('categoryIds must be an array'),
   body('categoryIds.*').optional().isUUID().withMessage('Each categoryId must be a valid UUID'),
   ...regionStatusValidation,
+  ...displayValidation,
 ];
 router.put('/:id', verifyAdminOrManager, requireManagerPermission('SECTIONS'), updateValidation, handleValidationErrors, sectionController.updateSection);
 
