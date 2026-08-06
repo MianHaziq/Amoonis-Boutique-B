@@ -179,6 +179,8 @@ const createValidation = [
     .custom(isTwoDecimals).withMessage('giftCardExtraPrice supports at most 2 decimal places'),
   // Custom name add-on — customer types a name at add-to-cart time for this extra fee.
   body('customNameEnabled').optional().isBoolean().withMessage('customNameEnabled must be a boolean'),
+  // "Coming soon": visible but not orderable (enforced in cart/order services).
+  body('comingSoon').optional().isBoolean().withMessage('comingSoon must be a boolean'),
   body('customNamePrice')
     .optional({ values: 'null' })
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('customNamePrice must be between 0 and 99999999.99').bail()
@@ -233,7 +235,7 @@ const createValidation = [
   // Marks this group as the one whose values drive `variants` below (e.g. "Size").
   body('productOptions.*.isVariantAxis').optional().isBoolean().withMessage('productOptions.*.isVariantAxis must be a boolean'),
   // Optional Small/Medium/Large-style variants — each row is its own price/photos/
-  // contents. Empty/omitted = a plain product (the vast majority), unchanged behavior.
+  // subtitle. Empty/omitted = a plain product (the vast majority), unchanged behavior.
   body('variants').optional().isArray().withMessage('variants must be an array'),
   body('variants.*.optionValue').optional().trim(),
   body('variants.*.optionValue_ar').optional().trim(),
@@ -246,8 +248,8 @@ const createValidation = [
     .custom(isTwoDecimals).withMessage('variants[].discountedPrice supports at most 2 decimal places'),
   body('variants.*.images').optional().isArray().withMessage('variants[].images must be an array of image URLs'),
   body('variants.*.images.*').optional().isString().trim().notEmpty().withMessage('Each variant image must be a non-empty URL string'),
-  body('variants.*.contents').optional().trim(),
-  body('variants.*.contents_ar').optional().trim(),
+  body('variants.*.subtitle').optional().trim(),
+  body('variants.*.subtitle_ar').optional().trim(),
   body('variants.*.isDefault').optional().isBoolean().withMessage('variants.*.isDefault must be a boolean'),
   // Optional per-variant description blocks (same shape as the top-level
   // `descriptions` array) — empty/omitted = this size shares the shared blocks.
@@ -353,6 +355,8 @@ const updateValidation = [
     .custom(isTwoDecimals).withMessage('giftCardExtraPrice supports at most 2 decimal places'),
   // Custom name add-on — customer types a name at add-to-cart time for this extra fee.
   body('customNameEnabled').optional().isBoolean().withMessage('customNameEnabled must be a boolean'),
+  // "Coming soon": visible but not orderable (enforced in cart/order services).
+  body('comingSoon').optional().isBoolean().withMessage('comingSoon must be a boolean'),
   body('customNamePrice')
     .optional({ values: 'null' })
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('customNamePrice must be between 0 and 99999999.99').bail()
@@ -410,7 +414,7 @@ const updateValidation = [
   // Marks this group as the one whose values drive `variants` below (e.g. "Size").
   body('productOptions.*.isVariantAxis').optional().isBoolean().withMessage('productOptions.*.isVariantAxis must be a boolean'),
   // Optional Small/Medium/Large-style variants — each row is its own price/photos/
-  // contents. Empty/omitted = a plain product (the vast majority), unchanged behavior.
+  // subtitle. Empty/omitted = a plain product (the vast majority), unchanged behavior.
   body('variants').optional().isArray().withMessage('variants must be an array'),
   body('variants.*.optionValue').optional().trim(),
   body('variants.*.optionValue_ar').optional().trim(),
@@ -423,8 +427,8 @@ const updateValidation = [
     .custom(isTwoDecimals).withMessage('variants[].discountedPrice supports at most 2 decimal places'),
   body('variants.*.images').optional().isArray().withMessage('variants[].images must be an array of image URLs'),
   body('variants.*.images.*').optional().isString().trim().notEmpty().withMessage('Each variant image must be a non-empty URL string'),
-  body('variants.*.contents').optional().trim(),
-  body('variants.*.contents_ar').optional().trim(),
+  body('variants.*.subtitle').optional().trim(),
+  body('variants.*.subtitle_ar').optional().trim(),
   body('variants.*.isDefault').optional().isBoolean().withMessage('variants.*.isDefault must be a boolean'),
   // Optional per-variant description blocks (same shape as the top-level
   // `descriptions` array) — empty/omitted = this size shares the shared blocks.

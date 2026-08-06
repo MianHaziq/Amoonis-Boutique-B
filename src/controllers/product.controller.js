@@ -1,4 +1,5 @@
 const productService = require('../services/product.service');
+const sectionService = require('../services/section.service');
 const { success, error } = require('../utils/response');
 const { visibilityFromReq } = require('../utils/visibilityFromReq');
 
@@ -70,7 +71,12 @@ async function getAllProducts(req, res, next) {
     const limit = parseInt(req.query.limit) || 10;
     const categoryId = req.query.categoryId || null;
     const visibility = await visibilityFromReq(req);
-    const result = await productService.getAllProducts(page, limit, categoryId, visibility);
+    // Storefront "Everything" list: rescue products that a published Section is
+    // currently surfacing (Best Sellers / New Arrivals / curated rails) so a featured
+    // product still shows here even when its category is drafted ENTIRE_STORE. Staff
+    // see everything already, so skip the extra section resolution for them.
+    const rescueIds = visibility.isStaff ? null : await sectionService.getSurfacedProductIds(visibility);
+    const result = await productService.getAllProducts(page, limit, categoryId, visibility, rescueIds);
     return success(res, result.items, 'Products fetched successfully', 200, {
       pagination: {
         page: result.page,
@@ -168,7 +174,16 @@ async function getProductById(req, res, next) {
   try {
     const { id } = req.params;
     const visibility = await visibilityFromReq(req);
-    const product = await productService.getProductById(id, visibility);
+    let product = await productService.getProductById(id, visibility);
+    // Only if it wasn't visible normally do we pay for section resolution: a product
+    // in an ENTIRE_STORE-draft category is still openable when a published Section is
+    // surfacing it (so a rescued card in the "Everything" grid actually clicks through).
+    if (!product && !visibility.isStaff) {
+      const rescueIds = await sectionService.getSurfacedProductIds(visibility);
+      if (rescueIds.includes(id)) {
+        product = await productService.getProductById(id, visibility, rescueIds);
+      }
+    }
     if (!product) return error(res, 'Product not found', 404);
     return success(res, product, 'Product fetched successfully');
   } catch (err) {

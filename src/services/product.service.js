@@ -2,7 +2,7 @@ const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
 const { autoTranslate, autoTranslateMany, fillBilingualGapsFromTwin } = require('../utils/bilingual');
 const regionService = require('./region.service');
-const { buildVisibilityWhere } = require('../utils/regionVisibility');
+const { buildVisibilityWhere, buildCategoryVisibilityWhere } = require('../utils/regionVisibility');
 const {
   parseDeliveryLeadDays,
   resolveDeliveryLeadDays,
@@ -73,7 +73,7 @@ const PRODUCT_OPTION_BILINGUAL = [
 ];
 const PRODUCT_VARIANT_BILINGUAL = [
   { src: 'optionValue', dst: 'optionValue_ar' },
-  { src: 'contents', dst: 'contents_ar' },
+  { src: 'subtitle', dst: 'subtitle_ar' },
 ];
 const PRODUCT_VARIANT_COLOR_BILINGUAL = [{ src: 'label', dst: 'label_ar' }];
 
@@ -129,7 +129,7 @@ function orderedProductOptions(product) {
     // Additive: per-value image SETS (array-of-arrays), aligned with `options`.
     // Null/absent when unused; consumers fall back to single `optionImages`.
     optionImageSets: Array.isArray(o.optionImageSets) ? o.optionImageSets : [],
-    // Marks this the group whose values drive Product.variants (price/photos/contents).
+    // Marks this the group whose values drive Product.variants (price/photos/subtitle).
     isVariantAxis: !!o.isVariantAxis,
   }));
 }
@@ -161,8 +161,8 @@ function orderedVariants(product) {
     price: decimalToNumber(v.price),
     discountedPrice: decimalToNumber(v.discountedPrice),
     images: Array.isArray(v.images) ? v.images : [],
-    contents: v.contents ?? null,
-    contents_ar: v.contents_ar ?? null,
+    subtitle: v.subtitle ?? null,
+    subtitle_ar: v.subtitle_ar ?? null,
     isDefault: !!v.isDefault,
     sortOrder: v.sortOrder,
     // This variant's own description blocks. Empty = it has none of its own and
@@ -235,7 +235,7 @@ function mapProduct(product) {
     descriptions: descriptionsList,
     productOptions: productOptionsList,
     // Additive: Small/Medium/Large-style variants, each with its own price/photos/
-    // contents. Empty array for every product that doesn't use this (the vast
+    // subtitle. Empty array for every product that doesn't use this (the vast
     // majority) — older clients (mobile) never read this and keep using the plain
     // price/discountedPrice above, which mirror the default variant when one exists.
     variants: variantsList,
@@ -572,7 +572,7 @@ function normalizeProductOptions(productOptions) {
 
 /**
  * Validate & normalize a `variants: [{optionValue, price, discountedPrice, images,
- * contents, isDefault, descriptions}]` payload into ProductVariant create rows. Each
+ * subtitle, isDefault, descriptions}]` payload into ProductVariant create rows. Each
  * row's own `descriptions` (same shape as the top-level description blocks) is
  * normalized too, via normalizeDescriptions — empty means this size has no override
  * and shares the product's shared blocks. Throws INVALID_PRICE (code set) on a
@@ -659,8 +659,8 @@ function normalizeVariants(variants) {
         price,
         discountedPrice,
         images,
-        contents: item.contents != null ? String(item.contents).trim() || null : null,
-        contents_ar: item.contents_ar != null ? String(item.contents_ar).trim() || null : null,
+        subtitle: item.subtitle != null ? String(item.subtitle).trim() || null : null,
+        subtitle_ar: item.subtitle_ar != null ? String(item.subtitle_ar).trim() || null : null,
         isDefault: !!item.isDefault,
         sortOrder: i,
         // This variant's own description blocks (same shape as the top-level
@@ -845,6 +845,9 @@ async function createProduct(data) {
         cashArrangementFeeMarginPercent: cashArrangementFee.feeMarginPercent,
         quantity,
         status,
+        // Only a PUBLISHED product can be "coming soon"; a DRAFT is hidden anyway, so
+        // never persist a confusing DRAFT+comingSoon state.
+        comingSoon: status === 'PUBLISHED' ? !!data.comingSoon : false,
         ...(regionIds.length > 0
           ? {
               regions: {
@@ -929,7 +932,7 @@ async function createProduct(data) {
     return tx.product.findUnique({
       where: { id: product.id },
       include: {
-        category: { select: { id: true, title: true, deliveryLeadDays: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -1120,6 +1123,16 @@ async function updateProduct(id, data) {
     ...(data.quantity !== undefined && { quantity: Math.max(0, parseInt(data.quantity, 10) || 0) }),
     ...(data.categoryId !== undefined && { categoryId: data.categoryId || null }),
     ...(data.status !== undefined && { status: normalizeStatus(data.status, existing.status) }),
+    // comingSoon is meaningful only while PUBLISHED: clamp any sent value to the
+    // effective status, and force it off if this update drafts the product (so a
+    // status-only edit can never leave a stale DRAFT+comingSoon state behind).
+    ...((data.comingSoon !== undefined || data.status !== undefined) && (() => {
+      const effectiveStatus =
+        data.status !== undefined ? normalizeStatus(data.status, existing.status) : existing.status;
+      if (effectiveStatus !== 'PUBLISHED') return { comingSoon: false };
+      if (data.comingSoon !== undefined) return { comingSoon: !!data.comingSoon };
+      return {}; // becoming/staying published without a comingSoon value → leave as-is
+    })()),
   };
 
   // All product mutations + counter rebalances run inside one transaction so a partial
@@ -1260,7 +1273,7 @@ async function updateProduct(id, data) {
   return prisma.product.findUnique({
     where: { id },
     include: {
-      category: { select: { id: true, title: true, deliveryLeadDays: true } },
+      category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -1336,12 +1349,13 @@ async function reorderProducts(items) {
 // scan on this public endpoint. 10k pages × 100/page covers any real catalog.
 const MAX_PAGE = 10000;
 
-async function getAllProductsOrdered(page, limit, categoryId, visibility, orderBy) {
+async function getAllProductsOrdered(page, limit, categoryId, visibility, orderBy, rescueIds = null) {
   const safePage = Math.min(MAX_PAGE, Math.max(1, page));
   const take = Math.min(100, Math.max(1, limit));
   const skip = (safePage - 1) * take;
   const where = {
     ...buildVisibilityWhere(visibility),
+    ...buildCategoryVisibilityWhere(visibility, rescueIds),
     ...(categoryId ? { categoryId } : {}),
   };
 
@@ -1352,7 +1366,7 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
       take,
       orderBy,
       include: {
-        category: { select: { id: true, title: true, deliveryLeadDays: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -1383,11 +1397,13 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
   };
 }
 
-async function getAllProducts(page = 1, limit = 10, categoryId = null, visibility = {}) {
+async function getAllProducts(page = 1, limit = 10, categoryId = null, visibility = {}, rescueIds = null) {
   // Admin-controlled display order first (drag-and-drop sets sortOrder), then
   // newest. All products default to sortOrder 0, so the effective order is
   // unchanged until an admin explicitly reorders.
-  return getAllProductsOrdered(page, limit, categoryId, visibility, [{ sortOrder: 'asc' }, { createdAt: 'desc' }]);
+  // `rescueIds` (section-surfaced products) let the storefront "Everything" list keep
+  // showing featured products whose category is ENTIRE_STORE-draft — see the controller.
+  return getAllProductsOrdered(page, limit, categoryId, visibility, [{ sortOrder: 'asc' }, { createdAt: 'desc' }], rescueIds);
 }
 
 /**
@@ -1451,9 +1467,26 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
   const safePage = Math.min(MAX_PAGE, Math.max(1, page));
   const take = Math.min(100, Math.max(1, limit));
   const skip = (safePage - 1) * take;
-  const where = buildVisibilityWhere(visibility);
+  const where = {
+    ...buildVisibilityWhere(visibility),
+    ...buildCategoryVisibilityWhere(visibility),
+  };
 
-  const candidateIds = await getBestSellingProductIds(visibility.regionId ?? null);
+  // Sales-ranked ids come straight from OrderItem sums — NOT visibility-filtered. Keep
+  // only the ones that pass the current `where` (draft status / region / ENTIRE_STORE
+  // category draft), preserving sales-rank order. Without this, `total` counts hidden
+  // products that the final page fetch drops, so the count and pagination overstate the
+  // real result set (e.g. total:13 but only 5 visible items).
+  const rankedIds = await getBestSellingProductIds(visibility.regionId ?? null);
+  const candidateIds = [];
+  if (rankedIds.length > 0) {
+    const visibleRanked = await prisma.product.findMany({
+      where: { ...where, id: { in: rankedIds } },
+      select: { id: true },
+    });
+    const visibleSet = new Set(visibleRanked.map((p) => p.id));
+    for (const id of rankedIds) if (visibleSet.has(id)) candidateIds.push(id);
+  }
   const seen = new Set(candidateIds);
 
   if (candidateIds.length < BEST_SELLERS_CANDIDATE_CAP) {
@@ -1496,7 +1529,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
     const products = await prisma.product.findMany({
       where: { ...where, id: { in: pageIds } },
       include: {
-        category: { select: { id: true, title: true, deliveryLeadDays: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -1562,6 +1595,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}, c
   const contains = { contains: q, mode: 'insensitive' };
   const where = {
     ...buildVisibilityWhere(visibility),
+    ...buildCategoryVisibilityWhere(visibility),
     ...(categoryId ? { categoryId } : {}),
     OR: [
       { title: contains },
@@ -1581,7 +1615,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}, c
       take,
       orderBy: { createdAt: 'desc' },
       include: {
-        category: { select: { id: true, title: true, deliveryLeadDays: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -1613,11 +1647,11 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}, c
   };
 }
 
-async function getProductById(id, visibility = {}) {
+async function getProductById(id, visibility = {}, rescueIds = null) {
   const product = await prisma.product.findFirst({
-    where: { id, ...buildVisibilityWhere(visibility) },
+    where: { id, ...buildVisibilityWhere(visibility), ...buildCategoryVisibilityWhere(visibility, rescueIds) },
     include: {
-      category: { select: { id: true, title: true, deliveryLeadDays: true } },
+      category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },

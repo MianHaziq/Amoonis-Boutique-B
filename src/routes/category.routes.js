@@ -11,6 +11,11 @@ const { resolveRegion } = require('../middleware/region');
 // Shared region/draft validators for create + update.
 const regionStatusValidation = [
   body('status').optional().isIn(['DRAFT', 'PUBLISHED']).withMessage('status must be DRAFT or PUBLISHED'),
+  // "Coming soon": category (and all its products) visible but not orderable.
+  body('comingSoon').optional().isBoolean().withMessage('comingSoon must be a boolean'),
+  // How far a DRAFT status reaches: HOME_ONLY (hide from home only, products still list
+  // in the Shop) or ENTIRE_STORE (also remove its products from every storefront surface).
+  body('draftScope').optional().isIn(['HOME_ONLY', 'ENTIRE_STORE']).withMessage('draftScope must be HOME_ONLY or ENTIRE_STORE'),
   body('regionIds').optional().isArray().withMessage('regionIds must be an array of region IDs'),
   body('regionIds.*').optional().isUUID().withMessage('Each regionId must be a valid UUID'),
   // Overrides Settings.defaultDeliveryLeadDays for every product in this category that

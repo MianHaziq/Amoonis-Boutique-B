@@ -42,4 +42,34 @@ function buildVisibilityWhere({ isStaff, regionId, adminRegionId = null, adminSt
   return where;
 }
 
-module.exports = { buildVisibilityWhere };
+/**
+ * Extra Product `where` fragment that hides products whose CATEGORY is drafted for
+ * the ENTIRE store (Category.status = DRAFT + draftScope = ENTIRE_STORE). A HOME_ONLY
+ * draft category keeps its products listable in the Shop, so it is NOT excluded here.
+ * Staff see everything. Products with no category, or a PUBLISHED/HOME_ONLY-draft
+ * category, are unaffected (Prisma's NOT on a to-one relation keeps null-category rows).
+ *
+ * Returns {} for staff and merges cleanly alongside buildVisibilityWhere() — it only
+ * adds a top-level `NOT` (or a top-level `OR` when a rescue list is given), never
+ * touching the product's own `status`/`regions` keys.
+ *
+ * `rescueIds`: product ids that a published Section is currently surfacing. These are
+ * RESCUED back into view even when their category is ENTIRE_STORE-draft — a featured
+ * product shouldn't vanish from the shop just because its category is hidden. When
+ * given, the filter becomes "(category not entire-store-draft) OR (id in rescue list)".
+ *
+ * @param {object} opts
+ * @param {boolean} opts.isStaff
+ * @param {string[]|null} [rescueIds]
+ * @returns {object} Prisma where fragment
+ */
+function buildCategoryVisibilityWhere({ isStaff }, rescueIds = null) {
+  if (isStaff) return {};
+  const hidden = { category: { status: 'DRAFT', draftScope: 'ENTIRE_STORE' } };
+  if (Array.isArray(rescueIds) && rescueIds.length > 0) {
+    return { OR: [{ NOT: hidden }, { id: { in: rescueIds } }] };
+  }
+  return { NOT: hidden };
+}
+
+module.exports = { buildVisibilityWhere, buildCategoryVisibilityWhere };

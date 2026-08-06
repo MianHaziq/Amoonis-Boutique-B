@@ -33,6 +33,12 @@ function normalizeStatus(value, fallback = 'DRAFT') {
   return v === 'PUBLISHED' ? 'PUBLISHED' : v === 'DRAFT' ? 'DRAFT' : fallback;
 }
 
+function normalizeDraftScope(value, fallback = 'HOME_ONLY') {
+  if (value === undefined || value === null) return fallback;
+  const v = String(value).trim().toUpperCase();
+  return v === 'ENTIRE_STORE' ? 'ENTIRE_STORE' : v === 'HOME_ONLY' ? 'HOME_ONLY' : fallback;
+}
+
 async function resolveWriteRegionIds(regionIds) {
   if (Array.isArray(regionIds) && regionIds.length > 0) {
     return regionService.assertValidRegionIds(regionIds);
@@ -133,6 +139,7 @@ function buildCategoryZoneLeadRows(zoneLeadDays) {
 
 async function createCategory(data) {
   const status = normalizeStatus(data.status);
+  const draftScope = normalizeDraftScope(data.draftScope);
   const regionIds = await resolveWriteRegionIds(data.regionIds);
   // Optional override of Settings.defaultDeliveryLeadDays for every product in this
   // category that doesn't set its own Product.deliveryLeadDays. null/undefined -> no
@@ -167,6 +174,10 @@ async function createCategory(data) {
       image: data.image ?? null,
       totalProducts: 0,
       status,
+      // Coming-soon is meaningful only on a visible (PUBLISHED) category; never persist
+      // a DRAFT+comingSoon combo (draft is already hidden).
+      comingSoon: status === 'PUBLISHED' ? !!data.comingSoon : false,
+      draftScope,
       deliveryLeadDays,
       cashArrangementFeeStepAmount: cashArrangementFee.feeStepAmount,
       cashArrangementFeeMarginPercent: cashArrangementFee.feeMarginPercent,
@@ -231,10 +242,10 @@ async function updateCategory(id, data) {
     existingCatRegionIds = rows.map((r) => r.regionId);
   }
 
-  // Fetch existing status so a malformed status string falls back to the current
-  // value instead of silently resetting the category to DRAFT.
-  const existing = data.status !== undefined
-    ? await prisma.category.findUnique({ where: { id }, select: { status: true } })
+  // Fetch existing status/draftScope so a malformed value falls back to the current
+  // one instead of silently resetting (status -> DRAFT, draftScope -> HOME_ONLY).
+  const existing = data.status !== undefined || data.draftScope !== undefined
+    ? await prisma.category.findUnique({ where: { id }, select: { status: true, draftScope: true } })
     : null;
 
   await prisma.$transaction(async (tx) => {
@@ -247,6 +258,15 @@ async function updateCategory(id, data) {
         ...(draft.description_ar !== undefined && { description_ar: draft.description_ar ?? null }),
         ...(data.image !== undefined && { image: data.image }),
         ...(data.status !== undefined && { status: normalizeStatus(data.status, existing?.status) }),
+        // comingSoon only applies while PUBLISHED; drafting the category forces it off.
+        ...((data.comingSoon !== undefined || data.status !== undefined) && (() => {
+          const effectiveStatus =
+            data.status !== undefined ? normalizeStatus(data.status, existing?.status) : existing?.status;
+          if (effectiveStatus !== 'PUBLISHED') return { comingSoon: false };
+          if (data.comingSoon !== undefined) return { comingSoon: !!data.comingSoon };
+          return {};
+        })()),
+        ...(data.draftScope !== undefined && { draftScope: normalizeDraftScope(data.draftScope, existing?.draftScope) }),
         // Optional override; omit to leave untouched, or send null to clear it back to
         // "no override" (falls through to Settings.defaultDeliveryLeadDays).
         ...(data.deliveryLeadDays !== undefined && { deliveryLeadDays: parseDeliveryLeadDays(data.deliveryLeadDays) }),
@@ -353,7 +373,7 @@ async function getCategoryById(id, includeProducts = false, visibility = {}) {
             take: 100,
             orderBy: { createdAt: 'desc' },
             include: {
-              category: { select: { id: true, title: true, deliveryLeadDays: true } },
+              category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
               images: { orderBy: { sortOrder: 'asc' } },
               descriptions: { orderBy: { sortOrder: 'asc' } },
               productOptions: { orderBy: { sortOrder: 'asc' } },
