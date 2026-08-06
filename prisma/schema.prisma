@@ -415,6 +415,23 @@ model Section {
   /// CUSTOM (default) for every existing section — zero behavior change until an
   /// admin explicitly flags a section as BEST_SELLERS/NEW_ARRIVALS.
   kind      SectionKind   @default(CUSTOM)
+
+  /// Per-section storefront layout, independent for desktop and mobile. Defaults
+  /// (SCROLL + 4/2 columns) reproduce the pre-existing horizontal rail exactly, so
+  /// existing sections are visually unchanged until an admin edits them. `columns`
+  /// is the products-per-row in GRID mode and the number of cards visible at once
+  /// in SCROLL mode. `limit` is the max products shown for that breakpoint (a
+  /// section with 50 products can show e.g. 6 on mobile, 12 on desktop) — matters
+  /// most in GRID mode where there's no scroll to reveal the rest. Default 12
+  /// matches the pre-existing per-rail cap, so existing sections are unchanged.
+  /// Bounds are re-clamped server-side (see section.service.js).
+  desktopLayout  SectionLayout @default(SCROLL)
+  desktopColumns Int           @default(4)
+  desktopLimit   Int           @default(12)
+  mobileLayout   SectionLayout @default(SCROLL)
+  mobileColumns  Int           @default(2)
+  mobileLimit    Int           @default(12)
+
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
 
@@ -431,6 +448,11 @@ model SectionProduct {
   sectionId String
   productId String
   sortOrder Int      @default(0)
+  /// true = this product is EXCLUDED from a dynamic (Best Sellers/New Arrivals)
+  /// section's auto-grow — the admin explicitly hid an auto-added product. Such rows
+  /// are never rendered as curated picks and are skipped by the dynamic fill. false =
+  /// a normal curated pick (shown, ordered by sortOrder).
+  excluded  Boolean  @default(false)
   createdAt DateTime @default(now())
 
   section Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
@@ -664,6 +686,19 @@ model Category {
   image          String?
   totalProducts  Int           @default(0)
   status         PublishStatus @default(DRAFT)
+  /// "Coming soon" teaser state, orthogonal to status. A PUBLISHED + comingSoon
+  /// category stays fully visible on the storefront but cannot be ordered, and the
+  /// flag cascades to every product inside it (a product is effectively coming-soon
+  /// if its own comingSoon OR its category's is set). Not a PublishStatus value on
+  /// purpose: keeps visibility queries unchanged and can't break strict-enum clients.
+  comingSoon     Boolean       @default(false)
+  /// How far a DRAFT status reaches (ignored while PUBLISHED).
+  /// HOME_ONLY: the category is hidden from the home page/category grid, but its
+  /// products still appear on the Shop/all-products listing (legacy behavior, so
+  /// existing draft categories are unaffected).
+  /// ENTIRE_STORE: additionally removes the category's products from the storefront
+  /// entirely — Shop listing, search, best-sellers, and direct product pages.
+  draftScope     CategoryVisibilityScope @default(HOME_ONLY)
   /// Overrides Settings.defaultDeliveryLeadDays for every product in this category
   /// that doesn't set its own Product.deliveryLeadDays. Null = no override (falls
   /// through to the global default).
@@ -719,6 +754,11 @@ model Product {
   quantity           Int           @default(0)
   categoryId         String?
   status             PublishStatus @default(DRAFT)
+  // "Coming soon" teaser state, orthogonal to status: a PUBLISHED + comingSoon
+  // product stays visible (its detail page is viewable) but cannot be added to cart
+  // or ordered — enforced server-side in cart/order services so every client (web +
+  // mobile) is blocked. Also inherited when the product's category is comingSoon.
+  comingSoon         Boolean       @default(false)
   // Admin-controlled display order (drag-and-drop). Defaults to 0 so existing
   // products keep their createdAt-desc order until an admin reorders them.
   sortOrder          Int           @default(0)
@@ -800,7 +840,7 @@ model ProductOption {
   // reading — so this is purely additive and mobile-safe. Null when unused.
   optionImageSets Json?
   // Marks this option group as the one whose values map 1:1 to Product.variants
-  // (e.g. "Size"), so picking a value changes price/photos/contents, not just the
+  // (e.g. "Size"), so picking a value changes price/photos/subtitle, not just the
   // photo. At most one group per product should be true — enforced in
   // product.service.js, not at the DB level. False for purely-visual groups
   // (e.g. "Colour") that never carry their own price. Purely additive/mobile-safe:
@@ -816,8 +856,8 @@ model ProductOption {
 }
 
 /// One priced/photographed size (or other single-axis variant) of a Product — e.g. the
-/// Small/Medium/Large Graduation Giveaway Box each has its own price, photos, and box
-/// contents but is otherwise the same catalog listing. `optionValue` matches a value in
+/// Small/Medium/Large Graduation Giveaway Box each has its own price, photos, and
+/// subtitle but is otherwise the same catalog listing. `optionValue` matches a value in
 /// the product's `isVariantAxis` ProductOption group (see resolveVariantPricing in
 /// product.service.js) so a cart/order's `selectedOptions` resolves to the right row.
 /// Stock stays PRODUCT-level (Product.quantity), matching how Colour variants already
@@ -830,8 +870,10 @@ model ProductVariant {
   price           Decimal  @db.Decimal(10, 2)
   discountedPrice Decimal? @db.Decimal(10, 2)
   images          String[] @default([])
-  contents        String?  @db.Text
-  contents_ar     String?  @db.Text
+  // Short blurb shown under the product title in place of Product.subtitle whenever
+  // this variant is the active selection (falls back to Product.subtitle when empty).
+  subtitle        String?  @db.Text
+  subtitle_ar     String?  @db.Text
   sortOrder       Int      @default(0)
   // Exactly one variant per product should be true — the price/photo shown before
   // the shopper picks a value, and the one Product.price/discountedPrice mirrors
@@ -1397,6 +1439,14 @@ enum PublishStatus {
   PUBLISHED
 }
 
+/// Scope of a Category's DRAFT status. HOME_ONLY hides the category from the home
+/// page only (its products still list in the Shop). ENTIRE_STORE additionally
+/// pulls the category's products from every storefront surface.
+enum CategoryVisibilityScope {
+  HOME_ONLY
+  ENTIRE_STORE
+}
+
 /// CUSTOM (default) is a plain admin-curated rail (e.g. "Ramadan Deals") — behaves
 /// exactly as before. BEST_SELLERS/NEW_ARRIVALS additionally auto-fill remaining
 /// slots (up to the storefront's per-rail cap) with real top-selling / newly
@@ -1406,6 +1456,16 @@ enum SectionKind {
   CUSTOM
   BEST_SELLERS
   NEW_ARRIVALS
+}
+
+/// How a homepage section lays out its products on the storefront. SCROLL (default)
+/// is a horizontal, swipeable rail — the pre-existing behavior, so every existing
+/// section keeps its exact look until an admin changes it. GRID renders a wrapped,
+/// fixed-column grid. Chosen independently for mobile and desktop (see Section's
+/// mobileLayout/desktopLayout + mobileColumns/desktopColumns).
+enum SectionLayout {
+  SCROLL
+  GRID
 }
 
 /// Which client a banner targets. MOBILE (default) preserves the existing Flutter
