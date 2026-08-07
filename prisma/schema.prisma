@@ -692,6 +692,10 @@ model Category {
   /// if its own comingSoon OR its category's is set). Not a PublishStatus value on
   /// purpose: keeps visibility queries unchanged and can't break strict-enum clients.
   comingSoon     Boolean       @default(false)
+  /// Default gift-card input mode for every product in this category that doesn't set
+  /// its own Product.giftCardMode. MESSAGE (personalized note) or NAME (a "gift name").
+  /// Null = no category default (products fall through to the MESSAGE default).
+  giftCardMode   GiftCardMode?
   /// How far a DRAFT status reaches (ignored while PUBLISHED).
   /// HOME_ONLY: the category is hidden from the home page/category grid, but its
   /// products still appear on the Shop/all-products listing (legacy behavior, so
@@ -736,6 +740,10 @@ model Product {
   // product to mirror the client site, where most (but not all) products offer it.
   giftCardEnabled    Boolean       @default(false)
   giftCardExtraPrice Decimal?      @db.Decimal(10, 2)
+  // Which input the gift card collects: MESSAGE (a personalized note, the default) or
+  // NAME (a single "gift name"). Null = inherit the category's giftCardMode, then the
+  // MESSAGE default. Resolved product ?? category ?? MESSAGE (see giftCardMode.js).
+  giftCardMode       GiftCardMode?
   // Custom name add-on: customer types a name at add-to-cart time for an extra
   // fee. Only enabled on select products (mugs/cups/boxes), never bouquets.
   customNameEnabled  Boolean       @default(false)
@@ -1031,6 +1039,10 @@ model CartItem {
   // Gift card / custom name add-on selections. `message` above doubles as the
   // gift card's personalized note when giftCardSelected is true.
   giftCardSelected Boolean  @default(false)
+  // Resolved gift-card input mode at add-time (product ?? category ?? MESSAGE), so the
+  // cart/order can label the value correctly ("Gift name" vs "Gift message"). Null =
+  // no gift card on this line (or a legacy line predating the feature → treat as MESSAGE).
+  giftCardMode     GiftCardMode?
   customName       String?
   // Per-UNIT cash arrangement for this line (the fee itself is resolved at checkout, never
   // stored here). null amount = no cash for this line. Folded into variantKey below (like
@@ -1209,6 +1221,9 @@ model OrderItem {
   // Gift card / custom name add-on selections, snapshotted at order time.
   // perProductMessage above doubles as the gift card's note when set.
   giftCardSelected  Boolean  @default(false)
+  // Resolved gift-card input mode snapshotted at order time (see CartItem.giftCardMode)
+  // so the receipt/order views label the value as "Gift name" vs "Gift message".
+  giftCardMode      GiftCardMode?
   customName        String?
   /// Resolved "ships within N day(s)" lead time for this line, snapshotted at order
   /// time from the product/category/global chain (see Product.deliveryLeadDays) —
@@ -1430,6 +1445,14 @@ enum PushPlatform {
   IOS
   ANDROID
   WEB
+}
+
+/// Which input the gift-card add-on collects. MESSAGE = a personalized note (the
+/// historical default). NAME = a single "gift name". Set per-product and/or
+/// per-category; resolved product ?? category ?? MESSAGE (see utils/giftCardMode.js).
+enum GiftCardMode {
+  MESSAGE
+  NAME
 }
 
 /// Draft/published state for admin-managed content. DRAFT is hidden from the

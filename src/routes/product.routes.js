@@ -173,6 +173,8 @@ const createValidation = [
     .isFloat({ min: 0, max: 1000 }).withMessage('zoneLeadDays[].cashArrangementFeeMarginPercent must be between 0 and 1000'),
   // Gift card add-on — free personalized message, toggled per product.
   body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
+  // null/'' clears the product override (inherit category, then MESSAGE default).
+  body('giftCardMode').optional({ values: 'null' }).isIn(['MESSAGE', 'NAME']).withMessage('giftCardMode must be MESSAGE or NAME'),
   body('giftCardExtraPrice')
     .optional({ values: 'null' })
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('giftCardExtraPrice must be between 0 and 99999999.99').bail()
@@ -349,6 +351,8 @@ const updateValidation = [
     .isFloat({ min: 0, max: 1000 }).withMessage('zoneLeadDays[].cashArrangementFeeMarginPercent must be between 0 and 1000'),
   // Gift card add-on — free personalized message, toggled per product.
   body('giftCardEnabled').optional().isBoolean().withMessage('giftCardEnabled must be a boolean'),
+  // null/'' clears the product override (inherit category, then MESSAGE default).
+  body('giftCardMode').optional({ values: 'null' }).isIn(['MESSAGE', 'NAME']).withMessage('giftCardMode must be MESSAGE or NAME'),
   body('giftCardExtraPrice')
     .optional({ values: 'null' })
     .isFloat({ min: 0, max: 99999999.99 }).withMessage('giftCardExtraPrice must be between 0 and 99999999.99').bail()

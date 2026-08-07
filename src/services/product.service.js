@@ -9,6 +9,7 @@ const {
   getDefaultDeliveryLeadDays,
 } = require('../utils/deliveryLeadDays');
 const { parseCashArrangementFeeSchedule } = require('../utils/cashArrangementMath');
+const { normalizeGiftCardMode } = require('../utils/giftCardMode');
 
 // Standard include for region join rows on a product read (staff/admin only).
 const REGION_INCLUDE = {
@@ -837,6 +838,7 @@ async function createProduct(data) {
         price: defaultVariantRow ? defaultVariantRow.price : data.price,
         discountedPrice: defaultVariantRow ? defaultVariantRow.discountedPrice : data.discountedPrice ?? null,
         giftCardEnabled: !!data.giftCardEnabled,
+        giftCardMode: normalizeGiftCardMode(data.giftCardMode),
         giftCardExtraPrice: data.giftCardExtraPrice != null ? Number(data.giftCardExtraPrice) : null,
         customNameEnabled: !!data.customNameEnabled,
         customNamePrice: data.customNamePrice != null ? Number(data.customNamePrice) : null,
@@ -932,7 +934,7 @@ async function createProduct(data) {
     return tx.product.findUnique({
       where: { id: product.id },
       include: {
-        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true, giftCardMode: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -1097,6 +1099,7 @@ async function updateProduct(id, data) {
           ...(data.discountedPrice !== undefined && { discountedPrice: data.discountedPrice }),
         }),
     ...(data.giftCardEnabled !== undefined && { giftCardEnabled: !!data.giftCardEnabled }),
+    ...(data.giftCardMode !== undefined && { giftCardMode: normalizeGiftCardMode(data.giftCardMode) }),
     ...(data.giftCardExtraPrice !== undefined && {
       giftCardExtraPrice: data.giftCardExtraPrice != null ? Number(data.giftCardExtraPrice) : null,
     }),
@@ -1273,7 +1276,7 @@ async function updateProduct(id, data) {
   return prisma.product.findUnique({
     where: { id },
     include: {
-      category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
+      category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true, giftCardMode: true } },
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -1366,7 +1369,7 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
       take,
       orderBy,
       include: {
-        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true, giftCardMode: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -1529,7 +1532,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
     const products = await prisma.product.findMany({
       where: { ...where, id: { in: pageIds } },
       include: {
-        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true, giftCardMode: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -1615,7 +1618,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}, c
       take,
       orderBy: { createdAt: 'desc' },
       include: {
-        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
+        category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true, giftCardMode: true } },
         images: { orderBy: { sortOrder: 'asc' } },
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -1651,7 +1654,7 @@ async function getProductById(id, visibility = {}, rescueIds = null) {
   const product = await prisma.product.findFirst({
     where: { id, ...buildVisibilityWhere(visibility), ...buildCategoryVisibilityWhere(visibility, rescueIds) },
     include: {
-      category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
+      category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true, giftCardMode: true } },
       images: { orderBy: { sortOrder: 'asc' } },
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },

@@ -5,6 +5,7 @@ const productService = require('./product.service');
 const { buildVisibilityWhere } = require('../utils/regionVisibility');
 const { parseDeliveryLeadDays } = require('../utils/deliveryLeadDays');
 const { parseCashArrangementFeeSchedule } = require('../utils/cashArrangementMath');
+const { normalizeGiftCardMode } = require('../utils/giftCardMode');
 
 const decimalToNumber = (v) => (v == null ? null : Number(v));
 
@@ -177,6 +178,7 @@ async function createCategory(data) {
       // Coming-soon is meaningful only on a visible (PUBLISHED) category; never persist
       // a DRAFT+comingSoon combo (draft is already hidden).
       comingSoon: status === 'PUBLISHED' ? !!data.comingSoon : false,
+      giftCardMode: normalizeGiftCardMode(data.giftCardMode),
       draftScope,
       deliveryLeadDays,
       cashArrangementFeeStepAmount: cashArrangementFee.feeStepAmount,
@@ -267,6 +269,9 @@ async function updateCategory(id, data) {
           return {};
         })()),
         ...(data.draftScope !== undefined && { draftScope: normalizeDraftScope(data.draftScope, existing?.draftScope) }),
+        // Category-default gift-card mode. Omit to leave untouched; send null/'' to clear
+        // the default (products fall through to MESSAGE).
+        ...(data.giftCardMode !== undefined && { giftCardMode: normalizeGiftCardMode(data.giftCardMode) }),
         // Optional override; omit to leave untouched, or send null to clear it back to
         // "no override" (falls through to Settings.defaultDeliveryLeadDays).
         ...(data.deliveryLeadDays !== undefined && { deliveryLeadDays: parseDeliveryLeadDays(data.deliveryLeadDays) }),
@@ -373,7 +378,7 @@ async function getCategoryById(id, includeProducts = false, visibility = {}) {
             take: 100,
             orderBy: { createdAt: 'desc' },
             include: {
-              category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true } },
+              category: { select: { id: true, title: true, deliveryLeadDays: true, comingSoon: true, giftCardMode: true } },
               images: { orderBy: { sortOrder: 'asc' } },
               descriptions: { orderBy: { sortOrder: 'asc' } },
               productOptions: { orderBy: { sortOrder: 'asc' } },

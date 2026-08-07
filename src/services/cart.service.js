@@ -2,6 +2,7 @@ const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
 const productService = require('./product.service');
 const { variantKeyOf, lineVariantKey } = require('../utils/variantKey');
+const { resolveGiftCardMode } = require('../utils/giftCardMode');
 
 /**
  * Which cart LINE a mutation targets, as a variantKey. Callers may pass an
@@ -138,7 +139,7 @@ async function addToCart(userId, {
 }) {
   const product = await prisma.product.findUnique({
     where: { id: productId },
-    include: { category: { select: { comingSoon: true } } },
+    include: { category: { select: { comingSoon: true, giftCardMode: true } } },
   });
   if (!product) return { cart: null, error: 'Product not found' };
   // Coming-soon items (own flag OR inherited from their category) are visible but
@@ -156,6 +157,9 @@ async function addToCart(userId, {
   // line's identity (see lineVariantKey below).
   const effectiveGiftCardSelected =
     giftCardSelected !== undefined ? !!giftCardSelected && !!product.giftCardEnabled : undefined;
+  // Resolved gift-card input mode (product ?? category ?? MESSAGE) snapshotted onto the
+  // line when the card is on, so the cart/order can label it "Gift name" vs "Gift message".
+  const resolvedGiftMode = resolveGiftCardMode(product.giftCardMode, product.category?.giftCardMode);
   const effectiveCustomName =
     customName !== undefined ? (product.customNameEnabled ? (String(customName || '').trim() || null) : null) : undefined;
   // The gift card's personalized message is part of the line identity too, so two
@@ -217,7 +221,10 @@ async function addToCart(userId, {
         ...(selectedOptions !== undefined && {
           selectedOptions: selectedOptions && Object.keys(selectedOptions).length > 0 ? selectedOptions : Prisma.DbNull,
         }),
-        ...(effectiveGiftCardSelected !== undefined && { giftCardSelected: effectiveGiftCardSelected }),
+        ...(effectiveGiftCardSelected !== undefined && {
+          giftCardSelected: effectiveGiftCardSelected,
+          giftCardMode: effectiveGiftCardSelected ? resolvedGiftMode : null,
+        }),
         ...(effectiveCustomName !== undefined && { customName: effectiveCustomName }),
         // Same line key ⇒ same cash config; refresh for consistency when it was sent.
         ...(effectiveCash !== undefined && {
@@ -237,6 +244,7 @@ async function addToCart(userId, {
         message: message || null,
         selectedOptions: selectedOptions && Object.keys(selectedOptions).length > 0 ? selectedOptions : Prisma.DbNull,
         giftCardSelected: effectiveGiftCardSelected ?? false,
+        giftCardMode: (effectiveGiftCardSelected ?? false) ? resolvedGiftMode : null,
         customName: effectiveCustomName ?? null,
         cashArrangementAmount: effectiveCash?.cashAmount ?? null,
         cashArrangementDenomination: effectiveCash?.denomination ?? null,
@@ -376,6 +384,7 @@ async function getCart(userId, currency = 'AED', regionId = null) {
       // image arrays that mapProduct's display shape strips.
       selectedImage: productService.resolveVariantImage(i.product.productOptions, i.selectedOptions, i.product.variants),
       giftCardSelected: i.giftCardSelected,
+      giftCardMode: i.giftCardMode ?? null,
       customName: i.customName,
       // Per-unit cash arrangement for this line (null when none). The fee is NOT part of
       // the cart — it's resolved at checkout/order time; the cart only carries the request.

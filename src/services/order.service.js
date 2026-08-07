@@ -10,6 +10,7 @@ const productService = require('../services/product.service');
 const vatService = require('../services/vat.service');
 const cashArrangementService = require('../services/cashArrangement.service');
 const { computeCashArrangementFee } = require('../utils/cashArrangementMath');
+const { resolveGiftCardMode } = require('../utils/giftCardMode');
 const { round2 } = require('../utils/vatMath');
 const { resolveDeliveryLeadDays, getDefaultDeliveryLeadDays } = require('../utils/deliveryLeadDays');
 const { resolveDeliveryConfig, isDeliverableDay, nextDeliverableKey } = require('../services/deliveryConfig.service');
@@ -101,6 +102,7 @@ function toOrderResponsePayload(order) {
     // to the product's primary image).
     selectedImage: productService.resolveVariantImage(i.product?.productOptions, i.selectedOptions, i.product?.variants),
     giftCardSelected: i.giftCardSelected ?? false,
+    giftCardMode: i.giftCardMode ?? null,
     customName: i.customName ?? null,
     // Per-line cash arrangement snapshot (PER UNIT; amount/fee are for one unit). null when
     // this line has no cash arrangement.
@@ -530,6 +532,8 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       quantity: true,
       giftCardEnabled: true,
       giftCardExtraPrice: true,
+      // Gift-card input mode (product override; resolved with category below).
+      giftCardMode: true,
       customNameEnabled: true,
       customNamePrice: true,
       // Coming-soon items must be rejected at checkout (defense-in-depth: they can't be
@@ -538,7 +542,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       // Prep/booking lead-time override chain (see prisma/schema.prisma) — resolved and
       // snapshotted per line below as OrderItem.resolvedLeadDays.
       deliveryLeadDays: true,
-      category: { select: { id: true, deliveryLeadDays: true, comingSoon: true } },
+      category: { select: { id: true, deliveryLeadDays: true, comingSoon: true, giftCardMode: true } },
       // Needed (with `variants`) to resolve a variant-priced line's effective price —
       // see resolveEffectivePrice/resolveVariantPricing in product.service.js.
       productOptions: { orderBy: { sortOrder: 'asc' } },
@@ -675,9 +679,15 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // also be placed via buyNow (bypassing the cart) or from a stale cart snapshot.
   const sanitizedLineItems = lineItems.map((item) => {
     const p = productById.get(item.productId);
+    const giftCardSelected = !!item.giftCardSelected && !!p?.giftCardEnabled;
     return {
       ...item,
-      giftCardSelected: !!item.giftCardSelected && !!p?.giftCardEnabled,
+      giftCardSelected,
+      // Re-resolve the gift-card mode from the LIVE product/category (never trust the
+      // client / stale cart snapshot) so the order records the correct "name vs message".
+      giftCardMode: giftCardSelected
+        ? resolveGiftCardMode(p?.giftCardMode, p?.category?.giftCardMode)
+        : null,
       customName: p?.customNameEnabled ? String(item.customName || '').trim() || null : null,
     };
   });
@@ -1181,6 +1191,7 @@ async function createOrderCore(userId, params = {}, opts = {}) {
               ? item.selectedOptions
               : Prisma.DbNull,
           giftCardSelected: !!item.giftCardSelected,
+          giftCardMode: item.giftCardMode ?? null,
           customName: item.customName ?? null,
           // Per-line cash arrangement snapshot (PER UNIT — line total is each × quantity).
           // null/false for lines with no cash arrangement.
@@ -1680,6 +1691,7 @@ function mapOrderListRow(order, { includeUser, includeItems, adminAudit }) {
       vatAmount: decimalToNumber(i.vatAmount) ?? 0,
       selectedOptions: i.selectedOptions ?? null,
       giftCardSelected: i.giftCardSelected ?? false,
+      giftCardMode: i.giftCardMode ?? null,
       customName: i.customName ?? null,
       cashArrangementRequested: Boolean(i.cashArrangementRequested),
       cashArrangementAmount: decimalToNumber(i.cashArrangementAmount),
