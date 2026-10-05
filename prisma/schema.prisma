@@ -384,6 +384,17 @@ model ProductZone {
   productId                       String
   zoneId                          String
   deliveryLeadDays                Int?
+  /// ZONE-LEVEL VISIBILITY. true = hide this product from the storefront in this
+  /// zone (listing, search, best-sellers, category pages and its direct page).
+  /// Default false so every existing row — these tables previously existed ONLY
+  /// to carry lead-time / fee overrides — keeps its "override only, still
+  /// visible" meaning. Visibility here is therefore an EXPLICIT OPT-OUT, the
+  /// opposite of the region tables where visibility is row PRESENCE
+  /// (ProductRegion/CategoryRegion). Hiding is best-effort on the catalog (a
+  /// visitor who has not picked a zone yet still sees everything); checkout
+  /// re-checks the resolved zone and refuses the order, which is the hard gate.
+  hidden                          Boolean  @default(false)
+
   // Per-zone override of this product's cash-arrangement fee schedule — highest
   // precedence tier in the chain (see utils/cashArrangementMath.js). Both fields
   // must be set together or neither.
@@ -396,6 +407,7 @@ model ProductZone {
 
   @@id([productId, zoneId])
   @@index([zoneId])
+  @@index([zoneId, hidden])
 }
 
 /// Join: per-DELIVERY-ZONE prep lead override for a category (applies to its products that
@@ -404,6 +416,17 @@ model CategoryZone {
   categoryId                      String
   zoneId                          String
   deliveryLeadDays                Int?
+  /// ZONE-LEVEL VISIBILITY. true = hide this category from the storefront in this
+  /// zone (listing, search, best-sellers, category pages and its direct page).
+  /// Default false so every existing row — these tables previously existed ONLY
+  /// to carry lead-time / fee overrides — keeps its "override only, still
+  /// visible" meaning. Visibility here is therefore an EXPLICIT OPT-OUT, the
+  /// opposite of the region tables where visibility is row PRESENCE
+  /// (ProductRegion/CategoryRegion). Hiding is best-effort on the catalog (a
+  /// visitor who has not picked a zone yet still sees everything); checkout
+  /// re-checks the resolved zone and refuses the order, which is the hard gate.
+  hidden                          Boolean  @default(false)
+
   // Per-zone override of this category's cash-arrangement fee schedule. Both
   // fields must be set together or neither.
   cashArrangementFeeStepAmount    Decimal? @db.Decimal(10, 2)
@@ -415,6 +438,7 @@ model CategoryZone {
 
   @@id([categoryId, zoneId])
   @@index([zoneId])
+  @@index([zoneId, hidden])
 }
 
 model BannerRegion {
