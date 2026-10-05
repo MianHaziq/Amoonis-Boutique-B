@@ -61,6 +61,36 @@ function buildVisibilityWhere({ isStaff, regionId, adminRegionId = null, adminRe
 }
 
 /**
+ * ZONE-level visibility fragment, applied ONLY to models that actually have a zone
+ * join table — Product (`ProductZone`) and Category (`CategoryZone`). It is kept out
+ * of buildVisibilityWhere() on purpose: Section and BannerImage are region-aware but
+ * have NO zone relation, and emitting `zoneLeadDays` in their where clause would make
+ * Prisma throw on an unknown field.
+ *
+ * Semantics are the INVERSE of region visibility. A region is visible by row PRESENCE
+ * (`regions: { some: { regionId } }`), but the zone tables predate this feature and
+ * exist to carry lead-time / fee overrides, where an ABSENT row means "inherit". With
+ * zero rows in them today, presence-based visibility would hide the entire catalog in
+ * every zone. So hiding is an explicit opt-out flag and we match with `none`: content
+ * without a row for this zone stays visible, and only an explicit `hidden: true` row
+ * drops it.
+ *
+ * Returns {} for staff, and {} when the visitor has no zone selected yet — an
+ * un-located browser still sees the full catalog. That is deliberate: catalog hiding
+ * is best-effort, and checkout re-resolves the real delivery zone and refuses the
+ * order, which is the authoritative gate.
+ *
+ * @param {object} opts
+ * @param {boolean} opts.isStaff
+ * @param {string|null} [opts.zoneId] - resolved storefront delivery zone id
+ * @returns {object} Prisma where fragment ({} when not applicable)
+ */
+function buildZoneVisibilityWhere({ isStaff, zoneId = null } = {}) {
+  if (isStaff || !zoneId) return {};
+  return { zoneLeadDays: { none: { zoneId, hidden: true } } };
+}
+
+/**
  * Extra Product `where` fragment that hides products whose CATEGORY is drafted for
  * the ENTIRE store (Category.status = DRAFT + draftScope = ENTIRE_STORE). A HOME_ONLY
  * draft category keeps its products listable in the Shop, so it is NOT excluded here.
@@ -81,13 +111,27 @@ function buildVisibilityWhere({ isStaff, regionId, adminRegionId = null, adminRe
  * @param {string[]|null} [rescueIds]
  * @returns {object} Prisma where fragment
  */
-function buildCategoryVisibilityWhere({ isStaff }, rescueIds = null) {
+function buildCategoryVisibilityWhere({ isStaff, zoneId = null }, rescueIds = null) {
   if (isStaff) return {};
   const hidden = { category: { status: 'DRAFT', draftScope: 'ENTIRE_STORE' } };
+  // A category hidden in this zone takes its products with it, mirroring how an
+  // ENTIRE_STORE draft category cascades. Expressed on the product's `category`
+  // relation so it merges into the same NOT/OR shape as the draft rule.
+  const zoneHiddenCategory = zoneId
+    ? { category: { zoneLeadDays: { some: { zoneId, hidden: true } } } }
+    : null;
+
+  const clauses = [{ NOT: hidden }];
+  if (zoneHiddenCategory) clauses.push({ NOT: zoneHiddenCategory });
+
   if (Array.isArray(rescueIds) && rescueIds.length > 0) {
-    return { OR: [{ NOT: hidden }, { id: { in: rescueIds } }] };
+    // A section-featured product is rescued from the DRAFT-category rule only.
+    // A zone hide is a hard delivery-availability statement, so it is never
+    // rescued — it stays hidden even when a published Section features it.
+    const rescued = { OR: [{ NOT: hidden }, { id: { in: rescueIds } }] };
+    return zoneHiddenCategory ? { AND: [rescued, { NOT: zoneHiddenCategory }] } : rescued;
   }
-  return { NOT: hidden };
+  return clauses.length === 1 ? clauses[0] : { AND: clauses };
 }
 
 /**
@@ -105,7 +149,21 @@ function buildCategoryVisibilityWhere({ isStaff }, rescueIds = null) {
  */
 function buildProductCountSelect(visibility = {}) {
   if (visibility.isStaff) return { products: true };
-  return { products: { where: buildVisibilityWhere(visibility) } };
+  // Zone-hidden products must drop out of the count too, otherwise a category card
+  // reads a higher number than the grid beneath it actually renders.
+  return {
+    products: {
+      where: {
+        ...buildVisibilityWhere(visibility),
+        ...buildZoneVisibilityWhere(visibility),
+      },
+    },
+  };
 }
 
-module.exports = { buildVisibilityWhere, buildCategoryVisibilityWhere, buildProductCountSelect };
+module.exports = {
+  buildVisibilityWhere,
+  buildZoneVisibilityWhere,
+  buildCategoryVisibilityWhere,
+  buildProductCountSelect,
+};
