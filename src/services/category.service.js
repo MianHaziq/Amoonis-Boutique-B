@@ -2,7 +2,7 @@ const prisma = require('../config/db');
 const { autoTranslate, fillBilingualGapsFromTwin } = require('../utils/bilingual');
 const regionService = require('./region.service');
 const productService = require('./product.service');
-const { buildVisibilityWhere, buildProductCountSelect } = require('../utils/regionVisibility');
+const { buildVisibilityWhere, buildZoneVisibilityWhere, buildProductCountSelect } = require('../utils/regionVisibility');
 const { parseDeliveryLeadDays } = require('../utils/deliveryLeadDays');
 const { parseCashArrangementFeeSchedule } = require('../utils/cashArrangementMath');
 const { normalizeGiftCardMode } = require('../utils/giftCardMode');
@@ -24,6 +24,9 @@ const REGION_INCLUDE = {
       deliveryLeadDays: true,
       cashArrangementFeeStepAmount: true,
       cashArrangementFeeMarginPercent: true,
+      // Zone visibility — without this the admin form reopens with every
+      // "hide in zone" box unchecked even though the hide is live.
+      hidden: true,
     },
   },
 };
@@ -140,6 +143,7 @@ function mapCategory(category) {
       deliveryLeadDays: z.deliveryLeadDays ?? null,
       cashArrangementFeeStepAmount: decimalToNumber(z.cashArrangementFeeStepAmount),
       cashArrangementFeeMarginPercent: decimalToNumber(z.cashArrangementFeeMarginPercent),
+      hidden: Boolean(z.hidden),
     }));
   }
   return out;
@@ -182,13 +186,18 @@ function buildCategoryZoneLeadRows(zoneLeadDays) {
       feeStepAmount: entry.cashArrangementFeeStepAmount,
       feeMarginPercent: entry.cashArrangementFeeMarginPercent,
     });
-    if (lead == null && feeSchedule.feeStepAmount == null) continue;
+    // `hidden` alone is a real reason to keep the row: zone VISIBILITY lives on this
+    // same join table, so an entry that only hides the category (no lead/fee override)
+    // must still be stored or the hide would be silently discarded.
+    const hidden = entry.hidden === true;
+    if (lead == null && feeSchedule.feeStepAmount == null && !hidden) continue;
     seen.add(entry.zoneId);
     rows.push({
       zoneId: entry.zoneId,
       deliveryLeadDays: lead,
       cashArrangementFeeStepAmount: feeSchedule.feeStepAmount,
       cashArrangementFeeMarginPercent: feeSchedule.feeMarginPercent,
+      hidden,
     });
   }
   return rows;
@@ -508,7 +517,7 @@ async function deleteCategory(id) {
 
 async function getAllCategories(visibility = {}) {
   const categories = await prisma.category.findMany({
-    where: buildVisibilityWhere(visibility),
+    where: { ...buildVisibilityWhere(visibility), ...buildZoneVisibilityWhere(visibility) },
     // Admin-defined display order first (drag-reorder), newest-first as the
     // tiebreak so pre-existing categories (all sortOrder 0) keep their historical
     // order until an admin reorders. Storefront home grid + menus consume this order.
@@ -528,7 +537,12 @@ async function getCategoryById(id, includeProducts = false, visibility = {}) {
   // Apply the same region + status visibility filter to nested products that
   // section.service.js uses, so non-staff only see PUBLISHED + in-region products
   // and a DRAFT / other-region product never leaks into the storefront.
-  const contentWhere = buildVisibilityWhere(visibility);
+  // Nested products inherit the zone hide too, so a product hidden in this zone
+  // never leaks through a category's embedded product list.
+  const contentWhere = {
+    ...buildVisibilityWhere(visibility),
+    ...buildZoneVisibilityWhere(visibility),
+  };
   const hasFilter = Object.keys(contentWhere).length > 0;
   const isStaff = !!visibility.isStaff;
   const include = {
@@ -558,7 +572,7 @@ async function getCategoryById(id, includeProducts = false, visibility = {}) {
       : {}),
   };
   const category = await prisma.category.findFirst({
-    where: { id, ...buildVisibilityWhere(visibility) },
+    where: { id, ...buildVisibilityWhere(visibility), ...buildZoneVisibilityWhere(visibility) },
     include,
   });
   if (!category) return null;

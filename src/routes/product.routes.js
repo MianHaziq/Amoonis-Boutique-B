@@ -161,6 +161,7 @@ const createValidation = [
   // Per-delivery-zone "ships within N days" override (highest precedence). null clears it.
   body('zoneLeadDays').optional().isArray().withMessage('zoneLeadDays must be an array'),
   body('zoneLeadDays.*.zoneId').isString().trim().notEmpty().withMessage('zoneLeadDays[].zoneId is required'),
+  body('zoneLeadDays.*.hidden').optional().isBoolean().withMessage('zoneLeadDays[].hidden must be a boolean'),
   body('zoneLeadDays.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('zoneLeadDays[].deliveryLeadDays must be a whole number between 0 and 30'),
@@ -356,6 +357,7 @@ const updateValidation = [
   // Per-delivery-zone "ships within N days" override (highest precedence). null clears it.
   body('zoneLeadDays').optional().isArray().withMessage('zoneLeadDays must be an array'),
   body('zoneLeadDays.*.zoneId').isString().trim().notEmpty().withMessage('zoneLeadDays[].zoneId is required'),
+  body('zoneLeadDays.*.hidden').optional().isBoolean().withMessage('zoneLeadDays[].hidden must be a boolean'),
   body('zoneLeadDays.*.deliveryLeadDays')
     .optional({ values: 'null' })
     .isInt({ min: 0, max: 30 }).withMessage('zoneLeadDays[].deliveryLeadDays must be a whole number between 0 and 30'),

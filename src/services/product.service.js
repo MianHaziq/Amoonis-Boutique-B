@@ -2,7 +2,8 @@ const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
 const { autoTranslate, autoTranslateMany, fillBilingualGapsFromTwin } = require('../utils/bilingual');
 const regionService = require('./region.service');
-const { buildVisibilityWhere, buildCategoryVisibilityWhere } = require('../utils/regionVisibility');
+const { buildVisibilityWhere,
+  buildZoneVisibilityWhere, buildCategoryVisibilityWhere } = require('../utils/regionVisibility');
 const {
   parseDeliveryLeadDays,
   resolveDeliveryLeadDays,
@@ -24,6 +25,9 @@ const REGION_INCLUDE = {
       deliveryLeadDays: true,
       cashArrangementFeeStepAmount: true,
       cashArrangementFeeMarginPercent: true,
+      // Zone visibility — without this the admin form reopens with every
+      // "hide in zone" box unchecked even though the hide is live.
+      hidden: true,
     },
   },
 };
@@ -49,13 +53,18 @@ function buildZoneLeadRows(zoneLeadDays) {
       feeStepAmount: entry.cashArrangementFeeStepAmount,
       feeMarginPercent: entry.cashArrangementFeeMarginPercent,
     });
-    if (lead == null && feeSchedule.feeStepAmount == null) continue; // no override at all; don't store a row
+    // `hidden` alone is a real reason to keep the row: zone VISIBILITY lives on this
+    // same join table, so an entry that only hides the item (no lead/fee override)
+    // must still be stored or the hide would be silently discarded.
+    const hidden = entry.hidden === true;
+    if (lead == null && feeSchedule.feeStepAmount == null && !hidden) continue; // nothing to store
     seen.add(entry.zoneId);
     rows.push({
       zoneId: entry.zoneId,
       deliveryLeadDays: lead,
       cashArrangementFeeStepAmount: feeSchedule.feeStepAmount,
       cashArrangementFeeMarginPercent: feeSchedule.feeMarginPercent,
+      hidden,
     });
   }
   return rows;
@@ -351,6 +360,7 @@ function mapProduct(product) {
       deliveryLeadDays: z.deliveryLeadDays ?? null,
       cashArrangementFeeStepAmount: decimalToNumber(z.cashArrangementFeeStepAmount),
       cashArrangementFeeMarginPercent: decimalToNumber(z.cashArrangementFeeMarginPercent),
+      hidden: Boolean(z.hidden),
     }));
   }
   return out;
@@ -1720,6 +1730,7 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
   const skip = (safePage - 1) * take;
   const where = {
     ...buildVisibilityWhere(visibility),
+    ...buildZoneVisibilityWhere(visibility),
     ...buildCategoryVisibilityWhere(visibility, rescueIds),
     ...(categoryId ? { categoryId } : {}),
   };
@@ -1833,6 +1844,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
   const skip = (safePage - 1) * take;
   const where = {
     ...buildVisibilityWhere(visibility),
+    ...buildZoneVisibilityWhere(visibility),
     ...buildCategoryVisibilityWhere(visibility),
   };
 
@@ -1956,6 +1968,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}, c
   const contains = { contains: q, mode: 'insensitive' };
   const where = {
     ...buildVisibilityWhere(visibility),
+    ...buildZoneVisibilityWhere(visibility),
     ...buildCategoryVisibilityWhere(visibility),
     ...(categoryId ? { categoryId } : {}),
     OR: [
@@ -2005,7 +2018,12 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}, c
 
 async function getProductById(id, visibility = {}, rescueIds = null) {
   const product = await prisma.product.findFirst({
-    where: { id, ...buildVisibilityWhere(visibility), ...buildCategoryVisibilityWhere(visibility, rescueIds) },
+    where: {
+      id,
+      ...buildVisibilityWhere(visibility),
+      ...buildZoneVisibilityWhere(visibility),
+      ...buildCategoryVisibilityWhere(visibility, rescueIds),
+    },
     include: {
       category: { select: productCategorySelect(visibility) },
       images: { orderBy: { sortOrder: 'asc' } },
