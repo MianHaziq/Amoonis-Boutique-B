@@ -758,6 +758,32 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // the check must be against the summed quantity (matches the atomic reservation's
   // aggregateOrderLineQtyByProduct). A per-line check would let two variant lines
   // each pass yet together exceed stock.
+  // ZONE AVAILABILITY — the AUTHORITATIVE gate. The storefront also hides zone-hidden
+  // content while browsing, but that is deliberately best-effort: a visitor who had not
+  // yet picked a zone, a cart filled before the item was hidden, or a direct API call can
+  // all carry a hidden product this far. Re-check against the order's RESOLVED delivery
+  // zone and refuse. Skipped when the order has no zone (regions without zones configured).
+  let zoneHiddenProductIds = new Set();
+  let zoneHiddenCategoryIds = new Set();
+  if (orderZoneId) {
+    const [hiddenProductRows, hiddenCategoryRows] = await Promise.all([
+      orderProductIds.length
+        ? prisma.productZone.findMany({
+            where: { zoneId: orderZoneId, hidden: true, productId: { in: orderProductIds } },
+            select: { productId: true },
+          })
+        : Promise.resolve([]),
+      orderCategoryIds.length
+        ? prisma.categoryZone.findMany({
+            where: { zoneId: orderZoneId, hidden: true, categoryId: { in: orderCategoryIds } },
+            select: { categoryId: true },
+          })
+        : Promise.resolve([]),
+    ]);
+    zoneHiddenProductIds = new Set(hiddenProductRows.map((r) => r.productId));
+    zoneHiddenCategoryIds = new Set(hiddenCategoryRows.map((r) => r.categoryId));
+  }
+
   const outOfStock = [];
   for (const [productId, requested] of aggregateOrderLineQtyByProduct(lineItems)) {
     const p = productById.get(productId);
@@ -776,6 +802,17 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     const released = (p.sectionProducts?.length ?? 0) > 0;
     if (pComingSoon || (cComingSoon && !released)) {
       return { order: null, error: `${p.title} is coming soon and cannot be ordered yet` };
+    }
+    // Hidden in the delivery zone, either directly or through its category.
+    if (
+      orderZoneId &&
+      (zoneHiddenProductIds.has(p.id) ||
+        (p.categoryId && zoneHiddenCategoryIds.has(p.categoryId)))
+    ) {
+      return {
+        order: null,
+        error: `${p.title} is not available for delivery to the selected area`,
+      };
     }
     if (p.quantity < requested) {
       outOfStock.push({
