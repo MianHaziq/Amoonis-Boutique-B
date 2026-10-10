@@ -27,6 +27,7 @@ const REGION_INCLUDE = {
       // Zone visibility — without this the admin form reopens with every
       // "hide in zone" box unchecked even though the hide is live.
       hidden: true,
+      comingSoon: true,
     },
   },
 };
@@ -34,8 +35,16 @@ const REGION_INCLUDE = {
 // Storefront (non-staff) include: just the requesting region's own coming-soon row
 // (no nested `region` tag, so mapCategory takes the storefront overlay branch). Empty
 // object when there's no region context (mapCategory then keeps the global flag).
-function categoryRegionComingSoonInclude(regionId) {
-  return regionId ? { regions: { where: { regionId }, select: { comingSoon: true, onSale: true } } } : {};
+function categoryRegionComingSoonInclude(regionId, zoneId = null) {
+  return {
+    ...(regionId
+      ? { regions: { where: { regionId }, select: { comingSoon: true, onSale: true } } }
+      : {}),
+    // This zone's teaser row. Folded into `comingSoon` by mapCategory so the category
+    // card shows the COMING SOON overlay (and becomes non-clickable) in that zone, and
+    // the flag cascades to the category's products through the products adapter.
+    ...(zoneId ? { zoneLeadDays: { where: { zoneId }, select: { comingSoon: true } } } : {}),
+  };
 }
 
 /** Trim a label to null when blank/absent. */
@@ -118,7 +127,11 @@ function mapCategory(category) {
     if (!hasRegionTags) {
       // Storefront: overlay THIS region's coming-soon + on-sale onto the returned flags,
       // so a category can be a teaser / on sale in one region and not another.
-      out.comingSoon = Boolean(regions[0]?.comingSoon);
+      // The zone teaser ORs on top of the region one — a zone can only ADD a teaser.
+      const zoneComingSoon = Array.isArray(zoneLeadDays)
+        ? zoneLeadDays.some((zrow) => zrow.comingSoon)
+        : false;
+      out.comingSoon = Boolean(regions[0]?.comingSoon) || zoneComingSoon;
       out.onSale = Boolean(regions[0]?.onSale);
       return out;
     }
@@ -144,6 +157,7 @@ function mapCategory(category) {
       cashArrangementFeeStepAmount: decimalToNumber(z.cashArrangementFeeStepAmount),
       cashArrangementFeeMarginPercent: decimalToNumber(z.cashArrangementFeeMarginPercent),
       hidden: Boolean(z.hidden),
+      comingSoon: Boolean(z.comingSoon),
     }));
   }
   return out;
@@ -190,7 +204,8 @@ function buildCategoryZoneLeadRows(zoneLeadDays) {
     // same join table, so an entry that only hides the category (no lead/fee override)
     // must still be stored or the hide would be silently discarded.
     const hidden = entry.hidden === true;
-    if (lead == null && feeSchedule.feeStepAmount == null && !hidden) continue;
+    const comingSoon = entry.comingSoon === true;
+    if (lead == null && feeSchedule.feeStepAmount == null && !hidden && !comingSoon) continue;
     seen.add(entry.zoneId);
     rows.push({
       zoneId: entry.zoneId,
@@ -198,6 +213,7 @@ function buildCategoryZoneLeadRows(zoneLeadDays) {
       cashArrangementFeeStepAmount: feeSchedule.feeStepAmount,
       cashArrangementFeeMarginPercent: feeSchedule.feeMarginPercent,
       hidden,
+      comingSoon,
     });
   }
   return rows;
@@ -523,7 +539,7 @@ async function getAllCategories(visibility = {}) {
     // order until an admin reorders. Storefront home grid + menus consume this order.
     orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
     include: {
-      ...(visibility.isStaff ? REGION_INCLUDE : categoryRegionComingSoonInclude(visibility.regionId)),
+      ...(visibility.isStaff ? REGION_INCLUDE : categoryRegionComingSoonInclude(visibility.regionId, visibility.zoneId)),
       // Storefront count reflects only PUBLISHED + in-region products (not DRAFT /
       // other-region), so the category-card badge matches the shop grid. Staff get
       // the true total. See buildProductCountSelect.
@@ -546,7 +562,7 @@ async function getCategoryById(id, includeProducts = false, visibility = {}) {
   const hasFilter = Object.keys(contentWhere).length > 0;
   const isStaff = !!visibility.isStaff;
   const include = {
-    ...(visibility.isStaff ? REGION_INCLUDE : categoryRegionComingSoonInclude(visibility.regionId)),
+    ...(visibility.isStaff ? REGION_INCLUDE : categoryRegionComingSoonInclude(visibility.regionId, visibility.zoneId)),
     // Storefront count reflects only PUBLISHED + in-region products; staff get the
     // true total. Matches the shop grid / "load more" total. See buildProductCountSelect.
     _count: { select: buildProductCountSelect(visibility) },

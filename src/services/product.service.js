@@ -28,6 +28,7 @@ const REGION_INCLUDE = {
       // Zone visibility — without this the admin form reopens with every
       // "hide in zone" box unchecked even though the hide is live.
       hidden: true,
+      comingSoon: true,
     },
   },
 };
@@ -57,7 +58,8 @@ function buildZoneLeadRows(zoneLeadDays) {
     // same join table, so an entry that only hides the item (no lead/fee override)
     // must still be stored or the hide would be silently discarded.
     const hidden = entry.hidden === true;
-    if (lead == null && feeSchedule.feeStepAmount == null && !hidden) continue; // nothing to store
+    const comingSoon = entry.comingSoon === true;
+    if (lead == null && feeSchedule.feeStepAmount == null && !hidden && !comingSoon) continue; // nothing to store
     seen.add(entry.zoneId);
     rows.push({
       zoneId: entry.zoneId,
@@ -65,6 +67,7 @@ function buildZoneLeadRows(zoneLeadDays) {
       cashArrangementFeeStepAmount: feeSchedule.feeStepAmount,
       cashArrangementFeeMarginPercent: feeSchedule.feeMarginPercent,
       hidden,
+      comingSoon,
     });
   }
   return rows;
@@ -344,6 +347,11 @@ function mapProduct(product) {
       catComingSoon = catRegions[0]?.comingSoon ?? catRest.comingSoon;
       catOnSale = catRegions[0]?.onSale ?? catRest.onSale;
       out.category = catRest;
+      // The category's per-zone teaser ORs on top of its per-region one.
+      if (Array.isArray(catRest.zoneLeadDays)) {
+        if (catRest.zoneLeadDays.some((zrow) => zrow.comingSoon)) catComingSoon = true;
+        delete catRest.zoneLeadDays;
+      }
     }
     out.category = {
       ...out.category,
@@ -355,13 +363,26 @@ function mapProduct(product) {
   // REGION_INCLUDE) — decimal fields need explicit conversion since they're no longer
   // passed through the raw `...rest` spread above.
   if (Array.isArray(zoneLeadDays)) {
-    out.zoneLeadDays = zoneLeadDays.map((z) => ({
-      zoneId: z.zoneId,
-      deliveryLeadDays: z.deliveryLeadDays ?? null,
-      cashArrangementFeeStepAmount: decimalToNumber(z.cashArrangementFeeStepAmount),
-      cashArrangementFeeMarginPercent: decimalToNumber(z.cashArrangementFeeMarginPercent),
-      hidden: Boolean(z.hidden),
-    }));
+    // STOREFRONT reads select only `comingSoon` for the ONE selected zone (see
+    // regionPriceInclude), so the rows carry no zoneId. Fold that teaser into the
+    // region row — the zone tier can only ADD a teaser, never clear one — and drop
+    // the raw rows rather than emitting a half-empty admin shape.
+    const isStorefrontZoneRow = zoneLeadDays.some((zrow) => zrow.zoneId === undefined);
+    if (isStorefrontZoneRow) {
+      if (zoneLeadDays.some((zrow) => zrow.comingSoon)) {
+        out._regionPriceRow = { ...(out._regionPriceRow || {}), comingSoon: true };
+      }
+      delete out.zoneLeadDays;
+    } else {
+      out.zoneLeadDays = zoneLeadDays.map((z) => ({
+        zoneId: z.zoneId,
+        deliveryLeadDays: z.deliveryLeadDays ?? null,
+        cashArrangementFeeStepAmount: decimalToNumber(z.cashArrangementFeeStepAmount),
+        cashArrangementFeeMarginPercent: decimalToNumber(z.cashArrangementFeeMarginPercent),
+        hidden: Boolean(z.hidden),
+        comingSoon: Boolean(z.comingSoon),
+      }));
+    }
   }
   return out;
 }
@@ -396,7 +417,7 @@ function applyRegionCurrency(mapped) {
 
 // Storefront (non-staff) include: the requesting region's own price + coming-soon
 // override row only — no nested region tag, distinguishing it from REGION_INCLUDE.
-function regionPriceInclude(regionId) {
+function regionPriceInclude(regionId, zoneId = null) {
   // "Released from coming-soon": product curated into a PUBLISHED section flagged to sell
   // coming-soon products — mapProduct then suppresses the category cascade for it. `take:1`
   // is enough (presence = released). Storefront-only (staff sees the global flag).
@@ -407,12 +428,18 @@ function regionPriceInclude(regionId) {
       select: { id: true },
     },
   };
+  // The zone's own teaser row, when a zone is selected. Only `comingSoon` is read
+  // here: visibility is handled by the where-clause, not by this include.
+  const zoneRow = zoneId
+    ? { zoneLeadDays: { where: { zoneId }, select: { comingSoon: true } } }
+    : {};
   return regionId
     ? {
         ...released,
+        ...zoneRow,
         regions: { where: { regionId }, select: { regionId: true, price: true, discountedPrice: true, comingSoon: true, onSale: true } },
       }
-    : released;
+    : { ...released, ...zoneRow };
 }
 
 /**
@@ -428,7 +455,15 @@ function productCategorySelect(visibility = {}) {
     onSale: true, saleLabel: true, saleLabel_ar: true,
   };
   if (visibility.isStaff || !visibility.regionId) return base;
-  return { ...base, regions: { where: { regionId: visibility.regionId }, select: { comingSoon: true, onSale: true } } };
+  return {
+    ...base,
+    regions: { where: { regionId: visibility.regionId }, select: { comingSoon: true, onSale: true } },
+    // Category's per-zone teaser, folded into category.comingSoon below so the
+    // cascade reaches products the same way the per-region flag does.
+    ...(visibility.zoneId
+      ? { zoneLeadDays: { where: { zoneId: visibility.zoneId }, select: { comingSoon: true } } }
+      : {}),
+  };
 }
 
 /**
@@ -1747,7 +1782,7 @@ async function getAllProductsOrdered(page, limit, categoryId, visibility, orderB
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
         variants: variantInclude(visibility),
-        ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
+        ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId, visibility.zoneId)),
       },
     }),
     prisma.product.count({ where }),
@@ -1910,7 +1945,7 @@ async function getBestSellers(page = 1, limit = 10, visibility = {}) {
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
         variants: variantInclude(visibility),
-        ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
+        ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId, visibility.zoneId)),
       },
     });
     const orderIndex = new Map(pageIds.map((id, i) => [id, i]));
@@ -1994,7 +2029,7 @@ async function searchProducts(rawQuery, page = 1, limit = 10, visibility = {}, c
         descriptions: { orderBy: { sortOrder: 'asc' } },
         productOptions: { orderBy: { sortOrder: 'asc' } },
         variants: variantInclude(visibility),
-        ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
+        ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId, visibility.zoneId)),
       },
     }),
     prisma.product.count({ where }),
@@ -2030,7 +2065,7 @@ async function getProductById(id, visibility = {}, rescueIds = null) {
       descriptions: { orderBy: { sortOrder: 'asc' } },
       productOptions: { orderBy: { sortOrder: 'asc' } },
       variants: variantInclude(visibility),
-      ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId)),
+      ...(visibility.isStaff ? REGION_INCLUDE : regionPriceInclude(visibility.regionId, visibility.zoneId)),
     },
   });
   if (!product) return null;
