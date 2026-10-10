@@ -765,23 +765,41 @@ async function createOrderCore(userId, params = {}, opts = {}) {
   // zone and refuse. Skipped when the order has no zone (regions without zones configured).
   let zoneHiddenProductIds = new Set();
   let zoneHiddenCategoryIds = new Set();
+  let zoneComingSoonProductIds = new Set();
+  let zoneComingSoonCategoryIds = new Set();
   if (orderZoneId) {
     const [hiddenProductRows, hiddenCategoryRows] = await Promise.all([
       orderProductIds.length
         ? prisma.productZone.findMany({
-            where: { zoneId: orderZoneId, hidden: true, productId: { in: orderProductIds } },
-            select: { productId: true },
+            where: {
+              zoneId: orderZoneId,
+              productId: { in: orderProductIds },
+              OR: [{ hidden: true }, { comingSoon: true }],
+            },
+            select: { productId: true, hidden: true, comingSoon: true },
           })
         : Promise.resolve([]),
       orderCategoryIds.length
         ? prisma.categoryZone.findMany({
-            where: { zoneId: orderZoneId, hidden: true, categoryId: { in: orderCategoryIds } },
-            select: { categoryId: true },
+            where: {
+              zoneId: orderZoneId,
+              categoryId: { in: orderCategoryIds },
+              OR: [{ hidden: true }, { comingSoon: true }],
+            },
+            select: { categoryId: true, hidden: true, comingSoon: true },
           })
         : Promise.resolve([]),
     ]);
-    zoneHiddenProductIds = new Set(hiddenProductRows.map((r) => r.productId));
-    zoneHiddenCategoryIds = new Set(hiddenCategoryRows.map((r) => r.categoryId));
+    zoneHiddenProductIds = new Set(hiddenProductRows.filter((r) => r.hidden).map((r) => r.productId));
+    zoneHiddenCategoryIds = new Set(hiddenCategoryRows.filter((r) => r.hidden).map((r) => r.categoryId));
+    // A per-zone teaser blocks ordering exactly like the global/per-region flag:
+    // the item is visible in this zone but not sellable to it.
+    zoneComingSoonProductIds = new Set(
+      hiddenProductRows.filter((r) => r.comingSoon).map((r) => r.productId)
+    );
+    zoneComingSoonCategoryIds = new Set(
+      hiddenCategoryRows.filter((r) => r.comingSoon).map((r) => r.categoryId)
+    );
   }
 
   const outOfStock = [];
@@ -800,7 +818,12 @@ async function createOrderCore(userId, params = {}, opts = {}) {
       : Boolean(p.category?.comingSoon);
     // Released products (curated into a "sell coming-soon" section) ignore the category cascade.
     const released = (p.sectionProducts?.length ?? 0) > 0;
-    if (pComingSoon || (cComingSoon && !released)) {
+    // Per-zone teaser, ORed on top of the global/per-region flags. A released
+    // product still ignores the CATEGORY cascade, matching the rule above.
+    const pZoneComingSoon = orderZoneId && zoneComingSoonProductIds.has(p.id);
+    const cZoneComingSoon =
+      orderZoneId && p.categoryId && zoneComingSoonCategoryIds.has(p.categoryId);
+    if (pComingSoon || pZoneComingSoon || ((cComingSoon || cZoneComingSoon) && !released)) {
       return { order: null, error: `${p.title} is coming soon and cannot be ordered yet` };
     }
     // Hidden in the delivery zone, either directly or through its category.

@@ -394,6 +394,12 @@ model ProductZone {
   /// visitor who has not picked a zone yet still sees everything); checkout
   /// re-checks the resolved zone and refuses the order, which is the hard gate.
   hidden                          Boolean  @default(false)
+  /// Per-zone "coming soon" teaser for this product — visible in this zone but not
+  /// orderable here. Mirrors ProductRegion/CategoryRegion.comingSoon one tier down.
+  /// The effective state in a zone is the OR of the global, per-region and per-zone
+  /// flags (and, for a product, its category's at each of those tiers), so a zone can
+  /// only ever ADD a teaser, never un-tease something already coming soon above it.
+  comingSoon                      Boolean  @default(false)
 
   // Per-zone override of this product's cash-arrangement fee schedule — highest
   // precedence tier in the chain (see utils/cashArrangementMath.js). Both fields
@@ -426,6 +432,12 @@ model CategoryZone {
   /// visitor who has not picked a zone yet still sees everything); checkout
   /// re-checks the resolved zone and refuses the order, which is the hard gate.
   hidden                          Boolean  @default(false)
+  /// Per-zone "coming soon" teaser for this category — visible in this zone but not
+  /// orderable here. Mirrors ProductRegion/CategoryRegion.comingSoon one tier down.
+  /// The effective state in a zone is the OR of the global, per-region and per-zone
+  /// flags (and, for a product, its category's at each of those tiers), so a zone can
+  /// only ever ADD a teaser, never un-tease something already coming soon above it.
+  comingSoon                      Boolean  @default(false)
 
   // Per-zone override of this category's cash-arrangement fee schedule. Both
   // fields must be set together or neither.

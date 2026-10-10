@@ -117,8 +117,18 @@ function buildCategoryVisibilityWhere({ isStaff, zoneId = null }, rescueIds = nu
   // A category hidden in this zone takes its products with it, mirroring how an
   // ENTIRE_STORE draft category cascades. Expressed on the product's `category`
   // relation so it merges into the same NOT/OR shape as the draft rule.
+  // `hidden` removes the category outright; `comingSoon` presents the CATEGORY as a
+  // teaser and takes its products out of every listing with it (the category card still
+  // renders, badged and non-clickable). Both therefore drop the products here, which is
+  // what makes the rule hold for payloads that embed products — a Section's nested
+  // products never carry the folded category flag, so a frontend-only filter would miss
+  // them. A product's OWN teaser is deliberately NOT covered: that one stays listed.
   const zoneHiddenCategory = zoneId
-    ? { category: { zoneLeadDays: { some: { zoneId, hidden: true } } } }
+    ? {
+        category: {
+          zoneLeadDays: { some: { zoneId, OR: [{ hidden: true }, { comingSoon: true }] } },
+        },
+      }
     : null;
 
   const clauses = [{ NOT: hidden }];
