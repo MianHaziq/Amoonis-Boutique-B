@@ -295,7 +295,18 @@ async function augmentDynamicSection(rawSection, visibility = {}) {
       select: { productId: true },
     });
     const skipIds = [...curatedIds, ...excludedRows.map((r) => r.productId)];
-    const excludeWhere = { ...buildVisibilityWhere(visibility), id: { notIn: skipIds } };
+    // The dynamic fill must honour the SAME visibility the rest of the storefront does,
+    // not just region + published. Without the zone and category rules a product hidden
+    // (or made a teaser) in this zone is pulled straight back into the rail — and worse,
+    // sectionInclude having already filtered a CURATED pick removes it from `curatedIds`,
+    // so it is no longer skipped here and the fill re-adds the very product that was
+    // just excluded.
+    const dynamicVisibilityWhere = {
+      ...buildVisibilityWhere(visibility),
+      ...buildZoneVisibilityWhere(visibility),
+      ...buildCategoryVisibilityWhere(visibility),
+    };
+    const excludeWhere = { ...dynamicVisibilityWhere, id: { notIn: skipIds } };
 
     let extraIds = [];
     if (rawSection.kind === 'NEW_ARRIVALS') {
@@ -317,7 +328,7 @@ async function augmentDynamicSection(rawSection, visibility = {}) {
         // product that sold well may since have been unpublished/deleted/moved out
         // of this region, so re-check current visibility before trusting the ranking.
         const visible = await prisma.product.findMany({
-          where: { ...buildVisibilityWhere(visibility), id: { in: rankedIds } },
+          where: { ...dynamicVisibilityWhere, id: { in: rankedIds } },
           select: { id: true },
         });
         const visibleSet = new Set(visible.map((p) => p.id));
@@ -326,8 +337,10 @@ async function augmentDynamicSection(rawSection, visibility = {}) {
     }
     if (extraIds.length === 0) return rawSection;
 
+    // Re-assert visibility on the final fetch too: `extraIds` is only as trustworthy as
+    // the query that produced it, and this is the row set actually returned to the client.
     const extraProducts = await prisma.product.findMany({
-      where: { id: { in: extraIds } },
+      where: { ...dynamicVisibilityWhere, id: { in: extraIds } },
       include: sectionProductInclude(visibility.isStaff),
     });
     const byId = new Map(extraProducts.map((p) => [p.id, p]));
