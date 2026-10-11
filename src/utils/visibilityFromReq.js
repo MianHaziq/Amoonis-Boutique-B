@@ -11,6 +11,7 @@
  * X-Region header), so an admin whose client always sends X-Region still sees all
  * regions by default in the panel.
  */
+const prisma = require('../config/db');
 const regionService = require('../services/region.service');
 const { resolveListRegionFilter } = require('./regionScope');
 
@@ -64,7 +65,33 @@ async function visibilityFromReq(req) {
     // zone-accurate delivery-days estimate (zone override / zone standard) on browse.
     // Validated in product.service against the region; a stale/foreign id just falls back
     // to region-level resolution. Never used to filter visibility, only for the estimate.
-    const zoneId = req.query?.zoneId ? String(req.query.zoneId).trim() : null;
+    // Selected delivery zone. Two sources, in priority order:
+    //   1. ?zoneId=<uuid>  — explicit, used by the product page for its estimate.
+    //   2. X-Zone: <name>  — the storefront cookie holds the zone NAME (not an id),
+    //      so the header carries the name and we resolve it within THIS region. This
+    //      mirrors X-Region and means every catalog read is zone-aware without each
+    //      call site having to thread a zone through.
+    // Drives the delivery-days estimate AND zone visibility (buildZoneVisibilityWhere).
+    // An unknown/foreign value resolves to null, which simply disables zone filtering
+    // rather than hiding anything — checkout re-validates the real zone regardless.
+    let zoneId = req.query?.zoneId ? String(req.query.zoneId).trim() : null;
+    if (!zoneId && regionId) {
+      // Zone NAME from either the X-Zone header (browser requests, set by the http
+      // interceptor) or ?zone= (server-rendered requests, which carry no cookies to
+      // the API — mirrors how `region` travels as both a header and a query param).
+      const rawZone = req.query?.zone
+        ? String(req.query.zone).trim()
+        : req.headers?.['x-zone']
+          ? String(req.headers['x-zone']).trim()
+          : '';
+      if (rawZone) {
+        const zone = await prisma.deliveryZone.findFirst({
+          where: { regionId, isActive: true, name: { equals: rawZone, mode: 'insensitive' } },
+          select: { id: true },
+        });
+        zoneId = zone?.id || null;
+      }
+    }
     if (zoneId) opts.zoneId = zoneId;
   }
 

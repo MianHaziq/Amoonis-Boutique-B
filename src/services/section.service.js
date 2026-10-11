@@ -7,7 +7,12 @@ const prisma = require('../config/db');
 const productService = require('./product.service');
 const regionService = require('./region.service');
 const { autoTranslate } = require('../utils/bilingual');
-const { buildVisibilityWhere, buildProductCountSelect } = require('../utils/regionVisibility');
+const {
+  buildVisibilityWhere,
+  buildZoneVisibilityWhere,
+  buildCategoryVisibilityWhere,
+  buildProductCountSelect,
+} = require('../utils/regionVisibility');
 
 const SECTION_BILINGUAL = [{ src: 'title', dst: 'title_ar' }];
 
@@ -118,8 +123,21 @@ function sectionProductInclude(isStaff) {
  * never leaks into a Saudi user's view through a multi-region section.
  */
 function sectionInclude(visibility = {}) {
-  const contentWhere = buildVisibilityWhere(visibility);
-  const hasFilter = Object.keys(contentWhere).length > 0;
+  // A Section itself has no zone relation, but the products and categories nested
+  // inside it do — and without this a section is a side door around zone hiding:
+  // the storefront renders a hidden product straight from the section payload.
+  // Products additionally inherit their CATEGORY's zone hide (same cascade the
+  // product listing applies).
+  const baseWhere = buildVisibilityWhere(visibility);
+  const zoneWhere = buildZoneVisibilityWhere(visibility);
+  const productContentWhere = {
+    ...baseWhere,
+    ...zoneWhere,
+    ...buildCategoryVisibilityWhere(visibility),
+  };
+  const categoryContentWhere = { ...baseWhere, ...zoneWhere };
+  const hasProductFilter = Object.keys(productContentWhere).length > 0;
+  const hasCategoryFilter = Object.keys(categoryContentWhere).length > 0;
   const isStaff = !!visibility.isStaff;
   // Region tags are only loaded for staff reads. The nested visibility WHERE (region +
   // published filtering of products/categories) always applies for storefront so a
@@ -136,7 +154,7 @@ function sectionInclude(visibility = {}) {
       // and are read separately (getSectionEditorPreview) for the admin's excluded list.
       where: {
         excluded: false,
-        ...(hasFilter ? { product: contentWhere } : {}),
+        ...(hasProductFilter ? { product: productContentWhere } : {}),
       },
       include: {
         product: {
@@ -146,7 +164,7 @@ function sectionInclude(visibility = {}) {
     },
     categories: {
       orderBy: { sortOrder: 'asc' },
-      ...(hasFilter ? { where: { category: contentWhere } } : {}),
+      ...(hasCategoryFilter ? { where: { category: categoryContentWhere } } : {}),
       // CAT-4: include the live product _count so the section's per-category product
       // total reflects reality instead of the denormalized (drift-prone) totalProducts.
       include: {
