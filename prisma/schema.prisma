@@ -74,6 +74,13 @@ model Region {
   // online payment is on = effectively no online method (storefront falls back to COD).
   applePayEnabled                Boolean  @default(true)
   cardPaymentEnabled             Boolean  @default(true)
+  // Whether checkout in this region collects — and REQUIRES — the Saudi National Address
+  // SHORT ADDRESS code (Order.shippingShortAddress, 4 letters + 4 digits). Opt-in per region
+  // (default false): only Saudi Arabia needs it, so turn it on for the SA region and leave it
+  // off everywhere else. When false, the storefront hides the field and checkout never
+  // requires it; when true, the field is shown and rejected if empty/malformed. Defaults to
+  // false so every existing non-Saudi region stops being blocked by this Saudi-specific field.
+  shortAddressEnabled            Boolean  @default(false)
   // ISO 3166-1 alpha-2 code (e.g. "AE", "SA") — renders the region's flag in the
   // storefront's country/region pickers. Null shows a neutral placeholder until
   // an admin sets it (deliberately not required — regions worked without a flag
