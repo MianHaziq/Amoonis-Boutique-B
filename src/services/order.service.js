@@ -472,11 +472,18 @@ async function createOrderCore(userId, params = {}, opts = {}) {
     };
   }
 
-  // Short address is validated up-front (before any stock/promo work) so a malformed
-  // code fails fast with a clear message rather than mid-transaction.
+  // Short address (Saudi National Address short code) is validated up-front (before any
+  // stock/promo work) so a malformed code fails fast with a clear message rather than
+  // mid-transaction. Whether it is REQUIRED is a per-region admin toggle
+  // (Region.shortAddressEnabled): only Saudi Arabia needs it, so other regions must not be
+  // blocked by an empty value. When the order's region has the toggle on, an empty value is
+  // rejected here; the format check below applies to any non-empty value regardless of region.
   const shortAddressResult = normalizeShortAddress(shortAddress);
   if (shortAddressResult.error) {
     return { order: null, error: shortAddressResult.error };
+  }
+  if (orderRegion?.shortAddressEnabled && shortAddressResult.value == null) {
+    return { order: null, error: 'shortAddress is required' };
   }
 
   // Resolve the shipping address: a saved addressId or an inline shippingAddress.

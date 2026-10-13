@@ -29,17 +29,13 @@ const SHORT_ADDRESS_PATTERN = /^[A-Za-z]{4}[\s-]?[0-9]{4}$/;
 const SHORT_ADDRESS_MESSAGE =
   'shortAddress must be 4 letters followed by 4 digits (e.g. JHRC3674)';
 
-// Required on the WEB checkout flows (cart + guest) — the storefront always collects it.
-const shortAddressRequired = body('shortAddress')
-  .trim()
-  .notEmpty()
-  .withMessage('shortAddress is required')
-  .bail()
-  .matches(SHORT_ADDRESS_PATTERN)
-  .withMessage(SHORT_ADDRESS_MESSAGE);
-
-// Format-checked but OPTIONAL on buy-now: that endpoint is used by the mobile app, which
-// predates this field — requiring it here would break existing clients.
+// Format-checked but OPTIONAL at the route layer on EVERY flow. Whether the field is
+// actually REQUIRED is decided per-region in the service (Region.shortAddressEnabled):
+// the Saudi National Address short code is only needed in Saudi Arabia, so a static
+// "always required" rule here would wrongly block checkout in UAE and every other region.
+// The service returns a clear "shortAddress is required" error when the order's region has
+// the toggle on and the value is empty. buy-now (mobile) was already optional for the same
+// reason (older clients predate the field).
 const shortAddressOptional = body('shortAddress')
   .optional({ nullable: true, checkFalsy: true })
   .trim()
@@ -188,8 +184,9 @@ const checkoutBody = [
   body('shippingAddress.area').optional().trim(),
   body('shippingAddress.deliveryZoneId').optional({ checkFalsy: true }).isUUID().withMessage('deliveryZoneId must be a valid id'),
   // Order-level (NOT nested in shippingAddress) so it is captured the same way whether
-  // the customer picked a saved address or typed a new one.
-  shortAddressRequired,
+  // the customer picked a saved address or typed a new one. Format-only here; the service
+  // enforces required-ness per region (Region.shortAddressEnabled).
+  shortAddressOptional,
   // Cash arrangement for a CART checkout is per-line and stored ON the cart (set at
   // add-to-cart time) — it is NOT accepted in the checkout body. See cart.routes.js.
 ];
@@ -335,7 +332,8 @@ const guestCheckoutBody = [
   body('shippingAddress.country').optional({ nullable: true }).trim(),
   body('shippingAddress.area').trim().notEmpty().withMessage('Area is required'),
   body('shippingAddress.deliveryZoneId').optional({ checkFalsy: true }).isUUID().withMessage('deliveryZoneId must be a valid id'),
-  shortAddressRequired,
+  // Format-only here; the service enforces required-ness per region (Region.shortAddressEnabled).
+  shortAddressOptional,
 ];
 
 router.post(
