@@ -48,6 +48,21 @@ function buildBoss() {
     // Keep the job pool small — Prisma already holds its own pool against the same
     // database, and Railway Postgres has a modest connection ceiling.
     max: Math.max(2, parseInt(process.env.PGBOSS_POOL_MAX || '4', 10)),
+    // Connection resilience against Railway's Postgres proxy (gondola.proxy.rlwy.net),
+    // which silently drops idle TCP connections. pg-boss forwards every option below to
+    // its `pg.Pool`. Without these, an idle pooled client is killed by the proxy and the
+    // driver surfaces it as the recurring "Connection terminated unexpectedly" error.
+    //   - keepAlive: send TCP keepalive probes so a quiet-but-live socket isn't treated
+    //     as idle and reaped by the proxy.
+    //   - idleTimeoutMillis: have pg close idle clients CLEANLY after 30s — before the
+    //     proxy's own (longer) idle cut-off can kill them mid-air. A reaped client throws;
+    //     a client we close ourselves does not.
+    //   - connectionTimeoutMillis: fail a stalled connect in 10s instead of hanging.
+    // The pool recreates clients on demand, so a lower idle ceiling costs nothing here.
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
+    idleTimeoutMillis: Math.max(1000, parseInt(process.env.PGBOSS_IDLE_TIMEOUT_MS || '30000', 10)),
+    connectionTimeoutMillis: Math.max(1000, parseInt(process.env.PGBOSS_CONNECT_TIMEOUT_MS || '10000', 10)),
     // Archive completed jobs after a day, purge the archive after a week. Enough
     // history for the admin UI without growing the table unbounded.
     archiveCompletedAfterSeconds: 60 * 60 * 24,
@@ -89,7 +104,20 @@ async function start() {
   startPromise = (async () => {
     try {
       boss = buildBoss();
-      boss.on('error', (err) => console.error('[jobs] pg-boss error:', err.message));
+      // pg-boss re-emits pool-level errors here. A dropped idle connection (the Railway
+      // proxy reaping a socket) arrives as a transient "Connection terminated unexpectedly"
+      // / ECONNRESET — the pool transparently replaces the client and work continues, so
+      // log it as a non-fatal warning rather than an alarming error. Anything else is a
+      // real problem and stays at error level.
+      boss.on('error', (err) => {
+        const msg = err?.message || String(err);
+        const transient = /terminated unexpectedly|ECONNRESET|Connection ended|server closed the connection/i.test(msg);
+        if (transient) {
+          console.warn('[jobs] pg-boss transient pool reconnect (non-fatal):', msg);
+        } else {
+          console.error('[jobs] pg-boss error:', msg);
+        }
+      });
       await boss.start();
 
       // JOB-2: create any dead-letter queues referenced by handlers BEFORE the queues
