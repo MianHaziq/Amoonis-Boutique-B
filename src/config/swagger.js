@@ -182,6 +182,7 @@ const options = {
             consumerProtectionAuthority_ar: { type: 'string', nullable: true },
             standardsAuthority: { type: 'string', nullable: true, example: 'Emirates Authority for Standardisation and Metrology (ESMA)' },
             standardsAuthority_ar: { type: 'string', nullable: true },
+            shortAddressEnabled: { type: 'boolean', example: false, description: 'When true, checkout in this region shows and REQUIRES the Saudi National Address short code (4 letters + 4 digits). Only enable for Saudi Arabia; default false so other regions are not blocked by this field.' },
             isDefault: { type: 'boolean', description: 'The region used when the client sends no/unknown X-Region. Exactly one region is default.' },
             isActive: { type: 'boolean', description: 'Inactive regions are hidden from the public GET /regions list and cannot be selected.' },
             sortOrder: { type: 'integer', example: 0 },
