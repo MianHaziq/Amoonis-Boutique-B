@@ -41,6 +41,7 @@ const REGION_SELECT = {
   onlinePaymentEnabled: true,
   applePayEnabled: true,
   cardPaymentEnabled: true,
+  shortAddressEnabled: true,
   iso2: true,
   urlSlug: true,
   contactEmail: true,
@@ -112,6 +113,9 @@ function buildRegionDeliveryConfigPayload(data, { partial = false } = {}) {
   // codEnabled/sameDayEnabled convention above.
   set('applePayEnabled', data.applePayEnabled != null, parseBool(data.applePayEnabled, true));
   set('cardPaymentEnabled', data.cardPaymentEnabled != null, parseBool(data.cardPaymentEnabled, true));
+  // shortAddressEnabled is a non-nullable column defaulting to false; on a partial update a
+  // stray null means "leave unchanged" (gate on != null), matching the codEnabled convention.
+  set('shortAddressEnabled', data.shortAddressEnabled != null, parseBool(data.shortAddressEnabled, false));
   return payload;
 }
 
